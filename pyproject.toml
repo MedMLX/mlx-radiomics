@@ -25,7 +25,7 @@ keywords = [
   "feature-extraction",
 ]
 name = "mlxradiomics"
-version = "1.0.0"
+version = "1.0.1"
 description = "Extract radiomics features and voxel maps on the Apple Silicon GPU with native MLX"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"

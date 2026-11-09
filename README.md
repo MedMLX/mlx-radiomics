@@ -30,7 +30,7 @@ Requires Apple Silicon with Metal.
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install mlxradiomics
+uv pip install "mlxradiomics>=1.0.1"
 ```
 
 Install `mlxradiomics[lbp]` for LBP3D derived images.

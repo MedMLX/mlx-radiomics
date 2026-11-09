@@ -1,5 +1,11 @@
 # Release notes
 
+## 1.0.1
+
+The README and getting-started guide install with
+`uv pip install "mlxradiomics>=1.0.1"`, matching medmlx.org. There are no code
+changes; 1.0.0 users do not need to upgrade.
+
 ## 1.0.0
 
 First stable release. mlxradiomics extracts radiomics features and voxel maps on
