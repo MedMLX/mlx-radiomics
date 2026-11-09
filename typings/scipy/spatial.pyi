@@ -1,0 +1,13 @@
+import numpy as np
+from numpy.typing import NDArray
+
+class SphericalVoronoi:
+    def __init__(self, points: NDArray[np.float64], radius: float = 1.0) -> None: ...
+    def calculate_areas(self) -> NDArray[np.float64]: ...
+
+class QhullError(RuntimeError): ...
+
+class ConvexHull:
+    vertices: NDArray[np.int32]
+    simplices: NDArray[np.int32]
+    def __init__(self, points: NDArray[np.float64]) -> None: ...

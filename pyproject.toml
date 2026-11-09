@@ -1,0 +1,123 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Processing",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+keywords = [
+  "mlx",
+  "apple-silicon",
+  "metal",
+  "medical-imaging",
+  "radiomics",
+  "pyradiomics",
+  "feature-extraction",
+]
+name = "mlxradiomics"
+version = "1.0.0"
+description = "Extract radiomics features and voxel maps on the Apple Silicon GPU with native MLX"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0 AND MIT AND BSD-3-Clause AND CC-BY-4.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+dependencies = [
+  "numpy>=2.0,<3",
+  "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "medmlx-core>=0.2.6,<0.3",
+  "nibabel>=5.3,<6",
+  "isal>=1.9.1,<2",
+  "SimpleITK==2.5.6",
+  "PyYAML>=6,<7",
+  "scipy>=1.16.3,<2",
+]
+authors = [
+  { name = "Joseph Sandoval" },
+  { name = "Alfredo Sandoval Jr." },
+]
+
+[project.urls]
+Homepage = "https://medmlx.org"
+Documentation = "https://github.com/MedMLX/mlx-radiomics/blob/main/README.md"
+Repository = "https://github.com/MedMLX/mlx-radiomics"
+Issues = "https://github.com/MedMLX/mlx-radiomics/issues"
+MedMLX = "https://github.com/MedMLX/medmlx"
+
+[project.optional-dependencies]
+lbp = ["scipy==1.18.1", "trimesh==4.9.0"]
+viz = ["matplotlib>=3.10,<4"]
+
+[project.entry-points."medmlx.models"]
+mlxradiomics = "mlxradiomics.medmlx:MODEL"
+
+
+[dependency-groups]
+dev = [
+  "matplotlib==3.11.2",
+  "pytest==9.1.1",
+  "scikit-image==0.26.0",
+  "scipy==1.16.3",
+  "trimesh==4.9.0",
+  "ruff==0.15.21",
+  "pyright==1.1.414",
+  "PyWavelets==1.10.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlxradiomics"]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+conflicts = [[{ extra = "lbp" }, { group = "dev" }]]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["TID251", "TID252", "ANN401"]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests", "scripts", "examples", "typings"]
+stubPath = "typings"
+extraPaths = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any" = {msg = "Use a precise type and parse untyped values at the boundary."}
+"typing_extensions.Any" = {msg = "Use a precise type and parse untyped values at the boundary."}
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/mlxradiomics",
+  "pyproject.toml",
+  ".gitignore",
+  "README.md",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+]
+ignore-vcs = true

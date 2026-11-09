@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/MedMLX/.github/discussions/categories/q-a
+    about: Get help with installation or usage.
+  - name: Share your work
+    url: https://github.com/MedMLX/.github/discussions/categories/show-and-tell
+    about: Share a research project, tool or workflow using mlx-radiomics.

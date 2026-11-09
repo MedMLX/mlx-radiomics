@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: mlx-radiomics
+abstract: Radiomics features and voxel maps on the Apple Silicon GPU with native MLX.
+type: software
+version: 1.0.0
+date-released: 2026-11-08
+license: Apache-2.0
+repository-code: https://github.com/MedMLX/mlx-radiomics
+url: https://medmlx.org
+authors:
+  - family-names: Sandoval
+    given-names: Joseph
+  - family-names: Sandoval
+    given-names: Alfredo
+    name-suffix: Jr.
+keywords:
+  - radiomics
+  - mlx
+  - apple-silicon
+  - medical-imaging

@@ -1,0 +1,13 @@
+/* Inline code: drop Furo's paragraph outline, and keep code inside links plain. */
+code.literal,
+p code.literal,
+p .sig-inline {
+  border: none;
+}
+
+a code.literal,
+a.reference code.xref {
+  background: none;
+  padding: 0;
+  color: inherit;
+}

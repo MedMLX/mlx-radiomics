@@ -1,0 +1,1728 @@
+{
+ "attribution": "Feature definitions and permanent identifiers derived from the IBSI reference manual, CC BY 4.0; implementations and acceptance references are independent.",
+ "source_license": "https://creativecommons.org/licenses/by/4.0/",
+ "definitions": [
+  {
+   "id": "RNU0",
+   "title": "Volume (mesh)",
+   "units": "mm^3",
+   "public_names": [
+    "shape_MeshVolume"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_volume"
+  },
+  {
+   "id": "YEKZ",
+   "title": "Volume (voxel counting)",
+   "units": "mm^3",
+   "public_names": [
+    "shape_VoxelVolume"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_approx_volume"
+  },
+  {
+   "id": "C0JK",
+   "title": "Surface area (mesh)",
+   "units": "mm^2",
+   "public_names": [
+    "shape_SurfaceArea"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area"
+  },
+  {
+   "id": "2PR5",
+   "title": "Surface to volume ratio",
+   "units": "mm^-1",
+   "public_names": [
+    "shape_SurfaceVolumeRatio"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_surface_volume_ratio"
+  },
+  {
+   "id": "SKGS",
+   "title": "Compactness 1",
+   "units": "1",
+   "public_names": [
+    "shape_Compactness1"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_comp_1"
+  },
+  {
+   "id": "BQWJ",
+   "title": "Compactness 2",
+   "units": "1",
+   "public_names": [
+    "shape_Compactness2"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_comp_2"
+  },
+  {
+   "id": "KRCK",
+   "title": "Spherical disproportion",
+   "units": "1",
+   "public_names": [
+    "shape_SphericalDisproportion"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_sph_dispr"
+  },
+  {
+   "id": "QCFX",
+   "title": "Sphericity",
+   "units": "1",
+   "public_names": [
+    "shape_Sphericity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_sphericity"
+  },
+  {
+   "id": "25C7",
+   "title": "Asphericity",
+   "units": "1",
+   "public_names": [
+    "shape_Asphericity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_asphericity"
+  },
+  {
+   "id": "KLMA",
+   "title": "Centre of mass shift",
+   "units": "mm",
+   "public_names": [
+    "shape_CentreOfMassShift"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_centre_of_mass_shift"
+  },
+  {
+   "id": "L0JK",
+   "title": "Maximum 3D diameter",
+   "units": "mm",
+   "public_names": [
+    "shape_Maximum3DDiameter"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_max_3d_diam"
+  },
+  {
+   "id": "TDIC",
+   "title": "Major axis length",
+   "units": "mm",
+   "public_names": [
+    "shape_MajorAxisLength"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_pca_major"
+  },
+  {
+   "id": "P9VJ",
+   "title": "Minor axis length",
+   "units": "mm",
+   "public_names": [
+    "shape_MinorAxisLength"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_pca_minor"
+  },
+  {
+   "id": "7J51",
+   "title": "Least axis length",
+   "units": "mm",
+   "public_names": [
+    "shape_LeastAxisLength"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_pca_least"
+  },
+  {
+   "id": "Q3CK",
+   "title": "Elongation",
+   "units": "1",
+   "public_names": [
+    "shape_Elongation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_pca_elongation"
+  },
+  {
+   "id": "N17B",
+   "title": "Flatness",
+   "units": "1",
+   "public_names": [
+    "shape_Flatness"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_pca_flatness"
+  },
+  {
+   "id": "PBX1",
+   "title": "Volume density (axis-aligned bounding box)",
+   "units": "1",
+   "public_names": [
+    "shape_VolumeDensityAxisAlignedBoundingBox"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_vol_dens_aabb"
+  },
+  {
+   "id": "R59B",
+   "title": "Area density (axis-aligned bounding box)",
+   "units": "1",
+   "public_names": [
+    "shape_AreaDensityAxisAlignedBoundingBox"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area_dens_aab"
+  },
+  {
+   "id": "ZH1A",
+   "title": "Volume density (oriented minimum bounding box)",
+   "units": "1",
+   "public_names": [
+    "shape_VolumeDensityOrientedMinimumBoundingBox"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_vol_dens_ombb"
+  },
+  {
+   "id": "IQYR",
+   "title": "Area density (oriented minimum bounding box)",
+   "units": "1",
+   "public_names": [
+    "shape_AreaDensityOrientedMinimumBoundingBox"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area_dens_ombb"
+  },
+  {
+   "id": "6BDE",
+   "title": "Volume density (approximate enclosing ellipsoid)",
+   "units": "1",
+   "public_names": [
+    "shape_VolumeDensityApproximateEnclosingEllipsoid"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_vol_dens_aee"
+  },
+  {
+   "id": "RDD2",
+   "title": "Area density (approximate enclosing ellipsoid)",
+   "units": "1",
+   "public_names": [
+    "shape_AreaDensityApproximateEnclosingEllipsoid"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area_dens_aee"
+  },
+  {
+   "id": "SWZ1",
+   "title": "Volume density (minimum volume enclosing ellipsoid)",
+   "units": "1",
+   "public_names": [
+    "shape_VolumeDensityMinimumVolumeEnclosingEllipsoid"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_vol_dens_mvee"
+  },
+  {
+   "id": "BRI8",
+   "title": "Area density (minimum volume enclosing ellipsoid)",
+   "units": "1",
+   "public_names": [
+    "shape_AreaDensityMinimumVolumeEnclosingEllipsoid"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area_dens_mvee"
+  },
+  {
+   "id": "R3ER",
+   "title": "Volume density (convex hull)",
+   "units": "1",
+   "public_names": [
+    "shape_VolumeDensityConvexHull"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_vol_dens_conv_hull"
+  },
+  {
+   "id": "7T7F",
+   "title": "Area density (convex hull)",
+   "units": "1",
+   "public_names": [
+    "shape_AreaDensityConvexHull"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_area_dens_conv_hull"
+  },
+  {
+   "id": "99N0",
+   "title": "Integrated intensity",
+   "units": "intensity*mm^3",
+   "public_names": [
+    "shape_IntegratedIntensity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_integrated_intensity"
+  },
+  {
+   "id": "N365",
+   "title": "Moran’s I index",
+   "units": "1",
+   "public_names": [
+    "shape_MoransI"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_moran_i"
+  },
+  {
+   "id": "NPT7",
+   "title": "Geary’s C measure",
+   "units": "1",
+   "public_names": [
+    "shape_GearysC"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_morph_geary_c"
+  },
+  {
+   "id": "VJGA",
+   "title": "Local intensity peak",
+   "units": "intensity",
+   "public_names": [
+    "localintensity_LocalIntensityPeak"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_loc_int_local_peak"
+  },
+  {
+   "id": "0F91",
+   "title": "Global intensity peak",
+   "units": "intensity",
+   "public_names": [
+    "localintensity_GlobalIntensityPeak"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_loc_int_global_peak"
+  },
+  {
+   "id": "Q4LE",
+   "title": "Mean intensity",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_Mean"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_mean"
+  },
+  {
+   "id": "ECT3",
+   "title": "Intensity variance",
+   "units": "intensity^2",
+   "public_names": [
+    "firstorder_Variance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_variance"
+  },
+  {
+   "id": "KE2A",
+   "title": "Intensity skewness",
+   "units": "1",
+   "public_names": [
+    "firstorder_Skewness"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_skewness"
+  },
+  {
+   "id": "IPH6",
+   "title": "(Excess) intensity kurtosis",
+   "units": "1",
+   "public_names": [
+    "firstorder_Kurtosis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_kurtosis"
+  },
+  {
+   "id": "Y12H",
+   "title": "Median intensity",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_Median"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_median"
+  },
+  {
+   "id": "1GSF",
+   "title": "Minimum intensity",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_Minimum"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_minimum"
+  },
+  {
+   "id": "QG58",
+   "title": "10\\ :sup:`th` intensity percentile",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_10Percentile"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_p10"
+  },
+  {
+   "id": "8DWT",
+   "title": "90\\ :sup:`th` intensity percentile",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_90Percentile"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_p90"
+  },
+  {
+   "id": "84IY",
+   "title": "Maximum intensity",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_Maximum"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_maximum"
+  },
+  {
+   "id": "SALO",
+   "title": "Intensity interquartile range",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_InterquartileRange"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_iqr"
+  },
+  {
+   "id": "2OJQ",
+   "title": "Intensity range",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_Range"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_range"
+  },
+  {
+   "id": "4FUA",
+   "title": "Intensity-based mean absolute deviation",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_MeanAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_mean_absolute_dev"
+  },
+  {
+   "id": "1128",
+   "title": "Intensity-based robust mean absolute deviation",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_RobustMeanAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_robust_mean_absolute_dev"
+  },
+  {
+   "id": "N72L",
+   "title": "Intensity-based median absolute deviation",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_MedianAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_median_absolute_dev"
+  },
+  {
+   "id": "7TET",
+   "title": "Intensity-based coefficient of variation",
+   "units": "1",
+   "public_names": [
+    "firstorder_CoefficientOfVariation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_coef_of_variation"
+  },
+  {
+   "id": "9S40",
+   "title": "Intensity-based quartile coefficient of dispersion",
+   "units": "1",
+   "public_names": [
+    "firstorder_QuartileCoefficientOfDispersion"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_quartile_coef_dispersion"
+  },
+  {
+   "id": "N8CA",
+   "title": "Intensity-based energy",
+   "units": "intensity^2",
+   "public_names": [
+    "firstorder_Energy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_energy"
+  },
+  {
+   "id": "5ZWQ",
+   "title": "Root mean square intensity",
+   "units": "intensity",
+   "public_names": [
+    "firstorder_RootMeanSquared"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_stat_root_mean_square"
+  },
+  {
+   "id": "X6K6",
+   "title": "Mean discretised intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Mean"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_mean"
+  },
+  {
+   "id": "CH89",
+   "title": "Discretised intensity variance",
+   "units": "gray-level index^2",
+   "public_names": [
+    "intensityhistogram_Variance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_variance"
+  },
+  {
+   "id": "88K1",
+   "title": "Discretised intensity skewness",
+   "units": "1",
+   "public_names": [
+    "intensityhistogram_Skewness"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_skewness"
+  },
+  {
+   "id": "C3I7",
+   "title": "(Excess) discretised intensity kurtosis",
+   "units": "1",
+   "public_names": [
+    "intensityhistogram_Kurtosis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_kurtosis"
+  },
+  {
+   "id": "WIFQ",
+   "title": "Median discretised intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Median"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_median"
+  },
+  {
+   "id": "1PR8",
+   "title": "Minimum discretised intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Minimum"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_minimum"
+  },
+  {
+   "id": "GPMT",
+   "title": "10\\ :sup:`th` discretised intensity percentile",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_10Percentile"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_p10"
+  },
+  {
+   "id": "OZ0C",
+   "title": "90\\ :sup:`th` discretised intensity percentile",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_90Percentile"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_p90"
+  },
+  {
+   "id": "3NCY",
+   "title": "Maximum discretised intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Maximum"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_maximum"
+  },
+  {
+   "id": "AMMC",
+   "title": "Intensity histogram mode",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Mode"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_mode"
+  },
+  {
+   "id": "WR0O",
+   "title": "Discretised intensity interquartile range",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_InterquartileRange"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_iqr"
+  },
+  {
+   "id": "5Z3W",
+   "title": "Discretised intensity range",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_Range"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_range"
+  },
+  {
+   "id": "D2ZX",
+   "title": "Intensity histogram mean absolute deviation",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_MeanAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_mean_absolute_dev"
+  },
+  {
+   "id": "WRZB",
+   "title": "Intensity histogram robust mean absolute deviation",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_RobustMeanAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_robust_mean_absolute_dev"
+  },
+  {
+   "id": "4RNL",
+   "title": "Intensity histogram median absolute deviation",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_MedianAbsoluteDeviation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_median_absolute_dev"
+  },
+  {
+   "id": "CWYJ",
+   "title": "Intensity histogram coefficient of variation",
+   "units": "1",
+   "public_names": [
+    "intensityhistogram_CoefficientOfVariation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_coef_of_variation"
+  },
+  {
+   "id": "SLWD",
+   "title": "Intensity histogram quartile coefficient of dispersion",
+   "units": "1",
+   "public_names": [
+    "intensityhistogram_QuartileCoefficientOfDispersion"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_quartile_coef_dispersion"
+  },
+  {
+   "id": "TLU2",
+   "title": "Discretised intensity entropy",
+   "units": "bit",
+   "public_names": [
+    "intensityhistogram_Entropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_entropy"
+  },
+  {
+   "id": "BJ5W",
+   "title": "Discretised intensity uniformity",
+   "units": "1",
+   "public_names": [
+    "intensityhistogram_Uniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_uniformity"
+  },
+  {
+   "id": "12CE",
+   "title": "Maximum histogram gradient",
+   "units": "voxel count",
+   "public_names": [
+    "intensityhistogram_MaximumGradient"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_max_gradient"
+  },
+  {
+   "id": "8E6O",
+   "title": "Maximum histogram gradient intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_MaximumGradientGrayLevel"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_max_gradient_intensity"
+  },
+  {
+   "id": "VQB3",
+   "title": "Minimum histogram gradient",
+   "units": "voxel count",
+   "public_names": [
+    "intensityhistogram_MinimumGradient"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_min_gradient"
+  },
+  {
+   "id": "RHQZ",
+   "title": "Minimum histogram gradient intensity",
+   "units": "gray-level index",
+   "public_names": [
+    "intensityhistogram_MinimumGradientGrayLevel"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_hist_min_gradient_intensity"
+  },
+  {
+   "id": "BC2M",
+   "title": "Volume at intensity fraction",
+   "units": "1",
+   "public_names": [
+    "ivh_VolumeAtIntensityFraction10",
+    "ivh_VolumeAtIntensityFraction90"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_vol_hist_volume_at_intensity"
+  },
+  {
+   "id": "GBPN",
+   "title": "Intensity at volume fraction",
+   "units": "calibrated intensity (unit/fixed width) or bin index (fixed count)",
+   "public_names": [
+    "ivh_IntensityAtVolumeFraction10",
+    "ivh_IntensityAtVolumeFraction90"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_vol_hist_intensity_at_volume"
+  },
+  {
+   "id": "DDTU",
+   "title": "Volume fraction difference between intensity fractions",
+   "units": "1",
+   "public_names": [
+    "ivh_VolumeFractionDifference"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_vol_hist_volume_at_intensity_difference"
+  },
+  {
+   "id": "CNV2",
+   "title": "Intensity fraction difference between volume fractions",
+   "units": "calibrated intensity (unit/fixed width) or bin index (fixed count)",
+   "public_names": [
+    "ivh_IntensityFractionDifference"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_vol_hist_intensity_at_volume_difference"
+  },
+  {
+   "id": "9CMM",
+   "title": "Area under the IVH curve",
+   "units": "1",
+   "public_names": [
+    "ivh_AreaUnderIVHCurve"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_int_vol_hist_area"
+  },
+  {
+   "id": "GYBY",
+   "title": "Joint maximum",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_MaximumProbability"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_joint_maximum"
+  },
+  {
+   "id": "60VM",
+   "title": "Joint average",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_JointAverage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_joint_average"
+  },
+  {
+   "id": "UR99",
+   "title": "Joint variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_SumSquares"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_joint_variance"
+  },
+  {
+   "id": "TU9B",
+   "title": "Joint entropy",
+   "units": "bit",
+   "public_names": [
+    "glcm_JointEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_joint_entropy"
+  },
+  {
+   "id": "TF7R",
+   "title": "Difference average",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_DifferenceAverage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_difference_average"
+  },
+  {
+   "id": "D3YU",
+   "title": "Difference variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_DifferenceVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_difference_variance"
+  },
+  {
+   "id": "NTRS",
+   "title": "Difference entropy",
+   "units": "bit",
+   "public_names": [
+    "glcm_DifferenceEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_difference_entropy"
+  },
+  {
+   "id": "ZGXS",
+   "title": "Sum average",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_SumAverage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_sum_average"
+  },
+  {
+   "id": "OEEB",
+   "title": "Sum variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_SumVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_sum_variance"
+  },
+  {
+   "id": "P6QZ",
+   "title": "Sum entropy",
+   "units": "bit",
+   "public_names": [
+    "glcm_SumEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_sum_ENTROPY"
+  },
+  {
+   "id": "8ZQL",
+   "title": "Angular second moment",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_JointEnergy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_uniformity"
+  },
+  {
+   "id": "ACUI",
+   "title": "Contrast",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Contrast"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_contrast"
+  },
+  {
+   "id": "8S9J",
+   "title": "Dissimilarity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Dissimilarity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_dissimilarity"
+  },
+  {
+   "id": "IB1Z",
+   "title": "Inverse difference",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Id"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_inverse_difference"
+  },
+  {
+   "id": "NDRX",
+   "title": "Normalised inverse difference",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Idn"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_inverse_difference_normalised"
+  },
+  {
+   "id": "WF0Z",
+   "title": "Inverse difference moment",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Idm"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_inverse_difference_moment"
+  },
+  {
+   "id": "1QCO",
+   "title": "Normalised inverse difference moment",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Idmn"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_inverse_difference_moment_normalised"
+  },
+  {
+   "id": "E8JP",
+   "title": "Inverse variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_InverseVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_inverse_variance"
+  },
+  {
+   "id": "NI2N",
+   "title": "Correlation",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Correlation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_correlation"
+  },
+  {
+   "id": "QWB0",
+   "title": "Autocorrelation",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Autocorrelation"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_autocorrelation"
+  },
+  {
+   "id": "DG8W",
+   "title": "Cluster tendency",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_ClusterTendency"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_cluster_tendency"
+  },
+  {
+   "id": "7NFM",
+   "title": "Cluster shade",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_ClusterShade"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_cluster_shade"
+  },
+  {
+   "id": "AE86",
+   "title": "Cluster prominence",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_ClusterProminence"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_cluster_prominence"
+  },
+  {
+   "id": "R8DG",
+   "title": "Information correlation 1",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Imc1"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_information_corr_1"
+  },
+  {
+   "id": "JN9H",
+   "title": "Information correlation 2",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glcm_Imc2"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_cm_information_corr_2"
+  },
+  {
+   "id": "22OV",
+   "title": "Short runs emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_ShortRunEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_short_runs_emphasis"
+  },
+  {
+   "id": "W4KF",
+   "title": "Long runs emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_LongRunEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_long_runs_emphasis"
+  },
+  {
+   "id": "V3SW",
+   "title": "Low grey level run emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_LowGrayLevelRunEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_low_grey_level_run_emphasis"
+  },
+  {
+   "id": "G3QZ",
+   "title": "High grey level run emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_HighGrayLevelRunEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_high_grey_level_run_emphasis"
+  },
+  {
+   "id": "HTZT",
+   "title": "Short run low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_ShortRunLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_short_run_low_grey_level_emphasis"
+  },
+  {
+   "id": "GD3A",
+   "title": "Short run high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_ShortRunHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_short_run_high_grey_level_emphasis"
+  },
+  {
+   "id": "IVPO",
+   "title": "Long run low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_LongRunLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_long_run_low_grey_level_emphasis"
+  },
+  {
+   "id": "3KUM",
+   "title": "Long run high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_LongRunHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_long_run_high_grey_level_emphasis"
+  },
+  {
+   "id": "R5YN",
+   "title": "Grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_GrayLevelNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_grey_level_non_uniformity"
+  },
+  {
+   "id": "OVBL",
+   "title": "Normalised grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_GrayLevelNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_grey_level_non_uniformity_normalised"
+  },
+  {
+   "id": "W92Y",
+   "title": "Run length non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_RunLengthNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_run_length_non_uniformity"
+  },
+  {
+   "id": "IC23",
+   "title": "Normalised run length non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_RunLengthNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_run_length_non_uniformity_normalised"
+  },
+  {
+   "id": "9ZK5",
+   "title": "Run percentage",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_RunPercentage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_run_percentage"
+  },
+  {
+   "id": "8CE5",
+   "title": "Grey level variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_GrayLevelVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_grey_level_variance"
+  },
+  {
+   "id": "SXLW",
+   "title": "Run length variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glrlm_RunVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_run_length_variance"
+  },
+  {
+   "id": "HJ9O",
+   "title": "Run entropy",
+   "units": "bit",
+   "public_names": [
+    "glrlm_RunEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_rlm_run_entropy"
+  },
+  {
+   "id": "48P8",
+   "title": "Large zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_LargeAreaEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_large_zone_emphasis"
+  },
+  {
+   "id": "XMSY",
+   "title": "Low grey level zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_LowGrayLevelZoneEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_low_grey_level_zone_emphasis"
+  },
+  {
+   "id": "5GN9",
+   "title": "High grey level zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_HighGrayLevelZoneEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_high_grey_level_zone_emphasis"
+  },
+  {
+   "id": "5RAI",
+   "title": "Small zone low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_SmallAreaLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_small_zone_low_grey_level_emphasis"
+  },
+  {
+   "id": "HW1V",
+   "title": "Small zone high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_SmallAreaHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_small_zone_high_grey_level_emphasis"
+  },
+  {
+   "id": "YH51",
+   "title": "Large zone low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_LargeAreaLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_large_zone_low_grey_level_emphasis"
+  },
+  {
+   "id": "J17V",
+   "title": "Large zone high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_LargeAreaHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_large_zone_high_grey_level_emphasis"
+  },
+  {
+   "id": "JNSA",
+   "title": "Grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_GrayLevelNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_grey_level_non_uniformity"
+  },
+  {
+   "id": "Y1RO",
+   "title": "Normalised grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_GrayLevelNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_grey_level_non_uniformity_normalised"
+  },
+  {
+   "id": "4JP3",
+   "title": "Zone size non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_SizeZoneNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_zone_size_non_uniformity"
+  },
+  {
+   "id": "VB3A",
+   "title": "Normalised zone size non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_SizeZoneNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_zone_size_non_uniformity_normalised"
+  },
+  {
+   "id": "P30P",
+   "title": "Zone percentage",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_ZonePercentage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_zone_percentage"
+  },
+  {
+   "id": "BYLV",
+   "title": "Grey level variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_GrayLevelVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_grey_level_variance"
+  },
+  {
+   "id": "3NSA",
+   "title": "Zone size variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_ZoneVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_zone_size_variance"
+  },
+  {
+   "id": "GU8N",
+   "title": "Zone size entropy",
+   "units": "bit",
+   "public_names": [
+    "glszm_ZoneEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_szm_zone_size_entropy"
+  },
+  {
+   "id": "0GBI",
+   "title": "Small distance emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_SmallDistanceEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_small_distance_emphasis"
+  },
+  {
+   "id": "MB4I",
+   "title": "Large distance emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_LargeDistanceEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_large_distance_emphasis"
+  },
+  {
+   "id": "S1RA",
+   "title": "Low grey level zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_LowGrayLevelZoneEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_low_grey_level_zone_emphasis"
+  },
+  {
+   "id": "K26C",
+   "title": "High grey level zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_HighGrayLevelZoneEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_high_grey_level_zone_emphasis"
+  },
+  {
+   "id": "RUVG",
+   "title": "Small distance low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_SmallDistanceLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_small_distance_low_grey_level_emphasis"
+  },
+  {
+   "id": "DKNJ",
+   "title": "Small distance high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_SmallDistanceHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_small_distance_high_grey_level_emphasis"
+  },
+  {
+   "id": "A7WM",
+   "title": "Large distance low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_LargeDistanceLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_large_distance_low_grey_level_emphasis"
+  },
+  {
+   "id": "KLTH",
+   "title": "Large distance high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_LargeDistanceHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_large_distance_high_grey_level_emphasis"
+  },
+  {
+   "id": "VFT7",
+   "title": "Grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_GrayLevelNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_grey_level_non_uniformity"
+  },
+  {
+   "id": "7HP3",
+   "title": "Normalised grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_GrayLevelNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_grey_level_non_uniformity_normalised"
+  },
+  {
+   "id": "V294",
+   "title": "Zone distance non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_ZoneDistanceNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_zone_distance_non_uniformity"
+  },
+  {
+   "id": "IATH",
+   "title": "Normalised zone distance non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_ZoneDistanceNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_zone_distance_non_uniformity_normalised"
+  },
+  {
+   "id": "VIWW",
+   "title": "Zone percentage",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_ZonePercentage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_zone_percentage"
+  },
+  {
+   "id": "QK93",
+   "title": "Grey level variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_GrayLevelVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_grey_level_variance"
+  },
+  {
+   "id": "7WT1",
+   "title": "Zone distance variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldzm_ZoneDistanceVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_zone_distance_variance"
+  },
+  {
+   "id": "GBDU",
+   "title": "Zone distance entropy",
+   "units": "bit",
+   "public_names": [
+    "gldzm_ZoneDistanceEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_dzm_zone_distance_entropy"
+  },
+  {
+   "id": "QCDE",
+   "title": "Coarseness",
+   "units": "gray-level index^-1",
+   "public_names": [
+    "ngtdm_Coarseness"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngtdm_coarseness"
+  },
+  {
+   "id": "65HE",
+   "title": "Contrast",
+   "units": "gray-level index^3",
+   "public_names": [
+    "ngtdm_Contrast"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngtdm_contrast"
+  },
+  {
+   "id": "NQ30",
+   "title": "Busyness",
+   "units": "1",
+   "public_names": [
+    "ngtdm_Busyness"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngtdm_busyness"
+  },
+  {
+   "id": "HDEZ",
+   "title": "Complexity",
+   "units": "gray-level index^2",
+   "public_names": [
+    "ngtdm_Complexity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngtdm_complexity"
+  },
+  {
+   "id": "1X9X",
+   "title": "Strength",
+   "units": "gray-level index",
+   "public_names": [
+    "ngtdm_Strength"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngtdm_strength"
+  },
+  {
+   "id": "SODN",
+   "title": "Low dependence emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_SmallDependenceEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_low_dependence_emphasis"
+  },
+  {
+   "id": "IMOQ",
+   "title": "High dependence emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_LargeDependenceEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_high_dependence_emphasis"
+  },
+  {
+   "id": "TL9H",
+   "title": "Low grey level count emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_LowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_low_grey_level_count_emphasis"
+  },
+  {
+   "id": "OAE7",
+   "title": "High grey level count emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_HighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_high_grey_level_count_emphasis"
+  },
+  {
+   "id": "EQ3F",
+   "title": "Low dependence low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_SmallDependenceLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_low_dependence_low_grey_level_emphasis"
+  },
+  {
+   "id": "JA6D",
+   "title": "Low dependence high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_SmallDependenceHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_low_dependence_high_grey_level_emphasis"
+  },
+  {
+   "id": "NBZI",
+   "title": "High dependence low grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_LargeDependenceLowGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_high_dependence_low_grey_level_emphasis"
+  },
+  {
+   "id": "9QMG",
+   "title": "High dependence high grey level emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_LargeDependenceHighGrayLevelEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_high_dependence_high_grey_level_emphasis"
+  },
+  {
+   "id": "FP8K",
+   "title": "Grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_GrayLevelNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_grey_level_non_uniformity"
+  },
+  {
+   "id": "5SPA",
+   "title": "Normalised grey level non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_GrayLevelNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_grey_level_non_uniformity_normalised"
+  },
+  {
+   "id": "Z87G",
+   "title": "Dependence count non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_DependenceNonUniformity"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_dependence_count_non_uniformity"
+  },
+  {
+   "id": "OKJI",
+   "title": "Normalised dependence count non-uniformity",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_DependenceNonUniformityNormalized"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_normalised_dependence_count_non_uniformity"
+  },
+  {
+   "id": "6XV8",
+   "title": "Dependence count percentage",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_DependencePercentage"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_dependence_count_percentage"
+  },
+  {
+   "id": "1PFV",
+   "title": "Grey level variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_GrayLevelVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_grey_level_variance"
+  },
+  {
+   "id": "DNX2",
+   "title": "Dependence count variance",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_DependenceVariance"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_dependence_count_variance"
+  },
+  {
+   "id": "FCBV",
+   "title": "Dependence count entropy",
+   "units": "bit",
+   "public_names": [
+    "gldm_DependenceEntropy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_dependence_count_entropy"
+  },
+  {
+   "id": "CAS9",
+   "title": "Dependence count energy",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "gldm_DependenceCountEnergy"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "feat_ngldm_dependence_count_energy"
+  },
+  {
+   "id": "5QRC",
+   "title": "Small zone emphasis",
+   "units": "1 (discrete index powers retained by formula)",
+   "public_names": [
+    "glszm_SmallAreaEmphasis"
+   ],
+   "source": "https://github.com/theibsi/ibsi-doc/blob/b952e71e9d40569e8a9ff3c740bc389c04dd6c28/docs/03_Image_features.rst",
+   "source_section": "small-zone-emphasis"
+  }
+ ]
+}
