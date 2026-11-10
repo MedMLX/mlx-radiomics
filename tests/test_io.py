@@ -32,7 +32,10 @@ class _WritableNifti(Protocol):
 class _NiftiWriter(Protocol):
     def Nifti1Image(
         self, dataobj: NDArray[np.int16], affine: NDArray[np.float64],
+        *, header: object | None = None,
     ) -> _WritableNifti: ...
+
+    def Nifti1Header(self, *, endianness: str) -> object: ...
 
     def save(self, image: _WritableNifti, filename: str) -> None: ...
 
@@ -457,7 +460,10 @@ def test_spatial_paths_do_not_merge_large_adjacent_labels(tmp_path: Path, mode: 
 
 
 @pytest.mark.parametrize("ndim", [2, 3])
-def test_scaled_nifti_applies_scaling_and_lps_axis_conventions(tmp_path: Path, ndim: int) -> None:
+@pytest.mark.parametrize("endian", ["<", ">"])
+def test_scaled_nifti_applies_scaling_and_lps_axis_conventions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ndim: int, endian: str,
+) -> None:
     raw = np.arange(np.prod((4, 5, 6)[:ndim]), dtype=np.int16).reshape((4, 5, 6)[:ndim])
     affine = np.eye(4)
     cosine, sine = np.cos(0.37), np.sin(0.37)
@@ -465,10 +471,11 @@ def test_scaled_nifti_applies_scaling_and_lps_axis_conventions(tmp_path: Path, n
     affine[:3, :3] = direction @ np.diag((0.7, 1.3, 2.2))
     affine[:3, 3] = (11.0, -7.0, 4.0)
     writer = cast(_NiftiWriter, nib)
-    node = writer.Nifti1Image(raw, affine)
+    node = writer.Nifti1Image(raw, affine, header=writer.Nifti1Header(endianness=endian))
     node.header.set_slope_inter(2.5, -1024)
     path = tmp_path / "scaled.nii.gz"
     writer.save(node, str(path))
+    monkeypatch.setattr("mlxradiomics.imaging.io._NIFTI_VALIDATION_BYTES", 16)
     volume = read_image(path)
     np.testing.assert_array_equal(volume.array, raw.T * 2.5 - 1024)
     lps = np.diag((-1, -1, 1))[:ndim, :ndim]
@@ -492,15 +499,16 @@ def test_file_masks_preserve_uint64_label_values(tmp_path: Path, suffix: str, la
     np.testing.assert_array_equal(read_mask(path).array, labels)
 
 
-@pytest.mark.parametrize("suffix", [".nrrd", ".nii.gz"])
+@pytest.mark.parametrize("suffix", [".nrrd", ".nii", ".nii.gz"])
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")])
 def test_file_reader_rejects_nonfinite_source_voxels(
-    tmp_path: Path, suffix: str, nonfinite: float,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str, nonfinite: float,
 ) -> None:
     values = np.arange(30, dtype=np.float64).reshape(5, 6)
-    values[0, 0] = nonfinite
+    values[-1, -1] = nonfinite
     path = tmp_path / f"nonfinite{suffix}"
     sitk.WriteImage(sitk.GetImageFromArray(values), path)
+    monkeypatch.setattr("mlxradiomics.imaging.io._NIFTI_VALIDATION_BYTES", 16)
     with pytest.raises(ValueError, match="non-finite"):
         read_image(path)
 

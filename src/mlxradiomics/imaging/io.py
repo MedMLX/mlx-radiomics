@@ -9,22 +9,48 @@ from __future__ import annotations
 import dataclasses
 import gzip
 from collections.abc import Mapping
+from math import prod
 from pathlib import Path
 from typing import Protocol, cast
 
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 
 from mlxradiomics.contracts.types import HostArray
 
 _VOLUME_SUFFIXES = (".nii", ".nii.gz", ".nrrd", ".nhdr")
+_NIFTI_VALIDATION_BYTES = 16 * 1024 * 1024
+
+
+class _NiftiProxy(Protocol):
+    """Public NiBabel proxy metadata and scaled slicing used for validation."""
+
+    shape: tuple[int, ...]
+    dtype: np.dtype[np.generic]
+    offset: int
+    slope: float
+    inter: float
+
+    def __getitem__(self, key: slice, /) -> HostArray:
+        """Read one scaled contiguous storage-order block."""
+        ...
+
+
+class _NiftiProxyFactory(Protocol):
+    def __call__(
+        self, file_like: object,
+        spec: tuple[tuple[int, ...], np.dtype[np.generic], int, float, float],
+        *, mmap: bool,
+    ) -> _NiftiProxy:
+        """Construct the standard proxy over an explicitly owned file stream."""
+        ...
 
 
 class _NiftiImage(Protocol):
     """The part of a NiBabel image used to inspect stored voxel values."""
 
     @property
-    def dataobj(self) -> ArrayLike:
+    def dataobj(self) -> _NiftiProxy:
         """Expose scaled proxy data using its native dtype and required scaling precision."""
         ...
 
@@ -118,27 +144,58 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     if image.GetNumberOfComponentsPerPixel() != 1:
         raise ValueError(f"expected a single-channel volume: {source}")
     raw = sitk.GetArrayFromImage(image)
+    spacing, origin, direction = tuple(reversed(image.GetSpacing())), image.GetOrigin(), (
+        image.GetDirection()
+    )
+    # GetArrayFromImage owns its pixels; keep geometry, then release ITK's second
+    # full buffer before checking the independent NIfTI value representation.
+    del image
     if integer and raw.dtype.kind not in "biu":
         raise ValueError(f"mask must contain integer labels: {source}")
     array = np.asarray(raw)
-    if not integer and not np.all(np.isfinite(array)):
-        raise ValueError(f"image contains non-finite voxels: {source}")
+    if not integer:
+        flat = array.reshape(-1)
+        count = max(1, _NIFTI_VALIDATION_BYTES // max(array.itemsize, 8))
+        for start in range(0, array.size, count):
+            if not np.all(np.isfinite(flat[start:start + count])):
+                raise ValueError(f"image contains non-finite voxels: {source}")
     if not integer and source.name.endswith((".nii", ".nii.gz")):
-        import nibabel as nib
-
-        # ITK's NIfTI reader zeroes NaN and infinities before SimpleITK exposes
-        # the array; inspect scaled proxy values without imposing a float64 copy.
-        values: HostArray = np.asarray(cast(_NiftiReader, nib).load(source.as_posix()).dataobj)
-        if not np.all(np.isfinite(values)):
-            raise ValueError(f"image contains non-finite voxels: {source}")
+        _validate_nifti_values(source)
     return Volume(
         array=array,
         # SimpleITK orders spacing/origin/direction x-first; this package's arrays
         # follow NumPy axis order, so spacing (but not origin/direction) is reversed.
-        spacing=tuple(reversed(image.GetSpacing())),
-        origin=image.GetOrigin(),
-        direction=image.GetDirection(),
+        spacing=spacing,
+        origin=origin,
+        direction=direction,
     )
+
+
+def _validate_nifti_values(source: Path) -> None:
+    """Reject stored nonfinite values using bounded, forward-only proxy reads.
+
+    SimpleITK zeroes stored NaN/infinity. Preserve NiBabel's native dtype and
+    scaling, but validate a flat storage-order proxy over one owned stream so
+    gzip decompression never restarts between blocks. NiBabel 5.4's ``reshape``
+    loses ``keep_file_open``, so construct its documented proxy from public
+    metadata instead. No pixel values or geometry are taken from this check.
+    """
+    import nibabel as nib
+    from nibabel.arrayproxy import ArrayProxy
+
+    proxy = cast(_NiftiReader, nib).load(source.as_posix()).dataobj
+    size = prod(proxy.shape)
+    # Scaling can promote to float64 (complex128 for a complex source, which the
+    # volume contract later rejects). Bound both stored and scaled block payload.
+    count = max(1, _NIFTI_VALIDATION_BYTES // np.result_type(proxy.dtype, np.float64).itemsize)
+    factory = cast(_NiftiProxyFactory, ArrayProxy)
+    with gzip.open(source, "rb") if source.name.endswith(".gz") else source.open("rb") as stream:
+        flat = factory(
+            stream, ((size,), proxy.dtype, proxy.offset, proxy.slope, proxy.inter), mmap=False,
+        )
+        for start in range(0, size, count):
+            if not np.all(np.isfinite(flat[start:start + count])):
+                raise ValueError(f"image contains non-finite voxels: {source}")
 
 
 def read_image_dimension(path: str | Path) -> int:
