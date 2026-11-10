@@ -1,5 +1,6 @@
 """ROI windowing preserves source validation, global statistics and metadata."""
 
+from dataclasses import asdict, replace
 from typing import cast
 
 import numpy as np
@@ -99,3 +100,39 @@ def test_texture_window_still_rejects_unrepresentable_background_integers() -> N
     image[0, 0, 0] = 2**53 + 1
     with pytest.raises(ValueError, match="cannot represent exactly"):
         extract(image, mask, settings=Settings(features=("glcm_Contrast",)))
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize("resegment_shape", [False, True])
+def test_public_mixed_roi_preserves_features_validity_and_source_metadata(
+    normalize: bool, resegment_shape: bool,
+) -> None:
+    image = (np.arange(20 * 21 * 22).reshape(20, 21, 22) % 37 - 18).astype(np.float64)
+    mask = np.zeros(image.shape, dtype=np.uint8)
+    # Touch the source boundary so texture/local-intensity support is truncated
+    # at the image edge, independently of any preparation window.
+    mask[:3, 8:12, 9:13] = 1
+    settings = Settings(
+        features=("shape_VoxelVolume", "firstorder_Mean", "glcm_Contrast"),
+        normalize=normalize, resegment_shape=resegment_shape,
+        resegment_range=(-0.5, 1.0) if normalize else (-10.0, 12.0),
+    )
+    spacing = (0.8, 1.5, 2.0)
+    mixed = extract(image, mask, settings=settings, spacing=spacing)
+    singles = [extract(image, mask, settings=replace(settings, features=(name,)), spacing=spacing)
+               for name in settings.features]
+    assert mixed.features == {
+        key: value for item in singles for key, value in item.features.items()
+    }
+    assert mixed.metadata["feature_validity"] == {
+        key: value for item in singles for key, value in item.metadata["feature_validity"].items()
+    }
+    assert mixed.metadata["settings"] == asdict(settings)
+    assert mixed.metadata["array_shape"] == image.shape
+    assert mixed.metadata["array_dtype"] == str(image.dtype)
+    assert mixed.metadata["spacing"] == spacing
+    assert mixed.metadata["roi_voxels"] == singles[-1].metadata["roi_voxels"]
+    assert mixed.metadata["excluded_voxels"] == singles[-1].metadata["excluded_voxels"]
+    assert mixed.metadata.get("gray_levels_by_image") == {
+        "original": singles[-1].metadata["gray_levels"],
+    }
