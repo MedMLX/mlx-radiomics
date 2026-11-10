@@ -12,7 +12,7 @@ interpolated float32 binary ROI mask binarized at a partial-volume threshold.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from itertools import product
 from math import ceil
@@ -27,7 +27,7 @@ from mlxradiomics.config.spatial import IbsiInterpolation, ImageSettings, Interp
 from mlxradiomics.contracts.types import (
     ImageGeometryPayload,
 )
-from mlxradiomics.imaging.io import Volume, read_image, read_mask
+from mlxradiomics.imaging.io import Volume, read_image, read_image_dimension, read_mask
 from mlxradiomics.imaging.preprocessing import exact_float64, normalize_values, round_intensities
 
 if TYPE_CHECKING:
@@ -49,6 +49,48 @@ class ImagePair:
             or self.image.direction != self.mask.direction
         ):
             raise ValueError("aligned image and mask must share geometry")
+
+
+@dataclass
+class LoadedCase:
+    """Keep one case's validated source pixels for independent label runs.
+
+    Loading is lazy so dimension-dependent parameter validation still precedes
+    full image I/O. Source files form one case snapshot; failed reads are also
+    reused. No label mask, crop, normalization or spatial result is shared.
+    Release this object before moving to the next study case.
+    """
+
+    image_path: Path
+    mask_path: Path
+    _dimension: int | None = field(default=None, init=False)
+    _volumes: tuple[Volume, Volume] | None = field(default=None, init=False)
+    _read_error: str | None = field(default=None, init=False)
+
+    def dimension(self) -> int:
+        """Read the dimension once, without loading or validating pixels."""
+        if self._read_error is not None:
+            raise ValueError(self._read_error)
+        if self._dimension is None:
+            try:
+                self._dimension = read_image_dimension(self.image_path)
+            except (ValueError, RuntimeError, OSError, EOFError) as error:
+                self._read_error = str(error)
+                raise
+        return self._dimension
+
+    def volumes(self) -> tuple[Volume, Volume]:
+        """Load source image/mask pixels once, retaining their native types."""
+        if self._read_error is not None:
+            raise ValueError(self._read_error)
+        if self._volumes is None:
+            try:
+                self._volumes = read_image(self.image_path), read_mask(self.mask_path)
+            except (ValueError, RuntimeError, OSError, EOFError) as error:
+                # Store text rather than a traceback retaining reader buffers.
+                self._read_error = str(error)
+                raise
+        return self._volumes
 
 
 def _itk(volume: Volume) -> sitk.Image:
@@ -410,10 +452,22 @@ def load_image_pair(
             intensities must be exactly representable in float64.
         RuntimeError: If SimpleITK cannot read a supplied file.
     """
+    source, labels = read_image(image_path), read_mask(mask_path)
+    return prepare_image_pair(source, labels, settings=settings, image_settings=image_settings)
+
+
+def prepare_image_pair(
+    source: Volume, labels: Volume, *, settings: Settings | None = None,
+    image_settings: ImageSettings | None = None,
+) -> ImagePair:
+    """Prepare one label from validated source volumes without modifying them.
+
+    Every call independently normalizes, corrects/resamples and crops using its
+    label settings, exactly as ``load_image_pair`` does after reading the files.
+    """
     import SimpleITK as sitk
 
     options, spatial = settings or Settings(), image_settings or ImageSettings()
-    source, labels = read_image(image_path), read_mask(mask_path)
     options.validate(source.array.ndim)
     # Only 64-bit integers can lose source identity when converted to float64.
     # Validate them before resampling/rounding; other dtypes need no throwaway

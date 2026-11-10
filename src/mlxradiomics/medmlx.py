@@ -24,8 +24,8 @@ from mlxradiomics.contracts.types import (
     ImageGeometryPayload,
     RunDetails,
 )
-from mlxradiomics.imaging.io import Volume, read_image_dimension
-from mlxradiomics.imaging.spatial import load_image_pair
+from mlxradiomics.imaging.io import Volume
+from mlxradiomics.imaging.spatial import LoadedCase, prepare_image_pair
 from mlxradiomics.workflows.reporting import publish_report
 
 # Registered through the ``medmlx.models`` entry point in pyproject.toml; MedMLX
@@ -187,6 +187,27 @@ def run(
             is false or is not a boolean.
         ModelExecutionError: Extraction itself failed.
     """
+    return run_loaded_case(
+        LoadedCase(Path(image_path).expanduser(), Path(mask_path).expanduser()),
+        output_dir=output_dir, params=params, params_path=params_path, label=label,
+        voxel=voxel, overwrite=overwrite, temporary_dir=temporary_dir,
+        max_temporary_mib=max_temporary_mib,
+    )
+
+
+def run_loaded_case(
+    case: LoadedCase,
+    *,
+    output_dir: str | os.PathLike[str],
+    params: Mapping[str, object] | None = None,
+    params_path: str | os.PathLike[str] | None = None,
+    label: int | None = None,
+    voxel: bool = False,
+    overwrite: bool = False,
+    temporary_dir: str | os.PathLike[str] | None = None,
+    max_temporary_mib: int | None = None,
+) -> RunResult:
+    """Run one label with case-scoped source I/O and the ordinary publication contract."""
     if type(overwrite) is not bool:
         raise InvalidInputError("overwrite must be a boolean")
     if type(voxel) is not bool:  # JSON callers can send "false", which is truthy
@@ -198,11 +219,10 @@ def run(
     if not voxel and (temporary_dir is not None or max_temporary_mib is not None):
         raise InvalidInputError("temporary storage options require voxel=True")
 
-    source_image = Path(image_path).expanduser()
-    source_mask = Path(mask_path).expanduser()
+    source_image, source_mask = case.image_path, case.mask_path
     try:
         # Parse dimension-dependent parameters before the one full validated image read.
-        dimension = read_image_dimension(source_image)
+        dimension = case.dimension()
     except (ValueError, RuntimeError, OSError, EOFError) as error:
         # SimpleITK raises RuntimeError, and gzip OSError or EOFError, for unreadable files.
         raise InvalidInputError(str(error)) from error
@@ -210,8 +230,8 @@ def run(
     settings = parameters.settings
     transforms = parameters.transforms
     try:
-        pair = load_image_pair(
-            source_image, source_mask, settings=settings,
+        pair = prepare_image_pair(
+            *case.volumes(), settings=settings,
             image_settings=parameters.image_settings,
         )
     except (ValueError, RuntimeError, OSError, EOFError) as error:

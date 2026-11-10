@@ -56,6 +56,53 @@ def test_study_runs_every_case_and_label_independently(tmp_path: Path) -> None:
     assert len(set(values.values())) == len(values)
 
 
+@pytest.mark.parametrize("spatial", [False, True])
+def test_study_reads_each_source_once_and_matches_independent_label_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spatial: bool,
+) -> None:
+    """Reuse source pixels while keeping normalization/crop/resegmentation label-local."""
+    from mlxradiomics.imaging import spatial as spatial_io
+    from mlxradiomics.medmlx import run
+
+    cases = [_case(tmp_path / "inputs", "case-a", 0), _case(tmp_path / "inputs", "case-b", 20)]
+    params: dict[str, object] = {
+        **MEAN,
+        **({"setting": {"normalize": True, "resampledPixelSpacing": [.7, 1.1, 1.3],
+                        "padDistance": 1, "resegmentRange": [-1.5, 1.5]}} if spatial else {}),
+    }
+    reads: list[tuple[str, Path]] = []
+    read_image, read_mask = spatial_io.read_image, spatial_io.read_mask
+
+    def image(path: Path) -> spatial_io.Volume:
+        reads.append(("image", path))
+        return read_image(path)
+
+    def mask(path: Path) -> spatial_io.Volume:
+        reads.append(("mask", path))
+        return read_mask(path)
+
+    monkeypatch.setattr(spatial_io, "read_image", image)
+    monkeypatch.setattr(spatial_io, "read_mask", mask)
+    outcomes = run_study(cases, tmp_path / "study", labels=(5, 1, 2), params=params)
+    assert reads == [
+        (kind, Path(case[f"{kind}_path"])) for case in cases for kind in ("image", "mask")
+    ]
+    assert [outcome["status"] for outcome in outcomes] == [
+        "failed", "completed", "completed", "failed", "completed", "completed",
+    ]
+    for case in cases:
+        for label in (1, 2):
+            baseline = run(
+                image_path=case["image_path"], mask_path=case["mask_path"],
+                output_dir=tmp_path / "independent" / case["case_id"] / f"label-{label}",
+                params=params, label=label,
+            )
+            actual = tmp_path / "study" / case["case_id"] / f"label-{label}" / "features.json"
+            assert json.loads(actual.read_text()) == json.loads(
+                Path(baseline["files"]["features_json"]).read_text(),
+            )
+
+
 def test_study_records_missing_label_and_continues(tmp_path: Path) -> None:
     case = _case(tmp_path / "inputs", "case-a", 0)
     outcomes = run_study([case], tmp_path / "out", labels=(1, 5), params=MEAN)

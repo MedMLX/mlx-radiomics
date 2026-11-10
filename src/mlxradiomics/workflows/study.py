@@ -15,7 +15,8 @@ from typing import Literal, TypedDict, cast
 
 from medmlx_core.errors import InvalidInputError, ModelExecutionError
 
-from mlxradiomics.medmlx import RunFiles, run
+from mlxradiomics.imaging.spatial import LoadedCase
+from mlxradiomics.medmlx import RunFiles, run_loaded_case
 from mlxradiomics.workflows.publication import reject_input_aliases
 
 _CASE_KEYS: frozenset[str] = frozenset(("case_id", "image_path", "mask_path"))
@@ -159,11 +160,14 @@ def run_study(
     reject_input_aliases(existing_outputs, existing_inputs)
     outcomes: list[CaseOutcome] = []
     for case in parsed:
+        loaded = LoadedCase(
+            Path(case["image_path"]).expanduser(), Path(case["mask_path"]).expanduser(),
+        )
         for label in selected_labels:
             destination = root / case["case_id"] / f"label-{label}"
             try:
-                result = run(
-                    image_path=case["image_path"], mask_path=case["mask_path"],
+                result = run_loaded_case(
+                    loaded,
                     output_dir=destination, params=params, params_path=params_path,
                     label=label, voxel=voxel, overwrite=overwrite,
                     temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
@@ -180,4 +184,5 @@ def run_study(
                     "output_dir": destination.as_posix(), "files": result["files"],
                     "error_type": None, "error_message": None,
                 })
+        del loaded
     return outcomes
