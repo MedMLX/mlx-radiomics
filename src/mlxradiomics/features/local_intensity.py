@@ -1,8 +1,8 @@
 """Physical 1 cm³ spherical local/global intensity peaks (IBSI VJGA/0F91).
 
-Sphere means are needed only at candidate centres: every ROI voxel for the global peak
+Sphere means are needed only at candidate centers: every ROI voxel for the global peak
 and the maximum-intensity ROI voxels for the local peak. :func:`_sphere_means` evaluates
-them with one Metal kernel, one thread per centre, and the exact in-image voxel count.
+them with one Metal kernel, one thread per center, and the exact in-image voxel count.
 Bounded integral images use exact sums and row prefixes for the global peak; other
 images use compensated float32 values with source residuals when present. Local-only
 requests upload the maximum candidates' support. Inputs whose magnitudes could overflow
@@ -34,7 +34,7 @@ type _SphereSum = Literal["compensated", "float32", "integer", "prefix"]
 def _sphere(
     shape: tuple[int, ...], spacing: tuple[float, ...],
 ) -> tuple[tuple[int, ...], NDArray[np.bool_]]:
-    """Kernel half-widths and the physical 1 cm³ sphere's voxel-centre membership."""
+    """Kernel half-widths and the physical 1 cm³ sphere's voxel-center membership."""
     radius = (3000 / (4 * pi)) ** (1 / 3)
     half = tuple(
         min(size - 1, floor(radius / step)) for size, step in zip(shape, spacing, strict=True)
@@ -77,7 +77,7 @@ def _geometry(
 def _sphere_kernel(mode: _SphereSum = "compensated") -> MetalKernel:
     """Mean over in-image sphere voxels with exact or compensated accumulation.
 
-    Thread ``t`` owns centre ``t``. Each sphere row is clipped once to the box, so
+    Thread ``t`` owns center ``t``. Each sphere row is clipped once to the box, so
     the in-image count is exact. General values accumulate with error-free two-sum
     and source residuals in a separate register. Bounded integral sums need no carry;
     their prefixes also stay inside int32. Contraction and reassociation are disabled
@@ -204,7 +204,7 @@ def local_intensity_statistics(
 
     Spacing is in millimetres. Image boundaries truncate the sphere and its denominator;
     ROI boundaries do not. Maximum-intensity candidate ties use the source float64 values,
-    with signed zeros equal. Sphere means are evaluated only at candidate centres by
+    with signed zeros equal. Sphere means are evaluated only at candidate centers by
     :func:`_sphere_means` when :func:`_kernel_admits` the ROI box plus sphere reach;
     otherwise by :func:`_convolution_peaks`.
     """

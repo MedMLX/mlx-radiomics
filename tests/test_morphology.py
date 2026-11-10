@@ -1,6 +1,6 @@
 """Analytic checks for intensity-dependent IBSI morphological features.
 
-Expected values are derived from the manual's definitions with voxel-centre coordinates
+Expected values are derived from the manual's definitions with voxel-center coordinates
 and inverse Euclidean distance weights. Public extraction also checks intensity versus
 morphological mask selection after resegmentation.
 """

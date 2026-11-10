@@ -232,7 +232,7 @@ def ivh_statistics(
     ``i = 1..L``: ``nu_i`` is the fraction of valid samples with bin at least ``i`` and
     ``gamma_i = (i - 1) / (L - 1)``. The trapezoidal rule is evaluated as the equivalent
     per-sample weight ``b - 0.5`` for a one-based bin ``b < L`` and ``L - 1`` for the
-    last bin, divided by ``(L - 1)`` and the sample count. A ROI with one discretised
+    last bin, divided by ``(L - 1)`` and the sample count. A ROI with one discretized
     intensity has area zero (IBSI 9CMM); no valid samples produce NaN.
     """
     if max(abs(origin), abs(step) * max(levels - 1, 0)) > _FLOAT32_MAX:

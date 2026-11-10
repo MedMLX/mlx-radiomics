@@ -55,7 +55,7 @@ FFT_AVAILABLE = fft_available_on(_MLX_VERSION)
 FFT_DISABLED_REASON = (
     f"Simoncelli and Riesz filtering needs MLX 0.32.5 or later; this release of "
     f"mlxradiomics pins MLX 0.32.4 (installed: {_MLX_VERSION}), whose batched FFT can "
-    "overrun its buffer and corrupt neighbouring arrays."
+    "overrun its buffer and corrupt neighboring arrays."
 )
 
 
@@ -213,7 +213,7 @@ def riesz_multiplier(
 
     For ``L = sum(order)`` the multiplier is
     ``(-j)**L * sqrt(L! / prod(l_i!)) * prod(nu_i**l_i) / ||nu||**L``.
-    The ratio is evaluated from the normalised directions
+    The ratio is evaluated from the normalized directions
     ``d_i = nu_i / ||nu||`` and their powers, which is algebraically identical
     but keeps a high-order multiplier finite when separately raising ``nu_i``
     and ``||nu||`` would underflow to zero. The zero-frequency sample is handled
@@ -246,7 +246,7 @@ def riesz_multiplier(
         raise ValueError("Riesz orders must be nonnegative integers with a positive sum")
     length = sum(order)
     if grid is FourierGrid.DFT:
-        # Nyquist-normalised DFT coordinates; the common scale cancels in the ratio.
+        # Nyquist-normalized DFT coordinates; the common scale cancels in the ratio.
         coordinates = tuple(mx.fft.fftfreq(size) * 2.0 for size in shape)
         centered = False
     elif grid is FourierGrid.CENTERED:
@@ -259,7 +259,7 @@ def riesz_multiplier(
     for values in grids[1:]:
         squared = squared + values * values
     nonzero = squared > 0
-    # Normalise before taking powers. Raising the raw coordinates and the norm
+    # Normalize before taking powers. Raising the raw coordinates and the norm
     # separately can underflow both to zero at a representable nonzero frequency,
     # turning an exact ratio of one into 0/0.
     safe_norm = mx.sqrt(mx.where(nonzero, squared, mx.ones_like(squared)))
@@ -293,7 +293,7 @@ def riesz_multiplier(
             logarithmic, magnitude * coefficient,
         )
     # The zero-frequency sample has no direction and is defined as zero; the
-    # normalised directions are also zero there, so this only makes it explicit.
+    # normalized directions are also zero there, so this only makes it explicit.
     magnitude = mx.where(nonzero, magnitude, mx.zeros_like(magnitude))
     multiplier = magnitude.astype(mx.complex64) * phase
     return mx.fft.ifftshift(multiplier) if centered else multiplier
@@ -351,7 +351,7 @@ def log_response(
 
     The kernel has odd support ``1 + 2*floor(cutoff*sigma_vox + 0.5)`` per filtered
     axis and is applied by direct spatial convolution with ``padding``. With
-    ``planar`` set, a 2-D kernel (``D = 2`` normalisation) filters every plane
+    ``planar`` set, a 2-D kernel (``D = 2`` normalization) filters every plane
     normal to native array axis 0, the manual's in-plane ``(k1, k2)`` filter.
     Direct convolution keeps float32 responses within 3.6e-6 of a float64
     construction on the IBSI 2 maps ``2_a`` to ``2_c``.
@@ -443,7 +443,7 @@ def riesz_log_responses(
     # |base| is bounded by the kernel's absolute sum and the Riesz multiplier by one.
     scale = _spectral_scale(padded, tuple(padded.shape), float(np.abs(kernel).sum()))
     spectrum = mx.fft.fftn(padded / scale if scale != 1.0 else padded, axes=axes)
-    # The kernel's centre is at kernel_size // 2 after end zero-padding, so the
+    # The kernel's center is at kernel_size // 2 after end zero-padding, so the
     # circular convolution's valid region starts at 2 * (kernel_size // 2).
     weights = mx.pad(
         mx.array(kernel.astype(np.float32)),

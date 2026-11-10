@@ -2,12 +2,12 @@
 
 The morphological family uses two masks. The intensity mask defines the voxels whose
 intensities enter an intensity-weighted quantity; the morphological mask defines the
-shape whose volume and geometric centre are used. The IBSI manual distinguishes these
+shape whose volume and geometric center are used. The IBSI manual distinguishes these
 masks because resegmentation can remove high- or low-intensity voxels from the intensity
 set while leaving the segmented shape intact.
 
 All feature arithmetic runs on MLX arrays. Host NumPy work is limited to selecting source
-voxels, translating integer coordinates, and centring and scaling source intensities
+voxels, translating integer coordinates, and centering and scaling source intensities
 before they are uploaded as float32. Moran's I and Geary's C evaluate every unordered
 pair once in a tiled Metal kernel without storing a pair matrix. Row outputs are bounded by
 ``scratch_mib``; the quadratic pass runs only when selected and is refused above
@@ -449,7 +449,7 @@ def morphology_statistics(
             required mask is empty, or Moran's I or Geary's C is requested for more than
             :data:`MAX_PAIRWISE_VOXELS` intensity-mask voxels.
         RuntimeError: If the intensity-weighted centroid is undefined or a computed
-            centre-of-mass shift exceeds or underflows float32.
+            center-of-mass shift exceeds or underflows float32.
     """
     requested = frozenset(features)
     unsupported = requested - _SUPPORTED

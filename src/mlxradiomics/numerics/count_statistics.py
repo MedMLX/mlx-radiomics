@@ -2,7 +2,7 @@
 
 The source probabilities of a dominant state can round to one in float32, which
 silently deletes that state's small positive entropy contribution.  Keeping counts
-in int64 until the exact deficit is formed avoids that rounding; normalisation
+in int64 until the exact deficit is formed avoids that rounding; normalization
 happens only inside the logarithm.
 """
 
@@ -34,7 +34,7 @@ def log1p(x: mx.array) -> mx.array:
 
 
 def count_entropy(counts: mx.array, total: mx.array, dtype: mx.Dtype) -> mx.array:
-    """Return Shannon entropy in bits of integer counts normalised by row totals.
+    """Return Shannon entropy in bits of integer counts normalized by row totals.
 
     Args:
         counts: Nonnegative integer array ``(batch, states)``.  Additional trailing

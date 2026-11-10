@@ -1,8 +1,8 @@
-"""Local Riesz alignment from a regularised structure tensor (IBSI 2 ``1SD3``).
+"""Local Riesz alignment from a regularized structure tensor (IBSI 2 ``1SD3``).
 
 The IBSI 2 filtering manual (Depeursinge et al., arXiv:2006.05470v9, section 4.7.1
 and Eqs. 4.12-4.15) aligns the order-``L`` Riesz filter bank with the eigenvectors
-of a Gaussian-regularised structure tensor built from the first-order Riesz
+of a Gaussian-regularized structure tensor built from the first-order Riesz
 responses. Because the Riesz bank is steerable, the aligned responses are a
 per-voxel linear combination of the axis-aligned ones; no extra convolution is
 needed. The manual provides no consensus response maps for aligned Riesz, so this
@@ -23,7 +23,7 @@ Conventions that the API depends on:
   ``U`` in this convention makes the order-one steering matrix equal to ``U``
   itself, and composition follows ``S(U_1 U_2) = S(U_1) S(U_2)``.
 * Eigenvectors of the structure tensor are ordered by descending Rayleigh
-  quotient, so ``u_1`` maximises the energy of ``R_1`` and ``u_2`` maximises the
+  quotient, so ``u_1`` maximizes the energy of ``R_1`` and ``u_2`` maximizes the
   residual energy of ``R_2``. The sign of ``u_1`` and ``u_2`` is fixed so that the
   largest-magnitude component (lowest index on ties) is positive, and
   ``u_3 = u_1 x u_2`` keeps ``det U = +1``; consequently ``u_3`` does not obey the
@@ -117,7 +117,7 @@ class _SteeringPlan:
     trailing zero slot) to the position of that monomial divided by ``nu_axis`` in
     the degree-``step`` layer. ``rows`` names the rotation row used by each of the
     ``order`` factors of every output component, and ``factors`` holds the
-    ``sqrt(m! / n!)`` normalisation of Eq. steeringMatrix3D.
+    ``sqrt(m! / n!)`` normalization of Eq. steeringMatrix3D.
     """
 
     count: int
@@ -590,12 +590,12 @@ def structure_tensor_rotations(
 ) -> mx.array:
     """Per-voxel rotation whose rows are the structure-tensor eigenvectors.
 
-    The regularised structure tensor of Eq. structureTensor has entries
+    The regularized structure tensor of Eq. structureTensor has entries
     ``J[m, n]`` equal to the element-wise products ``R_m R_n`` of the first-order
     Riesz responses convolved with a Gaussian window of ``tensor_sigma``
     millimetres on every axis. That window sets the scale of the orientation
     estimate independently of the Riesz analysis scale. Rows of the returned
-    rotation are sorted by descending eigenvalue, so ``u_1`` maximises the energy
+    rotation are sorted by descending eigenvalue, so ``u_1`` maximizes the energy
     of ``R_1``.
 
     The window extends each product ``R_m R_n`` by ``padding``. ``CONSTANT``

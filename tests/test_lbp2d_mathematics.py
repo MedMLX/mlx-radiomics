@@ -100,7 +100,7 @@ def test_exact_source_ties_set_bits_through_public_transform() -> None:
                 source_residual=mx.array((image - high).astype(np.float32)),
             ))
             actual[method] = float(np.asarray(output.image)[1, 1])
-    # Every sample equals the centre, so every bit is set. Uniform code 8 is the
+    # Every sample equals the center, so every bit is set. Uniform code 8 is the
     # number of set bits for a pattern with no transitions.
     assert actual == {LBPMethod.DEFAULT: 255, LBPMethod.UNIFORM: 8}
 
@@ -109,9 +109,9 @@ def test_exact_source_ties_set_bits_through_public_transform() -> None:
 def test_source_threshold_neighbor_resolves_without_epsilon(
     delta: float, expected: float,
 ) -> None:
-    # A radius-one, four-sample ring places bit 0 exactly on the right neighbour,
-    # where the bilinear weight is exactly one. The neighbour differs from the
-    # centre by less than half a float32 ulp but remains distinct in the source
+    # A radius-one, four-sample ring places bit 0 exactly on the right neighbor,
+    # where the bilinear weight is exactly one. The neighbor differs from the
+    # center by less than half a float32 ulp but remains distinct in the source
     # residual. No epsilon may flip the categorical comparison.
     center_source = float(np.float32(0.1))
     image = np.full((3, 3), center_source - 1.0, dtype=np.float64)

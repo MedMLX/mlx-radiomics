@@ -1,6 +1,6 @@
 """IBSI intensity-histogram features from 1-based gray-level bins.
 
-The histogram family operates on an already discretised intensity image.  Counts are
+The histogram family operates on an already discretized intensity image.  Counts are
 kept as integers until entropy, uniformity and percentile reductions, so a dominant
 state does not lose its small positive entropy contribution to a probability that rounds
 to one.  All reported values are float32 arrays with a leading batch axis.

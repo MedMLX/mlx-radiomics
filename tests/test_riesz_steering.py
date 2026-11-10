@@ -224,7 +224,7 @@ def test_steering_rotates_responses_with_the_image(
         matrices = np.asarray(
             steering_matrices(mx.array(rotation.astype(np.float32)), order), dtype=np.float64,
         )
-    # S_U R{f_U} = R{f}_U: steering replaces re-analysing the rotated image.
+    # S_U R{f_U} = R{f}_U: steering replaces re-analyzing the rotated image.
     actual = np.tensordot(matrices, moved_components, axes=([1], [0]))
     expected = np.stack([_warp(value, rotation) for value in original])
     np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-6)

@@ -558,8 +558,8 @@ def test_coefficient_of_variation_survives_cancelling_mean(voxel: bool) -> None:
     ), mode=("voxel" if voxel else "roi"))
     expected_cv = math.sqrt(2 / 3) * 1e8 / (1 / 3)
     if voxel:
-        # Only the centre column's radius-1 neighbourhoods hold the three columns in
-        # equal proportion; edge neighbourhoods are clipped to two columns.
+        # Only the center column's radius-1 neighborhoods hold the three columns in
+        # equal proportion; edge neighborhoods are clipped to two columns.
         np.testing.assert_allclose(
             _voxel_map(result, "Mean")[:, 1], float(np.float32(1 / 3)), rtol=1e-6, atol=0,
         )

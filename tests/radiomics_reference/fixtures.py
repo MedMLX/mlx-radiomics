@@ -8,7 +8,7 @@ from mlxradiomics.config.settings import Settings
 from mlxradiomics.contracts.types import HostArray
 
 CASE_SEED = 104729
-# The generic case catalogue uses a small first-order selection; tests may replace it.
+# The generic case catalog uses a small first-order selection; tests may replace it.
 CATALOGUE_FEATURES = (
     "firstorder_Mean", "firstorder_Minimum", "firstorder_Maximum", "firstorder_Range",
 )

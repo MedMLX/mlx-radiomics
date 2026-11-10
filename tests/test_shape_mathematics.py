@@ -376,7 +376,7 @@ def _shape_values(
 @pytest.mark.parametrize("spacing", [1e-12, 1e10])
 def test_isolated_voxel_extreme_spacing_restores_units(spacing: float) -> None:
     # The octahedron has V=s^3/6, A=sqrt(3)s^2, sphericity=pi^(1/3)/sqrt(3), and
-    # its opposite face centres are one spacing apart. Squaring the physical edge
+    # its opposite face centers are one spacing apart. Squaring the physical edge
     # crosses float32's range at these spacings; the scaled mesh must not.
     mask = np.zeros((3, 3, 3), dtype=np.uint8)
     mask[1, 1, 1] = 1

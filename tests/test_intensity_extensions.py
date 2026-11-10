@@ -375,8 +375,8 @@ def test_ivh_fixed_width_covers_partial_bins_without_snapping(width: float, leve
 
 
 def test_ivh_fractional_lattice_calibration_survives_a_cancelling_origin() -> None:
-    # Bin width 0.1 from -1000 puts the first centre at -999.95. Ten percent of the 11
-    # samples is one sample, so the 10% threshold is the centre of the lattice level after
+    # Bin width 0.1 from -1000 puts the first center at -999.95. Ten percent of the 11
+    # samples is one sample, so the 10% threshold is the center of the lattice level after
     # the one holding 0.5: -999.95 + 10005 * 0.1 = 0.55. Float32 affine evaluation would round
     # both terms near 1e3 and report 0.5499878.
     from fractions import Fraction

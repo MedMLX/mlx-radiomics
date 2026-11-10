@@ -73,7 +73,7 @@ settings = Settings(features=list_features("firstorder", "glcm"))
 voxel_names = list_features(mode="voxel", ndim=3)
 ```
 
-`list_features` returns catalogue names filtered by family, mode and optional
+`list_features` returns catalog names filtered by family, mode and optional
 dimension; it does not change the 93-feature default. Unknown family names raise
 `ValueError`. Shape and local intensity are excluded from voxel selections;
 3-D discovery excludes `shape2D` because its 3-D use requires a single slice and
@@ -155,7 +155,7 @@ argument of the filter functions (DFT by default).
 
 Per-family `*_aggregation` fields choose how texture matrices are combined
 across directions and slices; see {class}`~mlxradiomics.Settings` for their
-accepted values. The [feature catalogue](features.md#catalogue) maps public
+accepted values. The [feature catalog](features.md#catalog) maps public
 names to IBSI identifiers.
 
 ## Streaming voxel batches

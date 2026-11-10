@@ -10,7 +10,7 @@ Extract radiomics features and voxel maps on the Apple Silicon GPU with native M
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
-[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalogue](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md)
+[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md)
 
 <img src="https://raw.githubusercontent.com/MedMLX/mlx-radiomics/main/docs/feature-maps.png" alt="CT tumor ROI and six radiomics feature-map overlays" width="100%">
 
@@ -172,7 +172,7 @@ Calculation conventions such as kurtosis, shape covariance divisor, NGTDM
 singular cases and fixed-bin-size origin are independent `Settings` fields with
 IBSI defaults. Select each alternative explicitly; see
 [Conventions](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md#conventions).
-The [feature catalogue](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalogue) lists public names and
+The [feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalogue) lists public names and
 their IBSI identifiers.
 
 ## MedMLX and automation

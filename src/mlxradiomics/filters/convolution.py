@@ -245,7 +245,7 @@ def _atrous_taps(taps: tuple[float, ...], level: int) -> NDArray[np.float64]:
 
     Follows the manual's worked Haar example: level ``j`` places ``2**(j-1) - 1``
     zeros after every tap, including the last, and one more zero is appended when
-    the length is even, so the centre sits at ``size // 2``.
+    the length is even, so the center sits at ``size // 2``.
     """
     step = 2 ** (level - 1)
     dilated = np.zeros(len(taps) * step, dtype=np.float64)
@@ -544,7 +544,7 @@ def laws_energy(
 
     The absolute response is averaged over a ``(2 * distance + 1)`` cube, or
     over each ``(k2, k1)`` plane when the response came from a two-axis kernel.
-    The mean filter normalises by the number of window voxels ``W``. It is
+    The mean filter normalizes by the number of window voxels ``W``. It is
     :func:`mean_response`, whose compensated unit-weight sums keep the window mean
     correctly rounded; a dense float32 ``1 / W`` kernel lost about 5e-6 relative
     precision over a ``15**3`` window.
@@ -606,7 +606,7 @@ def gabor_kernel(
 
     Returns:
         Complex64 kernel with odd ``(k2, k1)`` dimensions and the Gaussian
-        envelope centred at ``M // 2``.
+        envelope centered at ``M // 2``.
     """
     sizes = tuple(size + 1 if size % 2 == 0 else size for size in plane_shape)
     offsets2 = np.arange(sizes[0], dtype=np.float64) - sizes[0] // 2

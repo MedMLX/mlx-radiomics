@@ -29,10 +29,10 @@ Settings(features=("shape_MeshVolume", "firstorder_Mean", "glcm_Contrast"))
 ```
 
 Calculation conventions are separate `Settings` fields with IBSI defaults.
-Select alternative definitions individually (see [Conventions](python-api.md#conventions)). The catalogue
+Select alternative definitions individually (see [Conventions](python-api.md#conventions)). The catalog
 below maps public feature names to IBSI identifiers.
 
-## Catalogue
+## Catalog
 
 Generated from the package's feature list and IBSI manifest. A blank IBSI column
 marks a PyRadiomics feature or extension without an IBSI definition.
@@ -49,6 +49,6 @@ settings = Settings(features=list_features("firstorder", "glcm"))
 map_features = list_features(mode="voxel", ndim=3)
 ```
 
-The helper filters the catalogue by mode and optional input dimension. It does
+The helper filters the catalog by mode and optional input dimension. It does
 not change the default selection or discretization. ROI-only families are
 excluded in voxel mode; unknown family names raise `ValueError`.

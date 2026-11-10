@@ -739,7 +739,7 @@ def first_order(
     deviation and returns NaN.
 
     A float32 value plus float32 residual pair need not represent its float64 source:
-    near ``0.1`` the ``nextafter`` neighbours share one pair, and near ``1e12`` the
+    near ``0.1`` the ``nextafter`` neighbors share one pair, and near ``1e12`` the
     residual itself rounds, perturbing differences of ``1e-3`` by about ``2**-9``.
     A requested spread-dependent output raises ``RuntimeError`` when a row's computed
     standard deviation is zero although its sources differ, or when the largest pair
