@@ -102,8 +102,9 @@ Options are keyword-only:
   origin and identity direction; use file operations for scanner-aligned output, or
   explicitly acknowledge synthetic coordinates with `allow_synthetic_geometry=True`.
 - **Precision:** feature arithmetic is float32. In-memory float64 maps hold those float32
-  results, not higher-precision calculations; saved maps and streamed batches are
-  float32.
+  results, not higher-precision calculations. Pass `map_dtype="float32"` to `extract`
+  or `extract_files` to halve retained map storage. Saved maps and streamed batches
+  are float32.
 
 Extraction results expose `.features` and `.metadata`; exports expose `.report`,
 `.maps` and `.metadata`. The [Python guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md)

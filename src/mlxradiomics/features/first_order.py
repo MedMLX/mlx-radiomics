@@ -682,7 +682,7 @@ _UNDERFLOW_CONDITIONS: dict[str, _Term] = {
 
 
 def first_order(
-    values: mx.array, valid: mx.array, bins: mx.array, ng: int, *,
+    values: mx.array, valid: mx.array, bins: mx.array | None, ng: int, *,
     shift: float, voxel_volume: float, residual: mx.array | None, source_bits: mx.array | None,
     representation_error: mx.array | None, selected: Collection[str] | None = None,
     kurtosis: str = "excess", zero_variance_moments: str = "zero",
@@ -775,7 +775,8 @@ def first_order(
         values: Float32 array ``(batch, n)`` of intensities, one row per voxel set (the
             ROI, or the neighborhood of one center).
         valid: Boolean array of the same shape; voxels that belong to each set.
-        bins: Integer array of the same shape with 1-based gray levels.
+        bins: Integer array of the same shape with 1-based gray levels; may be omitted
+            when neither Entropy nor Uniformity is selected.
         ng: Number of gray levels.
         shift: ``voxel_array_shift``, added to intensities for Energy, TotalEnergy and
             RootMeanSquared only.
@@ -825,6 +826,8 @@ def first_order(
         if not requested:
             return {}
         if requested <= _BIN_FEATURES:
+            if bins is None:
+                raise ValueError("first-order histogram bins are required")
             return first_order_histogram(
                 bins, valid, ng, dtype=values.dtype, selected=requested,
             )
@@ -849,6 +852,8 @@ def first_order(
         if requested is None or name in requested
     }
     if requested is None or not requested.isdisjoint(_BIN_FEATURES):
+        if bins is None:
+            raise ValueError("first-order histogram bins are required")
         features.update(first_order_histogram(
             bins, valid, ng, dtype=values.dtype,
             selected=None if requested is None else requested & _BIN_FEATURES,

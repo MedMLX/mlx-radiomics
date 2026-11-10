@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from math import pi, sqrt
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -14,8 +15,12 @@ from mlxradiomics.numerics.runtime import mx
 from mlxradiomics.workflows.extraction import extract
 
 
-@pytest.mark.parametrize("voxel", [False, True])
-def test_undefined_kurtosis_keeps_harmonic_features_and_validity(voxel: bool) -> None:
+@pytest.mark.parametrize("voxel,map_dtype", [
+    (False, "float64"), (True, "float64"), (True, "float32"),
+])
+def test_undefined_kurtosis_keeps_harmonic_features_and_validity(
+    voxel: bool, map_dtype: Literal["float64", "float32"],
+) -> None:
     image = np.ones((7, 7, 7), dtype=np.float64)
     mask = np.zeros(image.shape, np.uint8)
     mask[0, 0, 0] = 1
@@ -25,12 +30,13 @@ def test_undefined_kurtosis_keeps_harmonic_features_and_validity(voxel: bool) ->
     )
     settings = Settings(features=("firstorder_Mean",), bin_count=2)
     result = extract(image, mask, settings=settings, transforms=options,
-        mode=("voxel" if voxel else "roi"))
+        mode=("voxel" if voxel else "roi"), map_dtype=map_dtype)
     harmonic = result.features["lbp-3D-m1_firstorder_Mean"]
     kurtosis = result.features["lbp-3D-k_firstorder_Mean"]
     counts = result.metadata["feature_validity"]["lbp-3D-k_firstorder_Mean"]
     if voxel:
         assert isinstance(harmonic, np.ndarray) and isinstance(kurtosis, np.ndarray)
+        assert harmonic.dtype == np.dtype(map_dtype) and kurtosis.dtype == np.dtype(map_dtype)
         assert harmonic[0, 0, 0] == pytest.approx(sqrt(pi) / 2, rel=1e-6)
         np.testing.assert_allclose(harmonic[3:5, 3:5, 3:5], sqrt(4 * pi), rtol=1e-6)
         assert kurtosis[0, 0, 0] == pytest.approx(-2 / 3, rel=1e-6)

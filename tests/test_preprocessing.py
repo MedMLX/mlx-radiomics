@@ -123,6 +123,7 @@ def test_fixed_bin_count_uses_closed_form_bins(count: int, flat: bool) -> None:
             for value in selected
         ], dtype=np.int32)
     actual = prepare(image, mask, settings_for("pyradiomics", bin_count=count), voxel=False)
+    assert actual.bins is not None
     np.testing.assert_array_equal(actual.bins[mask.astype(bool)], expected)
     np.testing.assert_array_equal(actual.bins[~mask.astype(bool)], 0)
     assert actual.gray_levels == int(expected.max())
@@ -139,10 +140,12 @@ def test_lossy_64_bit_integer_intensities_are_refused(dtype: str) -> None:
     # Large integers with few significant bits are exact and stay accepted.
     data = prepare(np.array([[2**60, 2**60 + 2**8, 2**60 + 2**9]], dtype), mask,
                    Settings(bin_count=3), voxel=False)
+    assert data.bins is not None
     assert data.bins.tolist() == [[1, 2, 3]]
     if dtype[1] == "i":
         signed = prepare(np.array([[-1000, 0, 1000]], dtype), mask,
                          Settings(bin_count=3), voxel=False)
+        assert signed.bins is not None
         assert signed.bins.tolist() == [[1, 2, 3]]
 
 
@@ -155,6 +158,7 @@ def test_unmasked_kernel_below_resegmentation_anchor_is_refused() -> None:
     settings = Settings(bin_width=25.0,
                         resegment_range=(-500.0, 400.0), masked_kernel=False)
     masked = prepare(image, mask, replace(settings, masked_kernel=True), voxel=True)
+    assert masked.bins is not None
     assert masked.bins[0, :4].tolist() == [1, 2, 4, 36]
     with pytest.raises(ValueError, match="resegmentation lower bound"):
         prepare(image, mask, settings, voxel=True)
@@ -502,6 +506,23 @@ def test_fixed_width_bins_preserve_large_anchored_lattice() -> None:
     ), voxel=False)
     np.testing.assert_array_equal(prepared.bins, [[1, 10001, 20001]])
     assert prepared.gray_levels == 20001
+
+
+@pytest.mark.parametrize("features,binned", [
+    (("firstorder_Mean",), False),
+    (("shape2D_PixelSurface", "localintensity_LocalIntensityPeak"), False),
+    (("ivh_AreaUnderIVHCurve",), False),
+    (("firstorder_Entropy",), True),
+    (("firstorder_Mean", "firstorder_Entropy", "ivh_AreaUnderIVHCurve", "glcm_Contrast"), True),
+])
+def test_main_lattice_is_absent_when_selected_features_do_not_read_it(
+    features: tuple[str, ...], binned: bool,
+) -> None:
+    image = np.array([[1.0, 2.0, 3.0]])
+    data = prepare(image, np.ones(image.shape, dtype=np.uint8),
+                   Settings(features=features, bin_width=1), voxel=False)
+    assert (data.bins is not None) == binned
+    assert data.gray_levels == (3 if binned else 1)
 
 
 def test_identity_resegmentation_preserves_singleton_statistics() -> None:

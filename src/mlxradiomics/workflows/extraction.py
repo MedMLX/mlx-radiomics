@@ -25,6 +25,7 @@ from mlxradiomics.contracts.types import (
     FeatureValidity,
     FloatArray,
     HostArray,
+    MapDtype,
     SettingsPayload,
     VoxelSink,
     VoxelSinkFactory,
@@ -36,6 +37,7 @@ from mlxradiomics.numerics.runtime import (
     mx,
     releases_cache,
     require_retained_capacity,
+    validate_map_dtype,
 )
 from mlxradiomics.workflows.derived import (
     extract_lbp_kurtosis,
@@ -87,6 +89,7 @@ def extract(
     transforms: TransformSettings | None = None,
     spacing: tuple[float, ...] | None = None,
     mode: Literal["roi"] = "roi",
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result[float]:
@@ -102,6 +105,7 @@ def extract(
     transforms: TransformSettings | None = None,
     spacing: tuple[float, ...] | None = None,
     mode: Literal["voxel"],
+    map_dtype: Literal["float64"] = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result[FloatArray]:
@@ -116,7 +120,24 @@ def extract(
     settings: Settings | None = None,
     transforms: TransformSettings | None = None,
     spacing: tuple[float, ...] | None = None,
+    mode: Literal["voxel"],
+    map_dtype: Literal["float32"],
+    sink: VoxelSink | None = None,
+    sink_factory: VoxelSinkFactory | None = None,
+) -> Result[NDArray[np.float32]]:
+    ...
+
+
+@overload
+def extract(
+    image: HostArray,
+    mask: HostArray,
+    *,
+    settings: Settings | None = None,
+    transforms: TransformSettings | None = None,
+    spacing: tuple[float, ...] | None = None,
     mode: Literal["roi", "voxel"],
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result:
@@ -132,6 +153,7 @@ def extract(
     transforms: TransformSettings | None = None,
     spacing: tuple[float, ...] | None = None,
     mode: Literal["roi", "voxel"] = "roi",
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result:
@@ -159,7 +181,9 @@ def extract(
     transform is defined on the whole array.
 
     ``mode="roi"`` returns one Python float per feature. ``mode="voxel"`` returns
-    float64 maps on the input grid, with zero outside the ROI. ``sink`` receives
+    float64 maps by default; ``map_dtype="float32"`` halves their storage without
+    changing the calculated values. Maps use the input grid with zero outside the ROI.
+    ``sink`` receives
     evaluated float32 batches as ``(centers, features)``; centers have shape
     ``(batch, ndim)`` in NumPy axis order and each feature has shape ``(batch,)``.
     ``sink_factory(image_name)`` instead supplies a context-managed sink per image.
@@ -173,18 +197,19 @@ def extract(
         transforms: Derived images to include; defaults to the original image.
         spacing: Positive millimeters per NumPy axis. Omission warns and uses unit spacing.
         mode: ``"roi"`` for scalars or ``"voxel"`` for neighborhood maps.
+        map_dtype: Storage dtype for retained maps; feature arithmetic remains float32.
         sink: Optional consumer of evaluated voxel batches.
         sink_factory: Optional per-image context manager for a voxel consumer.
 
     Returns:
-        ``Result[float]`` in ROI mode or ``Result[NDArray[np.float64]]`` in voxel mode.
+        ``Result[float]`` in ROI mode or maps of ``map_dtype`` in voxel mode.
 
     Raises:
         ValueError: If the inputs, mode or settings are invalid, LBP3D is
             combined with unmasked voxel mode, a requested derived filter encounters
             non-finite image values, no requested image can produce the selected
             features, or a sink is supplied in ROI mode.
-        MemoryError: If all retained float64 maps together exceed one quarter of
+        MemoryError: If all retained maps together exceed one quarter of
             unified memory. A sink or sink factory streams without this payload.
     """
     if spacing is None:
@@ -194,16 +219,14 @@ def extract(
             UserWarning, stacklevel=2,
         )
     voxel = _validate_mode(mode, sink, sink_factory)
+    validate_map_dtype(map_dtype)
     voxel_sink, voxel_sink_factory = sink, sink_factory
     histogram_method = "mlx"
     streaming = sink is not None or sink_factory is not None
     settings, transforms = settings or Settings(), transforms or TransformSettings()
     shape_names = tuple(n for n in settings.features if n.startswith("shape"))
     intensity_names = tuple(n for n in settings.features if not n.startswith("shape"))
-    if (
-        not voxel and transforms.image_types == (ImageType.ORIGINAL,)
-        and not (shape_names and intensity_names)
-    ):
+    if not voxel and transforms.image_types == (ImageType.ORIGINAL,):
         # The original-only ROI route needs no filtered-image preparation. The
         # engine already validates, normalizes and resegments the complete source.
         result = extract_original(
@@ -229,7 +252,9 @@ def extract(
         image_names = feature_image_names(
             data.image.shape, spacing, transforms, force2d_axis=settings.force2d_axis,
         )
-        require_retained_capacity(data.image.size, len(intensity_names) * len(image_names))
+        require_retained_capacity(
+            data.image.size, len(intensity_names) * len(image_names), map_dtype,
+        )
     output: Features = {}
     gray_levels_by_image: dict[str, int] = {}
     validity: dict[str, FeatureValidity] = {}
@@ -276,6 +301,7 @@ def extract(
                             voxel=voxel,
                             histogram_method=histogram_method,
                             voxel_sink=stream_sink,
+                            map_dtype=map_dtype,
                             _prepared_input=prepared_input,
                         )
                         prepared_input = None
@@ -288,6 +314,7 @@ def extract(
                             voxel=voxel,
                             histogram_method=histogram_method,
                             voxel_sink=stream_sink,
+                            map_dtype=map_dtype,
                             shape_mask=data.shape_roi[crop],
                             _prepared_masks=window_masks,
                         )
@@ -300,6 +327,7 @@ def extract(
                             voxel=voxel,
                             histogram_method=histogram_method,
                             voxel_sink=stream_sink,
+                            map_dtype=map_dtype,
                             # The filtered/derived image keeps the shape ROI that the
                             # original settings derived; it is not reconstructed from
                             # the intensity ROI or the filtered intensities.
@@ -343,6 +371,7 @@ def extract_files(
     settings: Settings | None = None,
     image_settings: ImageSettings | None = None, transforms: TransformSettings | None = None,
     mode: Literal["roi"] = "roi",
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result[float]:
@@ -355,6 +384,7 @@ def extract_files(
     settings: Settings | None = None,
     image_settings: ImageSettings | None = None, transforms: TransformSettings | None = None,
     mode: Literal["voxel"],
+    map_dtype: Literal["float64"] = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result[FloatArray]:
@@ -366,7 +396,21 @@ def extract_files(
     image_path: str | os.PathLike[str], mask_path: str | os.PathLike[str], *,
     settings: Settings | None = None,
     image_settings: ImageSettings | None = None, transforms: TransformSettings | None = None,
+    mode: Literal["voxel"],
+    map_dtype: Literal["float32"],
+    sink: VoxelSink | None = None,
+    sink_factory: VoxelSinkFactory | None = None,
+) -> Result[NDArray[np.float32]]:
+    ...
+
+
+@overload
+def extract_files(
+    image_path: str | os.PathLike[str], mask_path: str | os.PathLike[str], *,
+    settings: Settings | None = None,
+    image_settings: ImageSettings | None = None, transforms: TransformSettings | None = None,
     mode: Literal["roi", "voxel"],
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result:
@@ -378,6 +422,7 @@ def extract_files(
     settings: Settings | None = None,
     image_settings: ImageSettings | None = None, transforms: TransformSettings | None = None,
     mode: Literal["roi", "voxel"] = "roi",
+    map_dtype: MapDtype = "float64",
     sink: VoxelSink | None = None,
     sink_factory: VoxelSinkFactory | None = None,
 ) -> Result:
@@ -396,6 +441,7 @@ def extract_files(
         image_settings: Resampling, IBSI interpolation and mask-correction options.
         transforms: Derived images to compute; defaults to the original image only.
         mode: ``"roi"`` for scalar features or ``"voxel"`` for maps.
+        map_dtype: Storage dtype for retained maps, as in ``extract``.
         sink: Optional evaluated-batch consumer in voxel mode, as in
             ``extract``. Coordinates follow the processed grid after resampling
             or cropping; no dense feature maps are retained when a sink is supplied.
@@ -410,6 +456,7 @@ def extract_files(
         RuntimeError: If SimpleITK cannot read a supplied file.
     """
     _validate_mode(mode, sink, sink_factory)
+    validate_map_dtype(map_dtype)
     options = settings or Settings()
     pair = load_image_pair(
         Path(image_path).expanduser(), Path(mask_path).expanduser(),
@@ -419,6 +466,7 @@ def extract_files(
     result = extract(
         pair.image.array, pair.mask.array, settings=extraction, transforms=transforms,
         spacing=pair.image.spacing, mode=mode, sink=sink, sink_factory=sink_factory,
+        map_dtype=map_dtype,
     )
     metadata = file_metadata(
         result.metadata, pair.image, settings=options, source_geometry=pair.source_geometry,

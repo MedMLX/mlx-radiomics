@@ -197,10 +197,12 @@ def _roi_intensity(
         first_mask = mx.ones((1, sampled.size), dtype=mx.bool_)
         first_bins = (
             mx.array(data.bins[data.sampling_mask][None, :])
-            if any(name in {"Entropy", "Uniformity"} for name in first_names)
-            else mx.zeros((1, sampled.size), dtype=mx.int32)
+            if data.bins is not None
+            and any(name in {"Entropy", "Uniformity"} for name in first_names)
+            else None
         )
         if set(first_names) <= {"Entropy", "Uniformity"}:
+            assert first_bins is not None
             first = first_order_histogram(
                 first_bins,
                 first_mask,
@@ -251,7 +253,7 @@ def _roi_intensity(
         return values
     assert window is not None
     image = data.image[window]
-    bins, mask = mx.array(data.bins[window]), array_from_bool(data.sampling_mask[window])
+    mask = array_from_bool(data.sampling_mask[window])
     if ivh is not None:
         values.update(
             {
@@ -270,6 +272,9 @@ def _roi_intensity(
                 ).items()
             }
         )
+    if data.bins is None:
+        return values
+    bins = mx.array(data.bins[window])
     if any(name.startswith("intensityhistogram_") for name in settings.features):
         from mlxradiomics.features.intensity_histogram import histogram_statistics
 

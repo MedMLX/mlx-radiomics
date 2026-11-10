@@ -58,6 +58,7 @@ def _oracle(image: NDArray[np.float64], mask: NDArray[np.uint8], settings: Setti
             centers: NDArray[np.intp]) -> dict[str, NDArray[np.float64]]:
     """Independent local definitions on each center's clipped neighborhood."""
     data = prepare(image, mask, settings, voxel=True)
+    assert data.bins is not None
     values: dict[str, list[float]] = {name: [] for name in NAMES}
     for center in centers:
         spans = [0 if settings.force2d_axis == a else settings.kernel_radius

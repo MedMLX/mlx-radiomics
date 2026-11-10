@@ -85,6 +85,18 @@ def test_retained_maps_admit_the_complete_payload_before_allocation(
     result = extract_original(image, mask,
         settings=Settings(features=("firstorder_Mean",)), voxel=True)
     assert np.asarray(result.features["original_firstorder_Mean"])[2, 2, 2] == 62
+    # The same byte budget admits two float32 maps, through either capacity check.
+    compact = (
+        extract(image, mask, settings=Settings(features=("firstorder_Mean",)),
+                transforms=TransformSettings(
+                    image_types=(ImageType.ORIGINAL, ImageType.MEAN), mean=MeanSettings(support=1),
+                ), mode="voxel", map_dtype="float32")
+        if derived else
+        extract_original(image, mask, settings=settings, voxel=True, map_dtype="float32")
+    )
+    assert len(compact.features) == 2
+    for values in compact.features.values():
+        assert isinstance(values, np.ndarray) and values.dtype == np.float32
     # Streamed batches use no full-map payload even when the selection exceeds it.
     rows = 0
 

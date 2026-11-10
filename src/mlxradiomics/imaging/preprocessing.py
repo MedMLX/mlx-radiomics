@@ -45,9 +45,9 @@ class Prepared(PreparedInput):
     """``PreparedInput`` plus gray-level discretization.
 
     Attributes:
-        bins: Int32 array of the image's shape. Inside ``sampling_mask`` it holds the 1-based
-            gray-level bin; elsewhere 0. All zeros when no selected feature reads bins:
-            first-order features other than Entropy/Uniformity use source intensities.
+        bins: Int32 array of the image's shape, or ``None`` when no selected feature
+            reads this lattice. Inside ``sampling_mask`` it holds the 1-based gray-level
+            bin; elsewhere 0. Raw first-order statistics use source intensities.
         gray_levels: Highest bin index (the number of gray levels, empty ones included).
             The unused-lattice sentinel is 1 when no selected feature reads these bins:
             raw intensity statistics, shape, physical local-intensity peaks or IVH
@@ -56,7 +56,7 @@ class Prepared(PreparedInput):
             binning. It qualifies later source preparation without rescanning samples.
     """
 
-    bins: NDArray[np.int32]
+    bins: NDArray[np.int32] | None
     gray_levels: int
     integer_source_bounds: tuple[int, int] | None = None
 
@@ -472,7 +472,7 @@ def prepare(image: HostArray, mask: HostArray, settings: Settings, *, voxel: boo
     Nonconstant fixed-count bins use exact source-value thresholds and include the maximum
     in the final bin. A constant ROI uses bin 1 for ``constant_roi_bin="first"`` and the
     midpoint bin ``bin_count // 2 + 1`` for ``"middle"``. When only shape
-    features are selected, binning is skipped (``bins`` is all zeros, one gray level).
+    features are selected, binning is skipped (``bins=None``, one gray level).
     The same applies when selected intensity features read only source intensities
     (first-order features except Entropy and Uniformity): unused bin settings cannot
     restrict their input domain.
@@ -493,17 +493,17 @@ def discretize_prepared(
     """Discretize validated samples without repeating source or mask preparation.
 
     Only selections that read bins construct a lattice. Raw intensity statistics,
-    shape, local intensity and IVH leave ``bins`` zero with the unused-lattice
+    shape, local intensity and IVH leave ``bins=None`` with the unused-lattice
     sentinel ``gray_levels=1``; IVH constructs its separate lattice later.
     """
-    bins = np.zeros(data.image.shape, dtype=np.int32)
     assign = any(
         not name.startswith(("shape", "localintensity_", "ivh_", "firstorder_"))
         or name in {"firstorder_Entropy", "firstorder_Uniformity"}
         for name in settings.features
     )
     if not assign:
-        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, bins, 1)
+        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, None, 1)
+    bins = np.zeros(data.image.shape, dtype=np.int32)
     if settings.bin_count is not None and selected.min() == selected.max():
         level = 1 if settings.constant_roi_bin == "first" else settings.bin_count // 2 + 1
         _check_gray_levels(level, settings)

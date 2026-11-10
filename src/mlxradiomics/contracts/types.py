@@ -13,7 +13,9 @@ from mlxradiomics.contracts.json import JsonValue
 
 type HostArray = NDArray[np.generic]
 type FloatArray = NDArray[np.float64]
-type Features = dict[str, float | FloatArray]
+type VoxelArray = NDArray[np.float32] | FloatArray
+type MapDtype = Literal["float64", "float32"]
+type Features = dict[str, float | VoxelArray]
 
 
 class VoxelSink(Protocol):
@@ -224,11 +226,14 @@ class ExecutionMetadata(TypedDict):
     ``image_geometry`` for file extraction. ``source_geometry`` retains the file's
     grid before spatial processing. Feature validity counts classify computed samples only;
     ``excluded_voxels`` records the array volume outside the processed intensity ROI.
+    ``map_dtype`` records the requested retained-map storage in voxel mode; arithmetic
+    and streamed batches remain float32.
     """
 
     settings: SettingsPayload
     device: str
     precision: str
+    map_dtype: NotRequired[MapDtype]
     voxel: bool
     spacing: tuple[float, ...]
     histogram_method: str

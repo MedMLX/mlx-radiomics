@@ -49,6 +49,8 @@ Extraction returns `.features` and `.metadata`. Exports return `.report`, `.maps
 and `.metadata`. Effective transforms are in `.metadata["transforms"]`. `mode`
 selects the value type for static type checkers as well as at runtime. In-memory
 maps are float64 NumPy arrays holding float32 results, zero outside the ROI.
+Pass `map_dtype="float32"` to `extract` or `extract_files` to retain float32 maps
+using half the storage, with the same values, special values and background.
 Saved NIfTI maps are float32. The float64 container does not increase calculation
 precision. Use export or streaming for large images instead of retaining all maps.
 

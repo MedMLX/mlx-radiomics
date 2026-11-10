@@ -66,6 +66,16 @@ def test_array_file_and_streamed_features_share_values_and_preserve_geometry(
         "origin": (7.0, 11.0),
         "direction": (1.0, 0.0, 0.0, 1.0),
     }
+    compact = extract_files(
+        paths[0], paths[1], settings=settings, transforms=transforms,
+        mode="voxel", map_dtype="float32",
+    )
+    assert_type(compact, Result[NDArray[np.float32]])
+    assert compact.metadata.get("map_dtype") == "float32"
+    assert compact.metadata.get("image_geometry") == file_result.metadata.get("image_geometry")
+    for values in compact.features.values():
+        assert values.dtype == np.float32
+        np.testing.assert_array_equal(values, np.full(image.shape, 2.5, dtype=np.float32))
 
     collected = {name: np.zeros((2, 2), dtype=np.float32) for name in names}
     lifetime: list[tuple[str, str]] = []
@@ -115,6 +125,63 @@ def test_invalid_mode_and_roi_sink_are_rejected_before_file_io(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="require mode='voxel'"):
         extract_files(image, mask, sink=consume)
+    with pytest.raises(ValueError, match="map_dtype"):
+        extract_files(image, mask, mode="voxel", map_dtype=cast(Literal["float32"], "float16"))
+
+
+@pytest.mark.parametrize("features", [
+    ("firstorder_Mean",),
+    ("firstorder_Entropy",),
+    ("ivh_AreaUnderIVHCurve",),
+    ("firstorder_Mean", "firstorder_Entropy", "ivh_AreaUnderIVHCurve", "glcm_Contrast"),
+])
+def test_compact_retained_maps_preserve_values_and_background(features: tuple[str, ...]) -> None:
+    image = np.arange(20, dtype=np.float64).reshape(4, 5)
+    mask = np.zeros(image.shape, dtype=np.uint8)
+    mask[1:3, 1:4] = 1
+    settings = Settings(features=features, bin_width=1)
+    transforms = TransformSettings(
+        image_types=(ImageType.ORIGINAL, ImageType.MEAN), mean=MeanSettings(support=1),
+    )
+    legacy = extract(image, mask, settings=settings, transforms=transforms,
+                     spacing=(1.0, 1.0), mode="voxel")
+    compact = extract(image, mask, settings=settings, transforms=transforms,
+                      spacing=(1.0, 1.0), mode="voxel", map_dtype="float32")
+    assert_type(legacy, Result[NDArray[np.float64]])
+    assert_type(compact, Result[NDArray[np.float32]])
+    assert legacy.metadata.get("map_dtype") == "float64"
+    assert compact.metadata.get("map_dtype") == "float32"
+    assert compact.metadata["feature_validity"] == legacy.metadata["feature_validity"]
+    for name, values in compact.features.items():
+        original = legacy.features[name]
+        assert values.dtype == np.float32 and original.dtype == np.float64
+        assert 2 * values.nbytes == original.nbytes
+        np.testing.assert_array_equal(values.astype(np.float64), original)
+        np.testing.assert_array_equal(np.signbit(values), np.signbit(original))
+        np.testing.assert_array_equal(values[mask == 0], 0)
+    if "firstorder_Mean" in features:
+        assert compact.features["original_firstorder_Mean"][1, 1] == 9
+
+
+def test_compact_retained_maps_preserve_nonfinite_values_and_zero_signs() -> None:
+    mask = np.zeros((3, 4), dtype=np.uint8)
+    mask[1, 1:3] = 1
+    settings = Settings(
+        features=("firstorder_Energy", "firstorder_Skewness", "firstorder_Entropy"),
+        bin_count=1, zero_variance_moments="nan",
+    )
+    image = np.full(mask.shape, 1e20)
+    legacy = extract(image, mask, settings=settings, spacing=(1.0, 1.0), mode="voxel")
+    compact = extract(image, mask, settings=settings, spacing=(1.0, 1.0),
+                      mode="voxel", map_dtype="float32")
+    assert np.isposinf(compact.features["original_firstorder_Energy"][mask == 1]).all()
+    assert np.isnan(compact.features["original_firstorder_Skewness"][mask == 1]).all()
+    assert np.signbit(compact.features["original_firstorder_Entropy"][mask == 1]).all()
+    for name, values in compact.features.items():
+        original = legacy.features[name]
+        np.testing.assert_array_equal(values.astype(np.float64), original)
+        np.testing.assert_array_equal(np.signbit(values), np.signbit(original))
+        assert not np.signbit(values[mask == 0]).any()
 
 
 def test_configuration_loads_without_execution_dependencies() -> None:
