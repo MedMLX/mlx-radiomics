@@ -6,16 +6,24 @@ morphological mask selection after resegmentation.
 """
 
 from itertools import permutations
-from math import dist, sqrt
+from math import dist, fsum, sqrt
 
 import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.features import morphology as morphology
 from mlxradiomics.features.morphology import morphology_statistics
+
+
+def _pair(first: float, second: float) -> NDArray[np.float64]:
+    """Calibrate the contrast of two adjacent CT voxels to a numeric stress range."""
+    image = hcc_patch((2, 1, 1))[0]
+    fraction = (image - image[0, 0, 0]) / (image[1, 0, 0] - image[0, 0, 0])
+    return first + fraction * (second - first)
 
 
 def _values(
@@ -42,8 +50,7 @@ def test_centre_of_mass_shift_uses_separate_masks() -> None:
     morphology[1:3, 1:3, 1:3] = True
     intensity = np.zeros_like(morphology)
     intensity[0, 0, 0] = True
-    image = np.zeros((4, 4, 4), dtype=np.float64)
-    image[intensity] = 7.0
+    image = hcc_patch((4, 4, 4))[0]
     values = _values(image, intensity, morphology, (2.0, 1.0, 1.0),
                      ("CentreOfMassShift",))
     assert values["CentreOfMassShift"] == pytest.approx(sqrt(13.5), rel=2e-6)
@@ -52,7 +59,7 @@ def test_centre_of_mass_shift_uses_separate_masks() -> None:
 def test_constant_intensity_centre_of_mass_shift_is_zero() -> None:
     mask = np.zeros((4, 4, 4), dtype=np.bool_)
     mask[1:3, 1:3, 1:3] = True
-    image = np.full(mask.shape, 12.5, dtype=np.float64)
+    image = hcc_background(mask.shape) * (-12.5 / 2048)
     values = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
     assert values["CentreOfMassShift"] == pytest.approx(0, abs=1e-7)
 
@@ -62,7 +69,7 @@ def test_integrated_intensity_uses_mesh_volume_and_intensity_mask() -> None:
     # constant intensity 3 gives integrated intensity 34.
     mask = np.zeros((4, 4, 4), dtype=np.bool_)
     mask[1:3, 1:3, 1:3] = True
-    image = np.full(mask.shape, 3.0, dtype=np.float64)
+    image = hcc_background(mask.shape) * (-3 / 2048)
     values = _values(image, mask, mask, (2.0, 1.0, 1.0), ("IntegratedIntensity",))
     assert values["IntegratedIntensity"] == pytest.approx(34.0, rel=2e-6)
 
@@ -71,27 +78,29 @@ def test_integrated_intensity_uses_mesh_volume_and_intensity_mask() -> None:
 def test_public_morphology_resegments_intensities_and_retains_the_shape(
     conventions: Conventions,
 ) -> None:
-    """A resegmented half-cube retains the original mesh and geometric centroid."""
-    image = np.zeros((4, 4, 4), dtype=np.float64)
+    """A resegmented source ROI retains its original mesh and geometric centroid."""
+    image = hcc_patch((4, 4, 4))[0]
     labels = np.zeros(image.shape, dtype=np.uint8)
     labels[1:3, 1:3, 1:3] = 1
-    image[1:3, 1:3, 1:3] = np.arange(1, 9, dtype=np.float64).reshape(2, 2, 2)
-    points = [(4.0, 1.0, 1.0), (4.0, 1.0, 2.0),
-              (4.0, 2.0, 1.0), (4.0, 2.0, 2.0)]
-    centered = (-1.5, -0.5, 0.5, 1.5)
-    pairs = list(permutations(range(4), 2))
+    threshold = float(np.median(image[labels == 1]))
+    intensity = (labels == 1) & (image >= threshold)
+    points = np.argwhere(intensity) * np.asarray([2.0, 1.0, 1.0])
+    values = image[intensity]
+    centered = values - values.mean()
+    count = len(values)
+    pairs = list(permutations(range(count), 2))
     weight = sum(1 / dist(points[i], points[j]) for i, j in pairs)
-    variance_sum = sum(value * value for value in centered)
+    variance_sum = float(centered @ centered)
+    geometric = np.argwhere(labels == 1).mean(axis=0) * [2, 1, 1]
+    weighted = np.sum(points * values[:, None], axis=0) / values.sum()
     expected = {
-        # Requesting geometry with IntegratedIntensity exercises their shared lazy
-        # mesh. Resegmentation must still leave both features on the original shape.
         "MeshVolume": 34 / 3,
-        "CentreOfMassShift": sqrt(681) / 26,
-        "IntegratedIntensity": 221 / 3,
-        "MoransI": 4 / weight / variance_sum * sum(
+        "CentreOfMassShift": float(np.linalg.norm(weighted - geometric)),
+        "IntegratedIntensity": float(values.mean()) * 34 / 3,
+        "MoransI": count / weight / variance_sum * sum(
             centered[i] * centered[j] / dist(points[i], points[j]) for i, j in pairs
         ),
-        "GearysC": 3 / (2 * weight * variance_sum) * sum(
+        "GearysC": (count - 1) / (2 * weight * variance_sum) * sum(
             (centered[i] - centered[j]) ** 2 / dist(points[i], points[j]) for i, j in pairs
         ),
     }
@@ -100,7 +109,7 @@ def test_public_morphology_resegments_intensities_and_retains_the_shape(
         settings=settings_for(
             conventions,
             features=tuple(f'shape_{name}' for name in expected),
-            resegment_range=(5.0, 8.0),
+            resegment_range=(threshold,),
             scratch_mib=1,
         ),
     )
@@ -131,34 +140,19 @@ def _all_pairs(
 def test_moran_and_geary_match_three_point_line(
     spacing: tuple[float, float, float],
 ) -> None:
-    # Coordinates 0,1,2 along axis 0; intensities 0,1,2. Mean 1, deviations (-1,0,1).
-    # Distances along the line scale with spacing, so both ratios are unchanged.
-    mask = np.zeros((3, 1, 1), dtype=np.bool_)
-    mask[:, 0, 0] = True
-    image = np.zeros(mask.shape, dtype=np.float64)
-    image[:, 0, 0] = (0.0, 1.0, 2.0)
+    mask = np.ones((3, 1, 1), dtype=np.bool_)
+    image = hcc_patch(mask.shape)[0]
+    expected_moran, expected_geary = _all_pairs(image, mask, spacing)
     values = _values(image, mask, mask, spacing, ("MoransI", "GearysC"))
-    assert values["MoransI"] == pytest.approx(-0.3, rel=2e-6)
-    assert values["GearysC"] == pytest.approx(0.8, rel=2e-6)
+    assert values["MoransI"] == pytest.approx(expected_moran, rel=2e-6)
+    assert values["GearysC"] == pytest.approx(expected_geary, rel=2e-6)
 
 
 def test_moran_and_geary_handle_anisotropic_distance_weights() -> None:
-    # Three voxels at (0,0,0), (0,1,0), (1,0,0), spacing (2,1,1), intensities
-    # (0,1,2). Pair distances are 1, 2, sqrt(5); the expected values follow directly
-    # from the weighted definitions with mean 1.
     mask = np.zeros((2, 2, 1), dtype=np.bool_)
     mask[0, 0, 0] = mask[1, 0, 0] = mask[0, 1, 0] = True
-    image = np.zeros(mask.shape, dtype=np.float64)
-    image[0, 0, 0], image[0, 1, 0], image[1, 0, 0] = 0.0, 1.0, 2.0
-    distance_01, distance_02, distance_12 = 1.0, 2.0, sqrt(5)
-    weight_sum = 2 * (1 / distance_01 + 1 / distance_02 + 1 / distance_12)
-    moran_numerator = 2 * (1 / distance_02) * (-1)
-    geary_numerator = 2 * (
-        (1 / distance_01) * 1**2 + (1 / distance_02) * 2**2
-        + (1 / distance_12) * 1**2
-    )
-    expected_moran = (3 / weight_sum) * moran_numerator / 2
-    expected_geary = ((3 - 1) / (2 * weight_sum)) * geary_numerator / 2
+    image = hcc_patch(mask.shape)[0]
+    expected_moran, expected_geary = _all_pairs(image, mask, (2.0, 1.0, 1.0))
     values = _values(
         image, mask, mask, (2.0, 1.0, 1.0), ("MoransI", "GearysC"),
     )
@@ -173,7 +167,7 @@ def test_tiled_spatial_autocorrelation_matches_all_pairs(dense: bool) -> None:
     rng = np.random.default_rng(4)
     shape = (9, 11, 8)
     mask = np.ones(shape, dtype=np.bool_) if dense else rng.random(shape) < 0.6
-    image = rng.integers(-50, 80, size=shape).astype(np.float64)
+    image = hcc_patch(shape)[0]
     spacing = (2.0, 0.7, 0.9)
     computed = morphology_statistics(image, mask, mask, spacing, 1, ("MoransI", "GearysC"))
     moran, geary = _all_pairs(image, mask, spacing)
@@ -187,7 +181,7 @@ def test_pairwise_autocorrelation_refuses_oversized_roi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(morphology, "MAX_PAIRWISE_VOXELS", 7)
-    image = np.arange(27, dtype=np.float64).reshape(3, 3, 3)
+    image = hcc_patch((3, 3, 3))[0]
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[:2, :2, :2] = 1
     with pytest.raises(ValueError, match="8 ROI voxels, above the 7-voxel limit"):
@@ -199,8 +193,7 @@ def test_pairwise_autocorrelation_refuses_oversized_roi(
 def test_spatial_autocorrelation_is_invariant_to_a_large_intensity_offset() -> None:
     mask = np.zeros((3, 1, 1), dtype=np.bool_)
     mask[:, 0, 0] = True
-    baseline = np.zeros(mask.shape, dtype=np.float64)
-    baseline[:, 0, 0] = (0.0, 1.0, 2.0)
+    baseline = hcc_patch(mask.shape)[0]
     shifted = baseline + 1e8
     expected = _values(baseline, mask, mask, (1.0, 1.0, 1.0), ("MoransI", "GearysC"))
     observed = _values(shifted, mask, mask, (1.0, 1.0, 1.0), ("MoransI", "GearysC"))
@@ -210,7 +203,7 @@ def test_spatial_autocorrelation_is_invariant_to_a_large_intensity_offset() -> N
 
 def test_constant_intensity_autocorrelation_is_undefined() -> None:
     mask = np.ones((2, 2, 1), dtype=np.bool_)
-    image = np.full(mask.shape, 5.0, dtype=np.float64)
+    image = hcc_background(mask.shape) * (-5 / 2048)
     values = _values(image, mask, mask, (1.0, 1.0, 1.0), ("MoransI", "GearysC"))
     assert np.isnan(values["MoransI"])
     assert np.isnan(values["GearysC"])
@@ -219,7 +212,7 @@ def test_constant_intensity_autocorrelation_is_undefined() -> None:
 @pytest.mark.parametrize("offset, expected", [(0.0, 1 / 4), (1.0, 1 / 6)])
 def test_weighted_centroid_retains_absolute_intensities(offset: float, expected: float) -> None:
     mask = np.ones((2, 1, 1), dtype=np.bool_)
-    image = np.array([1.0 + offset, 3.0 + offset], dtype=np.float64).reshape(mask.shape)
+    image = _pair(1.0 + offset, 3.0 + offset)
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
     assert actual["CentreOfMassShift"] == pytest.approx(expected, rel=2e-6)
 
@@ -234,9 +227,10 @@ def test_adjacent_float32_weights_give_the_exact_centroid_shift(
     # made it about 25% low.
     w0 = float(np.float32(base))
     w1 = float(np.nextafter(np.float32(base), np.float32(np.inf)))
-    image = np.zeros((separation + 1, 1, 1), dtype=np.float64)
-    image[0], image[separation] = w0, w1
-    mask = image != 0
+    image = hcc_resampled((separation + 1, 1, 1))
+    image[0], image[separation] = _pair(w0, w1)
+    mask = np.zeros(image.shape, dtype=np.bool_)
+    mask[[0, separation]] = True
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
     expected = separation * (w1 - w0) / (2 * (w0 + w1))
     assert actual["CentreOfMassShift"] == pytest.approx(expected, rel=1e-6)
@@ -245,16 +239,16 @@ def test_adjacent_float32_weights_give_the_exact_centroid_shift(
 def test_constant_weights_on_a_long_asymmetric_mask_have_zero_shift() -> None:
     # The geometric centroid (2**20 + 1) / 3 is not a float32 value; centering on its
     # rounded copy reported a 0.0208 shift for identical weights.
-    image = np.zeros((2**20 + 1, 1, 1), dtype=np.float64)
-    image[[0, 1, 2**20]] = 5.0
-    mask = image != 0
+    image = np.repeat(hcc_background((1, 1, 1)) * (-5 / 2048), 2**20 + 1, axis=0)
+    mask = np.zeros(image.shape, dtype=np.bool_)
+    mask[[0, 1, 2**20]] = True
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
     assert actual["CentreOfMassShift"] == 0
 
 
 def test_centroid_preserves_weights_carried_by_source_residuals() -> None:
     mask = np.ones((2, 1, 1), dtype=np.bool_)
-    image = np.array([1e8, 1e8 + 1], dtype=np.float64).reshape(mask.shape)
+    image = _pair(1e8, 1e8 + 1)
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
     # Two weights a,b one voxel apart have shift (b-a)/(2*(a+b)). Their
     # high words coincide, but the residual represents their difference exactly.
@@ -263,44 +257,45 @@ def test_centroid_preserves_weights_carried_by_source_residuals() -> None:
 
 def test_centroid_refuses_source_differences_lost_by_both_words() -> None:
     mask = np.ones((2, 1, 1), dtype=np.bool_)
-    image = np.array([0.1, np.nextafter(0.1, np.inf)]).reshape(mask.shape)
+    image = _pair(0.1, float(np.nextafter(0.1, np.inf)))
     with pytest.raises(RuntimeError, match="centroid is too ill-conditioned"):
         _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
 
 
 def test_centroid_preserves_a_resolved_small_signed_total() -> None:
     mask = np.ones((3, 1, 1), dtype=np.bool_)
-    image = np.array([1e8, 1.0, -1e8], dtype=np.float64).reshape(mask.shape)
+    image = hcc_patch(mask.shape)[0]
+    image[0], image[-1] = 1e8, -1e8
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
-    # Exact signed mass is one; weighted centroid is 1-2e8, geometric centroid 1.
-    assert actual["CentreOfMassShift"] == 2e8
+    # The source middle voxel survives the cancelling endpoint masses.
+    assert actual["CentreOfMassShift"] == pytest.approx(2e8 / image[1, 0, 0], rel=2e-6)
 
 
-@pytest.mark.parametrize("line, expected", [
-    ([1e8, 1.0, -1e8, 0, 0, 0, 0, 0], 17 / 24),
-    ([-1e8, -1.0, 1e8, 0, 0, 0, 0, 0], -17 / 24),
-    ([1.0, -1.0] * 4, 0.0),
-])
-def test_integrated_intensity_retains_signed_and_zero_totals(
-    line: list[float], expected: float,
-) -> None:
-    image = np.asarray(line).reshape(2, 2, 2)
+@pytest.mark.parametrize("sign", [-1, 0, 1])
+def test_integrated_intensity_retains_signed_and_zero_totals(sign: int) -> None:
+    image = hcc_patch((2, 2, 2))[0]
+    if sign:
+        image.reshape(-1)[[0, -1]] = 1e8, -1e8
+        image *= sign
+    else:
+        image -= image.mean()
     mask = np.ones(image.shape, dtype=np.bool_)
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("IntegratedIntensity",))
-    # The cube's independent mesh volume is 17/3. Its mean is +1/8, -1/8 or zero.
+    # The independently defined cube mesh has volume 17/3.
+    expected = fsum(float(v) for v in image.reshape(-1)) / image.size * 17 / 3
     assert actual["IntegratedIntensity"] == pytest.approx(expected, rel=2e-6, abs=0)
 
 
 def test_zero_signed_mass_does_not_define_a_weighted_centroid() -> None:
-    image = np.array([1.0, -1.0]).reshape(2, 1, 1)
+    image = hcc_patch((2, 1, 1))[0]
+    image -= image.mean()
     mask = np.ones(image.shape, dtype=np.bool_)
     with pytest.raises(RuntimeError, match="total intensity is too ill-conditioned"):
         _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
 
 
 def test_spatial_autocorrelation_preserves_colliding_high_words() -> None:
-    image = np.array([2.0, 2.0 + 1e-8, 2.5, 2.5 + 1e-8,
-                      3.0, 3.0 + 1e-8, 3.5, 3.5 + 1e-8]).reshape(2, 2, 2)
+    image = 2 + hcc_patch((2, 2, 2))[0] * 1e-9
     mask = np.ones(image.shape, dtype=np.bool_)
     actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("MoransI", "GearysC"))
     moran, geary = _all_pairs(image, mask, (1.0, 1.0, 1.0))
@@ -314,6 +309,6 @@ def test_centre_of_mass_shift_below_float32_range_is_not_reported_as_zero() -> N
     # 1e-40. That nonzero length is below the normal float32 range, so it must be
     # refused like an IntegratedIntensity underflow rather than returned as zero.
     mask = np.ones((2, 1, 1), dtype=np.bool_)
-    image = np.array([1.0, 3.0], dtype=np.float64).reshape(mask.shape)
+    image = _pair(1.0, 3.0)
     with pytest.raises(RuntimeError, match="CentreOfMassShift underflows the float32 range"):
         _values(image, mask, mask, (1e-40, 1.0, 1.0), ("CentreOfMassShift",))

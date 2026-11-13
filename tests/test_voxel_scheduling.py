@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.config.transforms import ImageType, TransformSettings
@@ -19,9 +20,8 @@ FEATURES = (
 
 
 def _input() -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
-    z, y, x = np.indices((9, 8, 7))
-    image = (64 * z + 8 * y + x).astype(np.float64)
-    mask = np.ones(image.shape, dtype=np.bool_)
+    image, liver, _ = hcc_patch((9, 8, 7))
+    mask = liver != 0
     mask[0] = False
     mask[3:5, 3:5, 3:5] = False
     mask[-1, -1, -1] = False
@@ -103,6 +103,7 @@ def test_grouped_derived_stream_keeps_image_prefixes_and_validity() -> None:
 
 def test_grouped_first_order_retains_source_precision_guard() -> None:
     image, mask = _input()
+    assert mask[4, 5, 5]
     image[4, 5, 5] = 2.0**-130
     settings = Settings(features=FEATURES, bin_width=16, scratch_mib=1)
     with pytest.raises(RuntimeError, match=r"nonzero float64 sources below 2\*\*-126"):
@@ -111,9 +112,9 @@ def test_grouped_first_order_retains_source_precision_guard() -> None:
 
 
 def test_sparse_unmasked_maps_keep_global_bins_and_stream_original_centers() -> None:
-    image = np.zeros((9, 13), dtype=np.float32)
+    ct, _, _ = hcc_patch((9, 13))
+    image = ct.astype(np.float32)
     image[0, 0] = 1000  # Outside every neighborhood, but still anchors global bins.
-    image[5:8, 8:12] = np.arange(1, 13, dtype=np.float32).reshape(3, 4)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[6, 9:11] = 1
     settings = Settings(features=("firstorder_Mean", "firstorder_Entropy"),
@@ -121,7 +122,11 @@ def test_sparse_unmasked_maps_keep_global_bins_and_stream_original_centers() -> 
     retained = extract(image, mask, settings=settings, mode="voxel")
     mean = retained.features["original_firstorder_Mean"]
     assert isinstance(mean, np.ndarray)
-    np.testing.assert_array_equal(mean[mask == 1], [6., 7.])
+    expected = np.asarray([
+        np.mean(image[row - 1:row + 2, column - 1:column + 2].astype(np.float64))
+        for row, column in np.argwhere(mask)
+    ], dtype=np.float32)
+    np.testing.assert_array_equal(mean[mask == 1], expected)
     np.testing.assert_array_equal(retained.features["original_firstorder_Entropy"],
                                   np.zeros(image.shape))
     delivered: list[tuple[NDArray[np.int32], Mapping[str, NDArray[np.float32]]]] = []

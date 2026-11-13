@@ -11,6 +11,7 @@ import pytest
 import SimpleITK as sitk
 from numpy.typing import NDArray
 from radiomics_reference.mathematics import gradient_magnitude, masked_neighborhood_mean
+from radiomics_reference.real_images import hcc_crop, hcc_patch
 from skimage.feature import local_binary_pattern
 
 from mlxradiomics.config.filtering import LBPMethod, LogKernel, OrientationPooling
@@ -53,7 +54,9 @@ def test_lbp_radius_requires_a_positive_real_number(
 def test_elementary_transform_keeps_representable_constant_endpoint(
     amplitude: float, kind: ImageType,
 ) -> None:
-    image = np.full((2, 3), amplitude, dtype=np.float32)
+    background, _, _ = hcc_crop(np.s_[0:2, 0:3, 64])
+    assert np.all(background == -2048)
+    image = (background * (-amplitude / 2048)).astype(np.float32)
     with mx.stream(mx.gpu):
         output = next(feature_images(mx.array(image), (1., 1.),
                                     TransformSettings(image_types=(kind,))))
@@ -93,7 +96,7 @@ def _elementary(kind: ImageType, image: HostArray) -> NDArray[np.float64]:
 def test_elementary_and_gradient_images_follow_direct_formulas(
     kind: ImageType, integer: bool,
 ) -> None:
-    image = np.random.default_rng(23).normal(4, 2, (6, 7, 8))
+    image, _, _ = hcc_crop(np.s_[103:109, 214:221, 60:68])
     image = image.astype(np.int16 if integer else np.float64)
     spacing = (1.3, 0.9, 2.0)
     options = TransformSettings(image_types=(kind,))
@@ -118,7 +121,13 @@ def test_gradient_magnitude_is_exact_across_the_float32_range(
 ) -> None:
     # Each expected magnitude is a normal float32 value although squaring the components
     # or subtracting the opposite-sign endpoints would leave the float32 range.
-    image = np.tile(np.array(row, np.float32), (3, 1))
+    source = hcc_patch((3, 3))[0]
+    # Calibrate CT contrast to the requested stress range; the repeated endpoint
+    # case clips its upper half to retain a sharp plateau at the positive limit.
+    unit = (source - source.min()) / np.ptp(source)
+    if row[1] == row[2]:
+        unit = np.minimum(unit * 2, 1)
+    image = (row[0] + unit * (row[-1] - row[0])).astype(np.float32)
     with mx.stream(mx.gpu):
         output = next(feature_images(mx.array(image), (1.0, 1.0),
                                      TransformSettings(image_types=(ImageType.GRADIENT,))))
@@ -129,7 +138,8 @@ def test_gradient_magnitude_is_exact_across_the_float32_range(
 
 
 def test_log_images_dispatch_each_sigma_with_physical_spacing() -> None:
-    image = np.random.default_rng(37).normal(size=(8, 9, 10)).astype(np.float32)
+    ct, _, _ = hcc_crop(np.s_[103:111, 214:223, 60:70])
+    image = ct.astype(np.float32)
     spacing = (0.7, 1.2, 2.0)
     options = TransformSettings(image_types=(ImageType.LOG,), log=LoGSettings(sigma=(1.0, 2.5)))
     source = sitk.GetImageFromArray(image.astype(np.float64))
@@ -234,11 +244,28 @@ def _lbp3d_reference(
 
 @pytest.mark.parametrize("integer", [False, True])
 def test_lbp3d_matches_independent_spherical_projection(integer: bool) -> None:
-    image = np.random.default_rng(23).normal(4, 2, (9, 9, 9))
+    from scipy.ndimage import map_coordinates
+    from trimesh.creation import icosphere
+
+    image, _, _ = hcc_crop(np.s_[103:112, 214:223, 60:69])
     image = image.astype(np.int16 if integer else np.float64)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[3:6, 3:6, 3:6] = 1
     mask[0, 0, 0] = 1
+    centers = np.argwhere(mask)
+    vertices = np.asarray(icosphere(subdivisions=1, radius=1.0).vertices)
+    sampled = np.asarray(map_coordinates(
+        image.astype(np.float64),
+        (centers[:, None, :] + vertices[None, :, :]).transpose(2, 0, 1),
+        order=3, mode="constant", cval=0.0,
+    ), dtype=np.float64)
+    threshold = image[tuple(centers.T)].astype(np.float64) - (0.5 if integer else 0)
+    # The public contract rejects ambiguous spline decisions. Compare accepted
+    # centers whose independent source samples clear their decision by 0.01 HU,
+    # exceeding the float32 roundoff bound throughout this CT crop.
+    stable = np.all(np.abs(sampled - threshold[:, None]) > 0.01, axis=1)
+    assert stable.any()
+    mask[tuple(centers[~stable].T)] = 0
     levels = 3
     options = TransformSettings(
         image_types=(ImageType.LBP3D,), lbp3d=LBP3DSettings(levels=levels, subdivision=1)
@@ -269,7 +296,8 @@ def test_lbp3d_matches_independent_spherical_projection(integer: bool) -> None:
 @pytest.mark.parametrize("baseline", [8.0, 10000.0])
 @pytest.mark.parametrize("method", ["default", "ror", "uniform", "nri_uniform", "var"])
 def test_lbp2d_methods(method: str, baseline: float) -> None:
-    image = np.random.default_rng(7).normal(baseline, 2, (7, 9))
+    ct, _, _ = hcc_crop(np.s_[103:110, 214:223, 64])
+    image = baseline + (ct - ct.mean()) / 100
     options = TransformSettings(
         image_types=(ImageType.LBP2D,), lbp2d=LBP2DSettings(method=LBPMethod(method))
     )
@@ -288,15 +316,12 @@ def test_lbp2d_methods(method: str, baseline: float) -> None:
 
 
 def test_lbp2d_variance_keeps_fractional_values_across_integer_wrappers() -> None:
-    # Four samples around the center have differences 0, 1, 2, 3, whose population
-    # variance is (0-1.5)^2 + ... = 1.25. An integer source must not truncate this
-    # mathematical result, whether the values are 2-D or a slice of a 3-D volume.
-    slice_values = np.zeros((3, 3), dtype=np.int16)
-    slice_values[1, 1] = 10
-    slice_values[1, 2] = 10
-    slice_values[0, 1] = 11
-    slice_values[1, 0] = 12
-    slice_values[2, 1] = 13
+    ct, _, _ = hcc_crop(np.s_[105:108, 215:218, 64])
+    slice_values = ct.astype(np.int16)
+    # At P=4,R=1 the samples are the four cardinal neighbors. Their variance
+    # is fractional even for integer CT, and must survive both dimensional wrappers.
+    expected = float(np.var(ct[([1, 0, 1, 2], [2, 1, 0, 1])]))
+    assert expected % 1 != 0
     options = TransformSettings(
         image_types=(ImageType.LBP2D,), lbp2d=LBP2DSettings(samples=4, method=LBPMethod.VARIANCE)
     )
@@ -316,14 +341,12 @@ def test_lbp2d_variance_keeps_fractional_values_across_integer_wrappers() -> Non
             ))
         values = np.asarray(output.image, dtype=np.float64)
         actual.append(float(values[(1, 1) if ndim == 2 else (0, 1, 1)]))
-    np.testing.assert_allclose(actual, [1.25, 1.25, 1.25], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("mode", ["roi", "voxel", "streamed"])
 def test_filtered_feature_pipeline_prefixes_each_image_type(mode: str) -> None:
-    image = np.random.default_rng(41).normal(12, 3, (6, 7, 8))
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    mask[1:-1, 1:-1, 1:-1] = 1
+    image, mask, _ = hcc_crop(np.s_[103:109, 214:221, 60:68])
     settings = Settings(bin_width=2, features=("firstorder_Mean",))
     options = TransformSettings(image_types=(ImageType.SQUARE, ImageType.EXPONENTIAL))
     collected: dict[str, NDArray[np.float32]] = {}
@@ -368,10 +391,8 @@ def test_filtered_feature_pipeline_prefixes_each_image_type(mode: str) -> None:
                                   2**53 + 1, 2**63, 2**64 - 1])
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "streamed"])
 def test_derived_images_preserve_large_integer_label_selection(label: int, voxel: bool) -> None:
-    image = np.linspace(-3, 8, 30).reshape(5, 6)
-    mask = np.zeros(image.shape, dtype=np.uint64)
-    mask[1:4, 1:5] = label
-    mask[0, 0] = 7
+    image, liver, tumor = hcc_crop(np.s_[105:110, 215:221, 64])
+    mask = np.where(liver != 0, np.uint64(label), np.uint64(7) * tumor).astype(np.uint64)
     options = Settings(label=label, features=("firstorder_Mean",))
     key = "square_firstorder_Mean"
     collected = np.zeros(image.shape, dtype=np.float32)

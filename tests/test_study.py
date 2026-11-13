@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.workflows.study import run_study
 
@@ -17,12 +18,12 @@ MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 def _case(root: Path, case_id: str, offset: int) -> dict[str, str]:
     directory = root / case_id
     directory.mkdir(parents=True)
-    rng = np.random.default_rng(100 + offset)
-    values = (rng.integers(-40, 40, size=(6, 7, 8)) + offset).astype(np.int16)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[1:5, 1:5, 1:6] = 1
-    labels[2:4, 2:4, 2:5] = 2
-    image = sitk.GetImageFromArray(values)
+    values, liver, tumor = hcc_crop(np.s_[105:111, 215:222, 62:70])
+    # A controlled HU offset distinguishes case identities; anatomical labels
+    # remain the source-aligned, mutually exclusive liver and tumor annotations.
+    labels = np.where(tumor != 0, 2, liver).astype(np.uint8)
+    assert np.any(labels == 1) and np.any(labels == 2)
+    image = sitk.GetImageFromArray((values + offset).astype(np.int16))
     mask = sitk.GetImageFromArray(labels)
     mask.CopyInformation(image)
     image_path, mask_path = directory / "image.nii.gz", directory / "mask.nii.gz"

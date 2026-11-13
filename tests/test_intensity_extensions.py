@@ -1,17 +1,27 @@
 """Independent physical-neighborhood and intensity-volume acceptance cases."""
 
-from math import fsum, pi
+from math import floor, fsum, pi
 
 import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics import Settings
 from mlxradiomics.config.settings import IVH, LOCAL_INTENSITY
 from mlxradiomics.voxel.storage import voxel_map_store
 from mlxradiomics.workflows.engine import extract as extract_original
 from mlxradiomics.workflows.extraction import extract
+
+
+def _ct_range(shape: tuple[int, ...], low: float, high: float) -> NDArray[np.float64]:
+    """Express the contrast of a source CT crop on a specified intensity scale."""
+    source = hcc_patch(shape)[0]
+    image = low + (source - source.min()) / np.ptp(source) * (high - low)
+    # Preserve the declared binary64 endpoints when the affine span itself rounds.
+    image[source == source.min()], image[source == source.max()] = low, high
+    return image
 
 
 def _local_reference(
@@ -45,11 +55,11 @@ def _local_reference(
 def test_physical_peaks_include_background_and_truncate_at_image_boundary(
     spacing: tuple[float, ...], conventions: Conventions,
 ) -> None:
-    image = np.arange(4 * 5 * 6, dtype=np.float64).reshape((4, 5, 6)) % 17 - 3
+    image = hcc_patch((4, 5, 6))[0]
     mask = np.zeros(image.shape, dtype=bool)
     mask[0, 0, 0] = mask[2, 2, 2] = mask[3, 4, 5] = True
     # Tied source maxima must evaluate both neighborhoods before selecting the peak.
-    image[mask] = 13
+    image[mask] = image.max()
     names = tuple(f"localintensity_{name}" for name in LOCAL_INTENSITY)
     result = extract_original(image, mask, spacing=spacing, settings=settings_for(
         conventions,
@@ -66,15 +76,17 @@ def test_physical_peaks_include_background_and_truncate_at_image_boundary(
 @pytest.mark.parametrize("case", ["cancellation", "signed_zero"])
 def test_local_peak_preserves_source_residuals_and_equal_signed_zero_candidates(case: str) -> None:
     if case == "cancellation":
-        image = np.array([[[1e8 + 1, -1e8]]], dtype=np.float64)
+        image = _ct_range((1, 1, 2), -1e8, 1e8 + 1)
         mask = np.ones(image.shape, dtype=np.bool_)
         spacing = (1.0, 1.0, 1.0)
         target = 0.5
     else:
-        image = np.array([[[-0.0, -4.0, -8.0, 0.0]]], dtype=np.float64)
+        image = hcc_patch((1, 1, 4))[0]
+        image -= image.max()
+        image[0, 0, 0], image[0, 0, -1] = -0.0, 0.0
         mask = np.array([[[True, False, False, True]]])
         spacing = (1.0, 1.0, 5.0)
-        target = -2.0
+        target = _local_reference(image, mask, spacing)[0]
     result = extract_original(
         image,
         mask,
@@ -132,13 +144,10 @@ def _ivh_reference(values: list[int], low: int, high: int) -> dict[str, float]:
 def test_ivh_preserves_missing_levels_and_independent_texture_lattice(
     mode: str, ndim: int, conventions: Conventions,
 ) -> None:
-    image = np.array([[0, 0, 2, 2], [3, 3, 5, 9], [0, 2, 5, 9]], dtype=np.float64)
+    shape = (3, 4) if ndim == 2 else (2, 3, 4)
+    image = np.floor(_ct_range(shape, 0, 9))
     mask = np.ones(image.shape, dtype=bool)
-    mask[1, 1] = False
-    if ndim == 3:
-        # A second, shifted plane makes every 3D window differ from its planar one.
-        image = np.stack([image, np.roll(image, 1, axis=1)])
-        mask = np.stack([mask, np.roll(mask, 2, axis=1)])
+    mask[(1, 1) if ndim == 2 else (0, 1, 1)] = False
     names = tuple(f"ivh_{name}" for name in IVH)
     settings = settings_for(
         conventions,
@@ -180,7 +189,7 @@ def test_ivh_preserves_missing_levels_and_independent_texture_lattice(
 
 @pytest.mark.parametrize("discretizer", ["width", "count"])
 def test_ivh_calibrated_centers_and_arbitrary_units(discretizer: str) -> None:
-    image = np.array([[0.0, 0.25, 0.5, 0.75, 1.0]], dtype=np.float64)
+    image = _ct_range((1, 5), 0, 1)
     names = tuple(f"ivh_{name}" for name in IVH)
     settings = (
         Settings(features=names, ivh_bin_width=0.25, ivh_intensity_range=(0.0, 1.0))
@@ -188,7 +197,8 @@ def test_ivh_calibrated_centers_and_arbitrary_units(discretizer: str) -> None:
         else Settings(features=names, ivh_bin_count=4)
     )
     result = extract_original(image, np.ones(image.shape, np.uint8), settings=settings)
-    expected = _ivh_reference([1, 2, 3, 4, 4], 1, 4)
+    bins = np.minimum(4, np.floor(image * 4).astype(np.int64) + 1)
+    expected = _ivh_reference([int(v) for v in bins.reshape(-1)], 1, 4)
     for name, value in expected.items():
         if name.startswith("IntensityAt") and discretizer == "width":
             value = (value - 0.5) * 0.25
@@ -200,18 +210,18 @@ def test_ivh_calibrated_centers_and_arbitrary_units(discretizer: str) -> None:
 
 
 def test_ivh_area_under_curve_uses_all_lattice_levels_and_single_intensity() -> None:
-    # Bins 1, 1, 2, 4 over the four-level lattice 1..4. The survival curve is
-    # [1, 0.5, 0.25, 0.25] at gamma [0, 1/3, 2/3, 1], whose trapezoidal area is
-    # 11/24. Constant intensities within a wider lattice must report zero instead.
-    image = np.array([[0.0, 0.0, 1.0, 3.0]], dtype=np.float64)
+    # Quantized CT leaves empty levels on the four-level IVH lattice.
+    image = np.floor(_ct_range((1, 4), 0, 3))
     settings = Settings(
         features=("ivh_AreaUnderIVHCurve",), ivh_intensity_range=(0.0, 3.0),
     )
     result = extract_original(image, np.ones(image.shape, np.uint8), settings=settings)
-    assert result.features["original_ivh_AreaUnderIVHCurve"] == pytest.approx(11 / 24, rel=2e-6)
+    expected = _ivh_reference([int(v) for v in image.reshape(-1)], 0, 3)
+    assert result.features["original_ivh_AreaUnderIVHCurve"] == pytest.approx(
+        expected["AreaUnderIVHCurve"], rel=2e-6)
 
     constant = extract_original(
-        np.full((2, 2), 5.0), np.ones((2, 2), np.uint8),
+        hcc_background((2, 2)) * (-5 / 2048), np.ones((2, 2), np.uint8),
         settings=Settings(
             features=("ivh_AreaUnderIVHCurve",), ivh_intensity_range=(0.0, 9.0),
         ),
@@ -220,10 +230,10 @@ def test_ivh_area_under_curve_uses_all_lattice_levels_and_single_intensity() -> 
 
 
 def test_ivh_integer_lattice_calibration_keeps_small_reported_intensities() -> None:
-    # The calibrated integer lattice runs from -1e8 to 9. Volume fractions select the
-    # 10th and 90th percentiles at physical intensities 9 and 1; evaluating
-    # ``-1e8 + 99999999`` in float32 would truncate the result to 8 and 0.
-    image = np.array([[-1e8, *range(10)]], dtype=np.float64)
+    # A remote negative endpoint makes float32 affine evaluation lose small
+    # positive integer thresholds selected from the remaining CT samples.
+    image = np.floor(_ct_range((1, 11), 0, 9))
+    image[0, 0] = -1e8
     result = extract_original(
         image,
         np.ones(image.shape, dtype=np.uint8),
@@ -234,20 +244,22 @@ def test_ivh_integer_lattice_calibration_keeps_small_reported_intensities() -> N
             )
         ),
     )
-    assert result.features["original_ivh_IntensityAtVolumeFraction10"] == 9.0
-    assert result.features["original_ivh_IntensityAtVolumeFraction90"] == 1.0
+    ordered = np.sort(image.reshape(-1))
+    for fraction in (10, 90):
+        target = ordered[len(ordered) - floor(fraction * len(ordered) / 100) - 1] + 1
+        assert result.features[f"original_ivh_IntensityAtVolumeFraction{fraction}"] == target
 
 
 def test_ivh_absolute_resegmentation_uses_sorted_effective_bounds() -> None:
     # Resegmentation sorts reversed absolute thresholds, so IVH must read the same
     # effective (1, 4) interval rather than rejecting the accepted request.
-    image = np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float64)
+    image = np.floor(_ct_range((1, 4), 1, 4))
     mask = np.ones(image.shape, dtype=np.uint8)
     names = tuple(f"ivh_{name}" for name in IVH)
     result = extract_original(
         image, mask, settings=Settings(features=names, resegment_range=(4.0, 1.0))
     )
-    expected = _ivh_reference([1, 2, 3, 4], 1, 4)
+    expected = _ivh_reference([int(v) for v in image.reshape(-1)], 1, 4)
     for name, value in expected.items():
         np.testing.assert_allclose(
             result.features[f"original_ivh_{name}"], value, rtol=2e-6, atol=1e-7,
@@ -260,7 +272,7 @@ def test_local_peak_isolated_tile_extreme_does_not_flush_small_sphere() -> None:
     # The 1e30 corner is outside the central physical sphere but in the same processing
     # tile. Its whole-tile power-of-two scale would flush the 1e-30 sphere values to zero.
     def peak(extreme: bool) -> float:
-        image = np.full((21, 21, 21), 1e-30, dtype=np.float64)
+        image = hcc_background((21, 21, 21)) * (-1e-30 / 2048)
         if extreme:
             image[0, 0, 0] = 1e30
         mask = np.zeros(image.shape, dtype=np.uint8)
@@ -282,10 +294,10 @@ def test_local_peak_isolated_tile_extreme_does_not_flush_small_sphere() -> None:
 def test_local_peaks_keep_residuals_when_a_remote_value_sets_the_tile_scale(
     remote: float,
 ) -> None:
-    # Both 6 mm spheres hold only the first two voxels, whose float32 values cancel and
-    # whose residuals sum to 2. The remote 3e38 voxel is outside both spheres but sets
-    # the tile scale to 2**127, which flushes the residuals but not their values.
-    image = np.zeros((1, 1, 10))
+    # The first sphere holds two cancelling values whose residuals sum to 2. The
+    # second also includes one CT neighbor. The remote extreme is outside both
+    # spheres but sets a tile scale that would erase the endpoint residuals.
+    image = hcc_patch((1, 1, 10))[0]
     image[0, 0, :2] = 1e8 + 1, -1e8 + 1
     image[0, 0, -1] = remote
     mask = np.zeros(image.shape, np.uint8)
@@ -293,14 +305,16 @@ def test_local_peaks_keep_residuals_when_a_remote_value_sets_the_tile_scale(
     names = ("localintensity_LocalIntensityPeak", "localintensity_GlobalIntensityPeak")
     result = extract_original(image, mask, spacing=(1.0, 1.0, 6.0),
         settings=Settings(features=names))
-    for name in names:
-        assert float(result.features[f"original_{name}"]) == 1.0, name
+    expected = _local_reference(image, mask.astype(bool), (1.0, 1.0, 6.0))
+    for name, value in zip(names, expected, strict=True):
+        np.testing.assert_allclose(result.features[f"original_{name}"], value,
+                                   rtol=3e-6, atol=0, err_msg=name)
 
 
 def test_local_peak_common_large_intensities_do_not_overflow_sphere_sum() -> None:
     # A sphere of ~1000 voxels at 2e38 overflows an unscaled sum; the power-of-two scale
     # must still recover the representable constant peak.
-    image = np.full((21, 21, 21), 2e38, dtype=np.float64)
+    image = hcc_background((21, 21, 21)) * (-2e38 / 2048)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[10, 10, 10] = 1
     result = extract_original(
@@ -317,7 +331,7 @@ def test_local_peak_common_large_intensities_do_not_overflow_sphere_sum() -> Non
 def test_ivh_tiny_lattice_coefficients_still_give_normal_thresholds() -> None:
     # Origin and step lie below the normal float32 range, but every source intensity
     # and every expected output is a normal float32 value.
-    image = np.array([[2.0**-125, 2.0**-124, 3 * 2.0**-125]])
+    image = _ct_range((1, 3), 2.0**-125, 3 * 2.0**-125)
     names = ("IntensityAtVolumeFraction10", "IntensityAtVolumeFraction90",
              "IntensityFractionDifference")
     result = extract_original(image, np.ones(image.shape, np.uint8), settings=Settings(
@@ -325,13 +339,16 @@ def test_ivh_tiny_lattice_coefficients_still_give_normal_thresholds() -> None:
         ivh_intensity_range=(0.0, 2.0**-122)))
     # Each threshold is the bin center one level above the last excluded sample's bin:
     # (k + 3/2) * 2**-140 for a sample at k * 2**-140.
-    expected = (3 * 2.0**-125 + 3 * 2.0**-141, 2.0**-125 + 3 * 2.0**-141, 2.0**-124)
+    low = float(image.min()) + 3 * 2.0**-141
+    high = float(image.max()) + 3 * 2.0**-141
+    expected = (high, low, high - low)
     for name, value in zip(names, expected, strict=True):
         assert result.features[f"original_ivh_{name}"] == float(np.float32(value)), name
 
 
 def test_ivh_fixed_count_compares_exact_source_rational_boundaries() -> None:
-    image = np.array([[0.0, float(1 / 3), np.nextafter(float(1 / 3), np.inf), 1.0]])
+    image = _ct_range((1, 4), 0, 1)
+    image[0, :2] = float(1 / 3), np.nextafter(float(1 / 3), np.inf)
     result = extract_original(
         image,
         np.ones(image.shape, np.uint8),
@@ -340,8 +357,8 @@ def test_ivh_fixed_count_compares_exact_source_rational_boundaries() -> None:
             ivh_bin_count=3,
         ),
     )
-    # Binary64 float(1/3) lies below the exact first-third boundary; its upper
-    # representable neighbor lies above. The bins are therefore 1,1,2,3.
+    # The two targeted pixels straddle the exact rational first-third boundary;
+    # the other source extrema remain zero and one, giving bins [1, 2, 3, 1].
     assert result.features["original_ivh_VolumeAtIntensityFraction10"] == 0.5
 
 
@@ -349,7 +366,8 @@ def test_ivh_fixed_count_compares_exact_source_rational_boundaries() -> None:
 def test_ivh_fixed_width_covers_partial_bins_without_snapping(width: float, levels: int) -> None:
     from mlxradiomics.features.ivh import prepare_ivh
 
-    image = np.array([[0.0, np.nextafter(width, -np.inf), width, np.nextafter(width, np.inf), 1.0]])
+    image = _ct_range((1, 5), 0, 1)
+    image[0, [0, 1, 3]] = np.nextafter(width, -np.inf), width, np.nextafter(width, np.inf)
     mask = np.ones(image.shape, dtype=np.bool_)
     settings = Settings(
         features=("ivh_VolumeAtIntensityFraction10",),
@@ -362,7 +380,7 @@ def test_ivh_fixed_width_covers_partial_bins_without_snapping(width: float, leve
     assert lattice.step == width
     # Adjacent values straddle the supplied exact binary64 width. The explicit
     # upper edge is assigned to the last bin even when it is an exact bin edge.
-    np.testing.assert_array_equal(lattice.bins, [[1, 1, 2, 2, levels]])
+    np.testing.assert_array_equal(lattice.bins, [[1, 2, levels, 2, 1]])
     result = extract_original(image, mask, settings=settings)
     np.testing.assert_allclose(
         result.features["original_ivh_VolumeAtIntensityFraction10"], 3 / 5, rtol=1e-6, atol=0
@@ -381,7 +399,8 @@ def test_ivh_fractional_lattice_calibration_survives_a_cancelling_origin() -> No
     # both terms near 1e3 and report 0.5499878.
     from fractions import Fraction
 
-    image = np.array([[-1000.0, *([0.5] * 9), 0.9]], dtype=np.float64)
+    image = hcc_background((1, 11)) * (-0.5 / 2048)
+    image[0, 0], image[0, -1] = -1000.0, 0.9
     result = extract_original(
         image,
         np.ones(image.shape, dtype=np.uint8),
@@ -428,7 +447,8 @@ def test_ivh_fixed_width_edges_retain_exact_integer_cancellation() -> None:
     # Rounding that product before adding the origin turns the true edge 1 into 0,
     # moving a sampled zero from bin 3 into bin 4.
     low, width, high = -9007199254740992.0, 3002399751580331.0, 6004799503160663.0
-    image = np.array([[low, 0.0, high]], dtype=np.float64)
+    image = _ct_range((1, 3), low, high)
+    image[0, 1] = 0.0
     mask = np.ones(image.shape, dtype=np.bool_)
     lattice = prepare_ivh(image, mask, Settings(
         features=("ivh_VolumeAtIntensityFraction10",),
@@ -438,7 +458,7 @@ def test_ivh_fixed_width_edges_retain_exact_integer_cancellation() -> None:
 
 
 def test_convention_fields_are_independent() -> None:
-    constant = np.full((3, 4), 0.1)
+    constant = hcc_background((3, 4)) * (-0.1 / 2048)
     mask = np.ones(constant.shape, np.uint8)
     names = ("firstorder_Skewness", "firstorder_Kurtosis")
     # Raw kurtosis keeps the IBSI zero for a constant ROI; excess kurtosis keeps NaN.
@@ -451,15 +471,17 @@ def test_convention_fields_are_independent() -> None:
     # NGTDM singular caps do not depend on the neighborhood support, and vice versa.
     ngtdm = ("ngtdm_Coarseness", "ngtdm_Busyness", "ngtdm_Strength")
     shells = extract_original(
-        np.ones((3, 4)), mask, settings=Settings(features=ngtdm, neighborhood_support="distances"),
+        hcc_background((3, 4)) / -2048, mask,
+        settings=Settings(features=ngtdm, neighborhood_support="distances"),
     )
     assert tuple(shells.features[f"original_{n}"] for n in ngtdm) == (1e6, 0.0, 0.0)
     unadjusted = extract_original(
-        np.ones((3, 4)), mask, settings=Settings(features=ngtdm, ngtdm_singular_cases="unadjusted"),
+        hcc_background((3, 4)) / -2048, mask,
+        settings=Settings(features=ngtdm, ngtdm_singular_cases="unadjusted"),
     )
     assert np.isposinf(unadjusted.features["original_ngtdm_Coarseness"])
     capped = extract_original(
-        np.ones((3, 4)), mask, settings=settings_for("pyradiomics",
+        hcc_background((3, 4)) / -2048, mask, settings=settings_for("pyradiomics",
             features=ngtdm, ngtdm_singular_cases="ibsi-caps"),
     )
     assert tuple(capped.features[f"original_{n}"] for n in ngtdm) == (1e6, 0.0, 0.0)

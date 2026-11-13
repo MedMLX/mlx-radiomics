@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from radiomics_reference.fixtures import Case, cases
+from radiomics_reference.mathematics import masked_neighborhood_mean
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.contracts.types import HostArray
@@ -18,42 +20,41 @@ from mlxradiomics.numerics.histogram import histogram
 from mlxradiomics.numerics.runtime import array_from_bool, mx
 from mlxradiomics.voxel.storage import voxel_map_store
 
-# A 2x2 image is small enough that every voxel center's clipped 3x3 kernel contains the
-# whole ROI, so ROI and voxel mode share the same hand mean (0 + 25 + 50 + 25) / 4.
-_HAND_IMAGE = np.array([[0.0, 25.0], [50.0, 25.0]])
-_HAND_MEAN = 25.0
 _OFFSETS = ((1, 1), (1, 0), (1, -1), (0, 1))
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["maps", "streamed"])
-def test_roi_and_voxel_maps_match_hand_mean(stream: bool) -> None:
-    mask = np.ones(_HAND_IMAGE.shape, dtype=np.uint8)
+def test_roi_and_voxel_maps_match_source_mean(stream: bool) -> None:
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
+    # Every clipped radius-one neighborhood contains all four real liver pixels.
+    assert np.all(mask == 1)
+    expected_mean = sum(float(value) for value in image.flat) / image.size
     settings = Settings(features=("firstorder_Mean",), bin_width=25.0)
-    roi = extract(_HAND_IMAGE, mask, settings=settings)
-    assert roi.metadata["roi_voxels"] == _HAND_IMAGE.size
+    roi = extract(image, mask, settings=settings)
+    assert roi.metadata["roi_voxels"] == image.size
     mean = roi.features["original_firstorder_Mean"]
     assert isinstance(mean, float)
-    np.testing.assert_allclose(mean, _HAND_MEAN, rtol=0, atol=0)
+    np.testing.assert_allclose(mean, expected_mean, rtol=0, atol=0)
 
     names = ("original_firstorder_Mean",)
     if stream:
-        with voxel_map_store(_HAND_IMAGE.shape, names) as store:
-            result = extract(_HAND_IMAGE, mask, settings=settings, mode="voxel",
+        with voxel_map_store(image.shape, names) as store:
+            result = extract(image, mask, settings=settings, mode="voxel",
                              sink=store.append)
             assert not result.features
             maps: dict[str, NDArray[np.float32]] = {
                 name: values.copy() for name, values in store.maps()
             }
     else:
-        result = extract(_HAND_IMAGE, mask, settings=settings, mode="voxel")
+        result = extract(image, mask, settings=settings, mode="voxel")
         maps = {name: np.asarray(value, dtype=np.float32)
                 for name, value in result.features.items()}
 
-    assert result.metadata["roi_voxels"] == _HAND_IMAGE.size
+    assert result.metadata["roi_voxels"] == image.size
     assert set(maps) == set(names)
     np.testing.assert_allclose(
         np.asarray(maps["original_firstorder_Mean"], dtype=np.float64),
-        _HAND_MEAN,
+        expected_mean,
         rtol=0,
         atol=0,
     )
@@ -88,45 +89,36 @@ def test_voxel_mode_refuses_a_single_voxel_roi() -> None:
                 spacing=case.spacing, mode="voxel")
 
 
-@pytest.mark.parametrize(
-    "masked_kernel,expected",
-    [
-        pytest.param(
-            True,
-            np.array([[50.0, 0.0, 0.0], [0.0, 36.0, 0.0], [0.0, 0.0, 54.0]]),
-            id="masked",
-        ),
-        pytest.param(
-            False,
-            np.array([[26.0, 0.0, 0.0], [0.0, 132.0 / 9.0, 0.0], [0.0, 0.0, 30.0]]),
-            id="unmasked",
-        ),
-    ],
-)
-def test_voxel_neighborhood_sampling_matches_scalar_means(
-    masked_kernel: bool, expected: NDArray[np.float64],
-) -> None:
-    image = np.array([[0.0, 1.0, 2.0], [3.0, 100.0, 5.0], [6.0, 7.0, 8.0]])
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    np.fill_diagonal(mask, 1)
+@pytest.mark.parametrize("masked_kernel", [True, False], ids=["masked", "unmasked"])
+def test_voxel_neighborhood_sampling_matches_scalar_means(masked_kernel: bool) -> None:
+    image, mask, _ = hcc_crop(np.s_[105:108, 215:218, 62])
+    assert mask.any() and not mask.all()
+    expected = (masked_neighborhood_mean(image, mask == 1) if masked_kernel else
+                np.asarray([
+                    [image[max(0, row - 1):row + 2, max(0, column - 1):column + 2].mean()
+                     if mask[row, column] else 0 for column in range(image.shape[1])]
+                    for row in range(image.shape[0])
+                ], dtype=np.float64))
     settings = Settings(features=("firstorder_Mean",), kernel_radius=1,
                         masked_kernel=masked_kernel)
     result = extract(image, mask, settings=settings, mode="voxel")
 
-    assert result.metadata["roi_voxels"] == 3
+    assert result.metadata["roi_voxels"] == int(np.count_nonzero(mask))
     actual = np.asarray(result.features["original_firstorder_Mean"], dtype=np.float64)
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize("method", ["mlx", "metal"])
 def test_integer_pair_counts_match_scalar_enumeration(method: str) -> None:
-    bins = np.array([[1, 1, 2], [2, 3, 1], [3, 2, 1]], dtype=np.int32)
-    mask = np.array([[True, True, False], [True, True, True], [False, True, True]])
+    image, liver, _ = hcc_crop(np.s_[105:108, 215:218, 62])
+    bins = ((image - image.min()) // 25 + 1).astype(np.int32)
+    mask = liver == 1
+    levels = int(bins.max())
     settings = Settings(features=("glcm_Contrast",), distances=(1,))
 
     expected: list[NDArray[np.uint32]] = []
     for offset in _OFFSETS:
-        counts = np.zeros((3, 3), dtype=np.uint32)
+        counts = np.zeros((levels, levels), dtype=np.uint32)
         for index in np.ndindex(bins.shape):
             neighbor = tuple(index[axis] + offset[axis] for axis in range(2))
             inside = all(0 <= neighbor[axis] < bins.shape[axis] for axis in range(2))
@@ -140,11 +132,11 @@ def test_integer_pair_counts_match_scalar_enumeration(method: str) -> None:
         actual: list[NDArray[np.uint32]] = []
         for left, right, valid in pairs:
             counts = cast(
-                HostArray, np.asarray(histogram(left, right, valid, 3, method=method))
+                HostArray, np.asarray(histogram(left, right, valid, levels, method=method))
             )
             assert counts.dtype == np.uint32
-            assert counts.shape == (1, 3, 3)
-            actual.append(cast(NDArray[np.uint32], counts.reshape(3, 3)))
+            assert counts.shape == (1, levels, levels)
+            actual.append(cast(NDArray[np.uint32], counts.reshape(levels, levels)))
 
     # Direction order is not a feature contract; compare the per-direction count multiset.
     assert sorted(array.tobytes() for array in actual) == sorted(
@@ -191,17 +183,18 @@ def test_rectangular_pair_counts_preserve_rows_and_mask(method: str, constant: b
 def test_resident_roi_counts_preserve_masked_signed_offsets() -> None:
     from mlxradiomics.numerics.histogram import roi_histograms
 
-    bins = np.array([[1, 2, 0], [3, 1, 2]], dtype=np.int32)
-    mask = bins != 0
+    image, liver, _ = hcc_crop(np.s_[105:108, 215:218, 62])
+    bins = ((image - image.min()) // 25 + 1).astype(np.int32)
+    mask = liver == 1
+    bins[~mask] = 0
+    levels = int(bins.max())
     offsets = ((0, 1), (1, 0), (1, 1), (1, -1))
-    # Enumerated transitions: horizontal 1->2 twice and 3->1; vertical 1->3
-    # and 2->1; down-right 1->1 and 2->2; down-left only 2->3.
-    expected = np.array([
-        [[0, 2, 0], [0, 0, 0], [1, 0, 0]],
-        [[0, 0, 1], [1, 0, 0], [0, 0, 0]],
-        [[1, 0, 0], [0, 1, 0], [0, 0, 0]],
-        [[0, 0, 0], [0, 0, 1], [0, 0, 0]],
-    ], dtype=np.uint32)
+    expected = np.zeros((len(offsets), levels, levels), dtype=np.uint32)
+    for direction, (dr, dc) in enumerate(offsets):
+        for row, column in np.argwhere(mask):
+            nr, nc = row + dr, column + dc
+            if 0 <= nr < bins.shape[0] and 0 <= nc < bins.shape[1] and mask[nr, nc]:
+                expected[direction, bins[row, column] - 1, bins[nr, nc] - 1] += 1
     with mx.stream(mx.gpu):
-        actual = roi_histograms(mx.array(bins), mx.array(mask), offsets, 3)
+        actual = roi_histograms(mx.array(bins), mx.array(mask), offsets, levels)
         np.testing.assert_array_equal(np.asarray(actual, dtype=np.uint32), expected)

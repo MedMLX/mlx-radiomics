@@ -6,6 +6,7 @@ from math import cos, floor, pi, sin, sqrt
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics.config.filtering import LBPMethod
 from mlxradiomics.config.transforms import ImageType, LBP2DSettings, TransformSettings
@@ -59,14 +60,16 @@ def _exact_lbp_codes(image: NDArray[np.float64], samples: int, radius: float) ->
 
 
 def test_interpolation_coefficient_residual_preserves_ring_sign() -> None:
-    # The bit-1 difference is +9.406214334834765e-9 in exact arithmetic on the
-    # declared five-decimal sampling coordinates; the bit must follow it, which needs
-    # float-float coefficient residuals rather than float32 interpolation weights.
-    image = np.zeros((3, 3), dtype=np.float64)
-    image[0, 1] = -1.0
-    image[0, 2] = 1.8284543250036684
+    image, _, _ = hcc_patch((3, 3))
+    image -= image[1, 1]
+    # Perturb one CT corner so the declared bit-1 interpolation is just above
+    # its center. Exact rational weights determine that source value independently.
+    _, column = _declared_offsets(8, 0.5)[1]
+    weight = Fraction(str(column))
+    cross = Fraction.from_float(float(image[0, 1] + image[1, 2]))
+    image[0, 2] = float((Fraction(1, 2**27) - weight * (1 - weight) * cross) / weight**2)
     exact_code, exact_uniform = _exact_lbp_codes(image, samples=8, radius=0.5)
-    assert (exact_code, exact_uniform) == (243, 6)
+    assert exact_code & 2
     high = image.astype(np.float32)
     residual = (image - high).astype(np.float32)
     tail = (image - high.astype(np.float64) - residual.astype(np.float64)).astype(np.float32)
@@ -82,11 +85,11 @@ def test_interpolation_coefficient_residual_preserves_ring_sign() -> None:
                 source_residual=mx.array(residual), source_tail=mx.array(tail),
             ))
             actual[method] = float(np.asarray(output.image)[1, 1])
-    assert actual == {LBPMethod.DEFAULT: 243, LBPMethod.UNIFORM: 6}
+    assert actual == {LBPMethod.DEFAULT: exact_code, LBPMethod.UNIFORM: exact_uniform}
 
 
 def test_exact_source_ties_set_bits_through_public_transform() -> None:
-    image = np.zeros((3, 3), dtype=np.float64)
+    image = hcc_background((3, 3))
     high = image.astype(np.float32)
     actual: dict[LBPMethod, float] = {}
     with mx.stream(mx.gpu):
@@ -113,8 +116,8 @@ def test_source_threshold_neighbor_resolves_without_epsilon(
     # where the bilinear weight is exactly one. The neighbor differs from the
     # center by less than half a float32 ulp but remains distinct in the source
     # residual. No epsilon may flip the categorical comparison.
-    center_source = float(np.float32(0.1))
-    image = np.full((3, 3), center_source - 1.0, dtype=np.float64)
+    image, _, _ = hcc_patch((3, 3))
+    center_source = float(image.max() + 1)
     image[1, 1] = center_source
     image[1, 2] = center_source + delta
     high = image.astype(np.float32)
@@ -130,19 +133,24 @@ def test_source_threshold_neighbor_resolves_without_epsilon(
     assert float(np.asarray(output.image)[1, 1]) == expected
 
 
-@pytest.mark.parametrize("method, expected", [(LBPMethod.DEFAULT, 253), (LBPMethod.UNIFORM, 7)])
-def test_interpolated_bit_keeps_residual_after_cancellation(
-    method: LBPMethod, expected: int,
-) -> None:
-    image = np.array([[0., 0., -10000.0001], [0., 0., 10000.], [0., 0., 0.]])
+@pytest.mark.parametrize("method", [LBPMethod.DEFAULT, LBPMethod.UNIFORM])
+def test_interpolated_bit_keeps_residual_after_cancellation(method: LBPMethod) -> None:
+    image, _, _ = hcc_patch((3, 3))
+    image = (image - image[1, 1]) * 10000
+    image[1, 2] = -image[0, 1]
+    image[0, 2] = -1e-4
+    raw, uniform = _exact_lbp_codes(image, 8, sqrt(0.5))
+    assert not raw & 2
+    expected = raw if method is LBPMethod.DEFAULT else uniform
     assert _center(image, 8, sqrt(0.5), method) == expected
 
 
 @pytest.mark.parametrize("baseline", [4000.0, 10000.0, 1e8])
 def test_sampled_ring_variance_is_independent_of_center_and_offset(baseline: float) -> None:
-    image = np.zeros((3, 3), dtype=np.float64)
-    image[1, 2], image[0, 1], image[1, 0], image[2, 1] = baseline + np.arange(4)
-    assert _center(image, 4, 1.0, LBPMethod.VARIANCE) == pytest.approx(1.25, rel=1e-6)
+    ct, _, _ = hcc_patch((3, 3))
+    image = baseline + ct
+    expected = float(np.var(ct[([1, 0, 1, 2], [2, 1, 0, 1])]))
+    assert _center(image, 4, 1.0, LBPMethod.VARIANCE) == pytest.approx(expected, rel=1e-6)
 
 
 def _exact_ring(image: NDArray[np.float64], row: int, col: int, samples: int,
@@ -179,7 +187,7 @@ def test_ring_in_uniform_neighbourhood_has_undefined_variance(
     # slice) samples one value at every ring point. Its exact variance is zero,
     # which the VARIANCE method reports as NaN. Bilinear weights whose float-float
     # products do not sum to exactly one left a ~1e-29 residual variance instead.
-    image = np.full(shape, background, dtype=np.float64)
+    image = hcc_background(shape) * (-background / 2048)
     row, col = shape[0] // 2, shape[1] // 2
     image[row, col] = spot
     ring = _exact_ring(image, row, col, 8, radius)
@@ -190,10 +198,11 @@ def test_ring_in_uniform_neighbourhood_has_undefined_variance(
 
 
 def test_categorical_interpolation_preserves_exact_cancellation_and_small_signs() -> None:
-    # Opposing diagonal ramps cancel exactly. A tiny independently represented
-    # corner perturbation must decide the bit even after large terms cancel.
-    image = np.array([[-0.0, -1.0, 0.0], [-1.0, 0.0, 1.0],
-                      [0.0, 1.0, 0.0]], dtype=np.float64)
+    image, _, _ = hcc_patch((3, 3))
+    image -= image[1, 1]
+    # Make two sampled CT neighbors oppose exactly. A tiny corner perturbation
+    # must then decide the bit after their interpolation terms cancel.
+    image[1, 2] = -image[0, 1]
     for perturbation in (0.0, 2.0**-70, -(2.0**-70)):
         image[0, 2] = perturbation
         exact, _ = _exact_lbp_codes(image, samples=8, radius=0.5)
@@ -202,14 +211,17 @@ def test_categorical_interpolation_preserves_exact_cancellation_and_small_signs(
 
 @pytest.mark.parametrize("value", [2.0**-100, 2.0**100])
 def test_categorical_interpolation_refuses_unsupported_source_amplitudes(value: float) -> None:
-    image = mx.full((3, 3), value)
+    source = hcc_background((3, 3)) * (-value / 2048)
+    image = mx.array(source.astype(np.float32))
     with pytest.raises(ValueError, match="source sign is unresolved"):
         lbp2d(image, 8, 0.5, LBPMethod.DEFAULT, 0)
 
 
 def test_source_third_word_decides_cancellation_through_public_transform() -> None:
-    image = np.array([[0.0, -1.0, 0.0], [-1.0, 0.0, 1.0],
-                      [0.0, 1.0, 0.0]], dtype=np.float64)
+    image, _, _ = hcc_patch((3, 3))
+    image -= image[1, 1]
+    image[1, 2] = -image[0, 1]
+    image[0, 2] = 0
     options = TransformSettings(
         image_types=(ImageType.LBP2D,),
         lbp2d=LBP2DSettings(method=LBPMethod.DEFAULT, samples=8, radius=0.5),

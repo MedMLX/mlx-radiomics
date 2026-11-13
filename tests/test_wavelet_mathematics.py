@@ -4,15 +4,16 @@ import numpy as np
 import pytest
 import pywt
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.transforms import ImageType, TransformSettings, WaveletSettings
 from mlxradiomics.imaging.transforms import feature_images
 from mlxradiomics.numerics.runtime import mx
 
 
-def test_level_two_haar_impulse_uses_dilated_filter() -> None:
-    image = np.zeros((1, 4), dtype=np.float32)
-    image[0, 0] = 1
+def test_level_two_haar_uses_dilated_filter() -> None:
+    ct, _, _ = hcc_crop(np.s_[105:106, 215:219, 64])
+    image = ct.astype(np.float32)
     options = TransformSettings(
         image_types=(ImageType.WAVELET,), wavelet=WaveletSettings(name="haar", level=2)
     )
@@ -20,15 +21,17 @@ def test_level_two_haar_impulse_uses_dilated_filter() -> None:
         actual = {item.name: np.asarray(item.image, dtype=np.float32) for item in feature_images(
             mx.array(image), (1.0, 1.0), options, force2d_axis=0,
         )}
-    # Haar dec_hi = [-1, 1]/sqrt(2); the second-level taps are two samples apart.
-    np.testing.assert_allclose(actual["wavelet2-H"], [[0.5, -0.5, -0.5, 0.5]],
+    # The second-level taps are two samples apart; PyWavelets supplies the
+    # independent stationary transform, including phase and periodic boundaries.
+    expected = pywt.swtn(ct, "haar", 2, axes=(1,))[0]["d"]
+    np.testing.assert_allclose(actual["wavelet2-H"], expected,
                                rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize("wavelet", ["haar", "db3", "coif1"])
 @pytest.mark.parametrize("start", [0, 1])
 def test_multilevel_wavelet_matches_stationary_transform(wavelet: str, start: int) -> None:
-    image = np.random.default_rng(61).normal(size=(5, 7, 9))
+    image, _, _ = hcc_crop(np.s_[105:110, 215:222, 62:71])
     levels = 2
     multiple = 2 ** (levels + start)
     padded = np.pad(image, [(0, 0), (0, -7 % multiple), (0, -9 % multiple)], mode="wrap")

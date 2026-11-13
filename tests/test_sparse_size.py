@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from radiomics_reference.catalogue import size_features
+from radiomics_reference.real_images import hcc_background
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.features.matrices import zone_matrix
@@ -87,7 +88,8 @@ def test_high_gray_single_zone_uses_bounded_storage_and_exact_indices(
     assert matrix.cell_keys.tolist() == [[gray * width - 1]]
     assert matrix.counts.tolist() == [[1]]
     result = extract(
-        np.full(shape, gray - 1, dtype=np.int32), np.ones(shape, dtype=np.uint8),
+        (hcc_background(shape) * (-(gray - 1) / 2048)).astype(np.int32),
+        np.ones(shape, dtype=np.uint8),
         settings=settings,
     )
     assert set(result.features) == {f"original_glszm_{name}" for name in expected}
@@ -98,7 +100,7 @@ def test_high_gray_single_zone_uses_bounded_storage_and_exact_indices(
 
 
 def test_merged_slices_preserve_different_zone_sizes_and_original_gray_levels() -> None:
-    image = np.full((3, 32, 32), 25000, dtype=np.int32)
+    image = (hcc_background((3, 32, 32)) * (-25000 / 2048)).astype(np.int32)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0, 0, 0] = 1
     mask[1, :16] = 1

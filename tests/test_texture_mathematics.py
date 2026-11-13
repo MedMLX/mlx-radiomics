@@ -15,6 +15,7 @@ from radiomics_reference.mathematics import (
     glrlm_features,
     ngtdm_features,
 )
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics import Settings, extract
 
@@ -27,7 +28,7 @@ _SINGLETON_3D[1, 1, 1] = True
 @pytest.mark.parametrize("radius", [1, 3])
 @pytest.mark.parametrize("anchor", [0., -254.])
 def test_ngtdm_neighborhood_difference_is_gray_shift_invariant(radius: int, anchor: float) -> None:
-    image = np.ones((4 * radius + 1,) * 3)
+    image = hcc_background((4 * radius + 1,) * 3) / -2048
     image[(2 * radius,) * 3] = 0
     result = extract(image, np.ones(image.shape, np.uint8), settings=Settings(
         features=("ngtdm_Coarseness", "ngtdm_Strength"), bin_width=1,
@@ -39,8 +40,13 @@ def test_ngtdm_neighborhood_difference_is_gray_shift_invariant(radius: int, anch
 
 @pytest.mark.parametrize("large", [False, True])
 def test_busyness_zero_classification_uses_integer_occurrences(large: bool) -> None:
-    image = (np.concatenate([np.full(128001, 254.), np.full(127501, 255.)])[None, :]
-             if large else np.array([[0., 0., 0., 0., 0., 4.]]))
+    if large:
+        # Nearest-neighbor expansion of adjacent source levels gives unequal
+        # populations whose weighted occurrence products nearly cancel.
+        source = hcc_patch((1, 2))[0] - 70 + 254
+        image = np.repeat(source, [128001, 127501], axis=1)
+    else:
+        image = (hcc_patch((1, 6))[0] > 90).astype(np.float64) * 4
     result = extract(image, np.ones(image.shape, np.uint8), settings=Settings(
         features=("ngtdm_Busyness",), bin_width=1, bin_anchor=0))
     value = result.features["original_ngtdm_Busyness"]
@@ -106,7 +112,7 @@ def _ngtdm_settings(*, bin_width: float = 1.0) -> Settings:
 def test_glrlm_singleton_runs_keep_every_available_direction(
     mask: NDArray[np.bool_], sre: float,
 ) -> None:
-    image = np.zeros(mask.shape, dtype=np.float64)
+    image = hcc_background(mask.shape) * 0
     bins = np.ones(mask.shape, dtype=np.int32)
     settings = Settings(features=_GLRLM_FEATURES)
     result = extract(image, mask.astype(np.uint8), settings=settings)
@@ -121,7 +127,7 @@ def test_glrlm_singleton_runs_keep_every_available_direction(
 
 def test_glrlm_voxel_singleton_runs_match_local_enumeration() -> None:
     mask = np.eye(2, dtype=bool)
-    image = np.zeros(mask.shape, dtype=np.float64)
+    image = hcc_background(mask.shape) * 0
     settings = Settings(features=_GLRLM_FEATURES)
     result = extract(image, mask.astype(np.uint8), settings=settings, mode="voxel")
     # Each 3x3 clipped neighborhood holds the same two diagonal valid voxels.
@@ -138,7 +144,7 @@ def test_glrlm_voxel_singleton_runs_match_local_enumeration() -> None:
 
 
 def test_ngtdm_busyness_positive_over_zero_is_infinite() -> None:
-    image = np.array([[0.0, 0.0, 1.0]])
+    image = (hcc_patch((1, 3))[0] > 90).astype(np.float64)
     mask = np.ones(image.shape, dtype=np.uint8)
     settings = _ngtdm_settings()
     result = extract(image, mask, settings=settings)
@@ -159,7 +165,7 @@ def test_ngtdm_busyness_positive_over_zero_is_infinite() -> None:
 
 
 def test_ngtdm_excludes_isolated_centers_while_gldm_counts_them() -> None:
-    image = np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]])
+    image = (hcc_patch((1, 6))[0] > 90).astype(np.float64)
     mask = np.array([[1, 1, 1, 0, 0, 1]], dtype=np.uint8)
     settings = Settings(
         bin_width=1.0,
@@ -185,7 +191,7 @@ def test_ngtdm_excludes_isolated_centers_while_gldm_counts_them() -> None:
 
 
 def test_ngtdm_constant_region_singularities() -> None:
-    image = np.zeros((2, 2), dtype=np.float64)
+    image = hcc_background((2, 2)) * 0
     mask = np.ones(image.shape, dtype=np.uint8)
     settings = _ngtdm_settings(bin_width=25.0)
     result = extract(image, mask, settings=settings)
@@ -214,8 +220,7 @@ def test_ngtdm_constant_region_singularities() -> None:
 
 
 def test_ngtdm_disjoint_constant_pairs_strength_is_infinite() -> None:
-    image = np.zeros((3, 3), dtype=np.float64)
-    image[2, :2] = 1.0
+    image = (hcc_patch((3, 3))[0] < 65).astype(np.float64)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0, :2] = 1
     mask[2, :2] = 1
@@ -236,7 +241,7 @@ def test_ngtdm_disjoint_constant_pairs_strength_is_infinite() -> None:
 
 
 def test_ngtdm_no_eligible_centers_is_undefined() -> None:
-    image = np.zeros((3, 3), dtype=np.float64)
+    image = hcc_patch((3, 3))[0]
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[1, 1] = 1
     settings = _ngtdm_settings()
@@ -251,8 +256,7 @@ def test_ngtdm_no_eligible_centers_is_undefined() -> None:
 
 
 def test_ngtdm_voxel_mixes_defined_and_undefined_centers() -> None:
-    image = np.zeros((3, 5), dtype=np.float64)
-    image[0, 1] = 1.0
+    image = np.clip(hcc_patch((3, 5))[0] - 70, 0, 1)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0, 0] = 1
     mask[0, 1] = 1
@@ -279,7 +283,7 @@ def test_ngtdm_voxel_mixes_defined_and_undefined_centers() -> None:
 
 
 def test_ngtdm_voxel_no_eligible_centers_is_undefined() -> None:
-    image = np.zeros((3, 5), dtype=np.float64)
+    image = hcc_patch((3, 5))[0]
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0, 0] = 1
     mask[2, 4] = 1
@@ -427,7 +431,8 @@ def test_voxel_zone_maps_do_not_depend_on_batching(
     # The size axis must not depend on the largest zone in a batch: every center gets
     # the same bits however scratch_mib batches the centers.
     rng = np.random.default_rng(1)
-    image = rng.integers(0, 4, size=(4, 6, 6)).astype(np.float64)
+    source = hcc_patch((4, 6, 6))[0]
+    image = np.minimum(3, np.floor((source - source.min()) * 4 / np.ptp(source)))
     mask = (rng.random(image.shape) < 0.8).astype(np.uint8)
     features = ("glszm_SmallAreaEmphasis", "glszm_ZoneEntropy", "glszm_LargeAreaEmphasis")
     if with_gldzm:
@@ -444,16 +449,16 @@ def test_voxel_zone_maps_do_not_depend_on_batching(
 def test_roi_direction_averages_preserve_bits_across_scratch_budgets(family: str) -> None:
     from radiomics_reference.catalogue import glcm
 
-    rng = np.random.default_rng(463)
     if family == "glcm":
-        image = rng.integers(0, 129, size=(13, 17)).astype(np.float64)
-        image.flat[0], image.flat[-1] = 0, 128
+        source = hcc_patch((13, 17))[0]
+        image = np.floor((source - source.min()) * 128 / np.ptp(source))
         features = tuple(f"glcm_{name}" for name in (
             "Contrast", "JointEntropy", "ClusterShade", "Correlation",
         ))
         anchor = 0.0
     else:
-        image = rng.integers(0, 2, size=(300, 2)).astype(np.float64)
+        source = hcc_patch((300, 2))[0]
+        image = (source > np.median(source)).astype(np.float64)
         features, anchor = _GLRLM_FEATURES, -1022.0
     mask = np.ones(image.shape, dtype=np.uint8)
     mask[4:8, 0] = 0
@@ -477,7 +482,7 @@ def test_roi_direction_averages_preserve_bits_across_scratch_budgets(family: str
 
 @pytest.mark.parametrize("conventions", ["pyradiomics", "ibsi"])
 def test_zone_convergence_retains_a_long_connected_turn(conventions: Conventions) -> None:
-    image = np.ones((129, 5), dtype=np.float64)
+    image = np.repeat(hcc_background((1, 5)) / -2048, 129, axis=0)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[:, (0, 4)] = 1
     mask[-1, :] = 1

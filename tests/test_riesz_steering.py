@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from conftest import requires_fft
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics.config.filtering import FilterPadding, RieszBase
 from mlxradiomics.config.transforms import ImageType, RieszSettings, TransformSettings
@@ -34,6 +35,22 @@ _SPECTRA: dict[str, dict[int, tuple[float, ...]]] = {
     "isotropic": {2: (2.0, 2.0), 3: (2.0, 2.0, 2.0)},
     "zero": {2: (0.0, 0.0), 3: (0.0, 0.0, 0.0)},
 }
+
+
+def _ct_packet(size: int, wave: tuple[int, ...], harmonics: int) -> NDArray[np.float64]:
+    """Band-limit a real CT profile and orient it on a periodic controlled grid.
+
+    Restricting the source profile's Fourier coefficients avoids aliasing at the
+    chosen integer orientation, so the single-direction alignment identities apply.
+    """
+    profile = hcc_patch((1, size))[0].reshape(-1) / 512
+    spectrum = np.fft.rfft(profile)
+    spectrum[0] = 0
+    spectrum[harmonics + 1:] = 0
+    filtered = np.fft.irfft(spectrum, n=size)
+    indices = np.indices((size,) * len(wave))
+    positions = sum(step * indices[axis] for axis, step in enumerate(wave)) % size
+    return np.asarray(filtered[positions], dtype=np.float64)
 
 
 def _multi_indices(ndim: int, order: int) -> tuple[tuple[int, ...], ...]:
@@ -187,8 +204,7 @@ def test_steering_matrix_is_orthogonal(ndim: int, order: int) -> None:
 def test_steering_matches_an_independent_rotated_kernel(
     ndim: int, shape: tuple[int, ...], order: int,
 ) -> None:
-    generator = np.random.default_rng(37 + ndim + order)
-    image = generator.normal(size=shape)
+    image = hcc_patch(shape)[0] / 512
     rotation = _rotation(ndim, seed=5 + order)
     components = np.stack(_riesz_fft(image, order))
     expected = np.stack(_riesz_fft(image, order, rotation))
@@ -216,7 +232,7 @@ def test_steering_rotates_responses_with_the_image(
 ) -> None:
     # Odd sizes avoid the Nyquist plane, where a signed grid permutation fixes the
     # frequency and the discrete Riesz transform is not exactly equivariant.
-    image = np.random.default_rng(19 + order).normal(size=(7,) * rotation.shape[0])
+    image = hcc_patch((7,) * rotation.shape[0])[0] / 512
     moved = _warp(image, rotation)
     original = np.stack(_riesz_fft(image, order))
     moved_components = np.stack(_riesz_fft(moved, order))
@@ -314,7 +330,7 @@ def test_close_principal_pair_keeps_its_eigenvector() -> None:
 
 @pytest.mark.parametrize("padding", list(FilterPadding))
 def test_structure_tensor_diagonalises_the_oracle_tensor(padding: FilterPadding) -> None:
-    image = np.random.default_rng(41).normal(size=(6, 7, 5))
+    image = hcc_patch((6, 7, 5))[0] / 512
     spacing = (0.8, 1.1, 1.7)
     sigma = 1.4
     responses = _riesz_fft(image, 1)
@@ -342,10 +358,7 @@ def test_first_order_alignment_smooths_to_the_top_eigenvalue() -> None:
     # the regime where g * (u_1 . R)^2 equals u_1^T J u_1 = lambda_1 exactly.
     wave = np.array([1.0, 2.0, 1.0])
     direction = wave / np.linalg.norm(wave)
-    phase = sum(
-        (2 * np.pi / 16) * wave[axis] * np.indices((16, 16, 16))[axis] for axis in range(3)
-    )
-    image = np.cos(phase) + 0.6 * np.cos(2 * phase + 0.4) + 0.3 * np.cos(3 * phase + 1.1)
+    image = _ct_packet(16, (1, 2, 1), 3)
     spacing = (1.0, 1.0, 1.0)
     sigma = 2.0
     responses = _riesz_fft(image, 1)
@@ -375,9 +388,8 @@ def test_first_order_alignment_smooths_to_the_top_eigenvalue() -> None:
 def test_planar_wave_alignment_concentrates_energy_in_the_first_component() -> None:
     wave = np.array([1.0, 2.0, 3.0])
     direction = wave / np.linalg.norm(wave)
-    indices = np.indices((16, 16, 16))
-    phase = sum((2 * np.pi / 16) * wave[axis] * indices[axis] for axis in range(3))
-    first_order = _riesz_fft(np.cos(phase), 1)
+    image = _ct_packet(16, (1, 2, 3), 1)
+    first_order = _riesz_fft(image, 1)
     spacing = (1.0, 1.0, 1.0)
     with mx.stream(mx.gpu):
         rotations = np.asarray(
@@ -393,7 +405,7 @@ def test_planar_wave_alignment_concentrates_energy_in_the_first_component() -> N
     cosine = np.sum(rotations[..., 0, :] * direction, axis=-1)
     np.testing.assert_allclose(np.abs(cosine[active]), 1.0, rtol=0, atol=1e-5)
     for order in (1, 2):
-        components = _riesz_fft(np.cos(phase), order)
+        components = _riesz_fft(image, order)
         with mx.stream(mx.gpu):
             aligned = [
                 np.asarray(value, dtype=np.float64)
@@ -414,8 +426,7 @@ def test_planar_wave_alignment_concentrates_energy_in_the_first_component() -> N
 @requires_fft
 def test_public_first_order_riesz_bank_scales_with_the_image() -> None:
     # Eigenvectors must not overflow or underflow at extreme image amplitudes.
-    generator = np.random.default_rng(8271)
-    image = generator.normal(size=(7, 7, 7)).astype(np.float32)
+    image = (hcc_patch((7, 7, 7))[0] / 512).astype(np.float32)
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),
         riesz=RieszSettings(
@@ -470,10 +481,7 @@ def test_steered_pipeline_response_rotates_with_a_planar_wave() -> None:
     # An odd periodic cube has no Nyquist bin, so a 90-degree grid rotation maps the
     # DFT grid and the periodic tensor window onto themselves exactly.
     size = 15
-    indices = np.indices((size, size, size))
-    wave = (1.0, 2.0, 1.0)
-    phase = sum((2 * np.pi / size) * wave[axis] * indices[axis] for axis in range(3))
-    image = np.cos(phase) + 0.25 * np.cos(2 * phase)
+    image = _ct_packet(size, (1, 2, 1), 2)
     rotated = np.rot90(image, 1, axes=(1, 2))
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),

@@ -1,7 +1,7 @@
 """Executable acceptance of the intensity and shape features against independent definitions.
 
 The same independent scalar expectations cover ROI, retained maps and streamed
-Original maps. Fixed-width integer fixtures make the bin lattice unambiguous;
+Original maps. Integer HCC-TACE voxels make the fixed-width lattice unambiguous;
 the separate discretization suite owns fractional and source-precision edges.
 """
 
@@ -13,6 +13,7 @@ import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
 from radiomics_reference.catalogue import intensity_features, shape_features
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import Settings
 from mlxradiomics.config.settings import FEATURES
@@ -28,12 +29,19 @@ INTENSITY = tuple(name for name in FEATURES if name.split("_", 1)[0] in {
 
 
 def _fixture(ndim: int, pattern: str) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
-    shape = (4, 5) if ndim == 2 else (3, 4, 5)
-    indexes = np.indices(shape).sum(axis=0)
-    image = np.array([0., 1., 4.])[np.random.default_rng(81 + ndim).integers(0, 3, shape)]
-    mask = indexes % 3 != 0 if pattern == "sparse" else np.ones(shape, dtype=bool)
+    """Read full-liver, liver-boundary, or constant-background source crops."""
     if pattern == "constant":
-        image.fill(0)
+        crop = np.s_[0:4, 0:5, 64] if ndim == 2 else np.s_[0:3, 0:4, 60:65]
+        image, _, _ = hcc_crop(crop)
+        assert np.all(image == -2048)
+        return image, np.ones(image.shape, dtype=bool)
+    if pattern == "sparse":
+        crop = np.s_[103:107, 214:219, 64] if ndim == 2 else np.s_[103:106, 214:218, 60:65]
+    else:
+        crop = np.s_[105:109, 215:220, 64] if ndim == 2 else np.s_[110:113, 220:224, 55:60]
+    image, liver, _ = hcc_crop(crop)
+    mask = liver == 1
+    assert mask.any() and (not mask.all() if pattern == "sparse" else mask.all())
     return image, mask
 
 
@@ -41,9 +49,9 @@ def _expected(
     image: NDArray[np.float64], mask: NDArray[np.bool_], settings: Settings,
     spacing: tuple[float, ...], voxel: bool,
 ) -> dict[str, NDArray[np.float64]]:
-    # Explicit anchor -2 and width 1 map these nonnegative integer intensities
-    # onto levels 3, 4 and 7, retaining two leading empty levels and internal gaps.
-    bins = image.astype(np.int32) + 3
+    # The explicit HU anchor retains leading empty levels; integer source voxels
+    # make the independent fixed-width assignment exact.
+    bins = ((image + 2200) // 100 + 1).astype(np.int32)
     sampling = mask if settings.masked_kernel or not voxel else np.ones(mask.shape, dtype=bool)
     ng = int(bins[sampling].max())
     if not voxel:
@@ -80,8 +88,8 @@ def test_intensity_catalogue(
     settings = settings_for(
         conventions,
         features=INTENSITY,
-        bin_width=1,
-        bin_anchor=-2,
+        bin_width=100,
+        bin_anchor=-2200,
         voxel_array_shift=2.5,
         symmetrical_glcm=pattern != 'sparse' or conventions == 'ibsi',
         gldm_alpha=1,
@@ -94,7 +102,7 @@ def test_intensity_catalogue(
         # The independent oracle sees the original sample. Extra background must not
         # change a mask-based feature, including when the ROI touches an image edge.
         padding = [(0, 4)] + [(3, 2)] * (ndim - 1)
-        image = np.pad(image, padding, constant_values=2**20)
+        image = np.pad(image, padding, mode="edge")
         mask = np.pad(mask, padding, constant_values=False)
     names = tuple(f"original_{name}" for name in INTENSITY)
     if mode == "stream":
@@ -122,7 +130,7 @@ def test_force2d_catalogue_axis_permutations(axis: int, mode: str) -> None:
     spacing = [0.7, 1.3]
     spacing.insert(axis, 2.0)
     volume, volume_mask = np.expand_dims(image, axis), np.expand_dims(mask, axis)
-    settings = Settings(features=INTENSITY, bin_width=1, bin_anchor=-2, force2d_axis=axis)
+    settings = Settings(features=INTENSITY, bin_width=100, bin_anchor=-2200, force2d_axis=axis)
     expected = _expected(image, mask, replace(settings, force2d_axis=None), (0.7, 1.3),
                          mode != "roi")
     if mode == "stream":
@@ -151,10 +159,15 @@ def test_force2d_catalogue_axis_permutations(axis: int, mode: str) -> None:
 def test_shape_catalogue(
     ndim: int, permutation: tuple[int, ...], conventions: Conventions,
 ) -> None:
-    mask = np.zeros((5, 7) if ndim == 2 else (5, 6, 7), dtype=bool)
-    mask[(slice(1, -1),) * ndim] = True
+    if ndim == 2:
+        # A wholly included liver crop retains the analytic rectangle oracle.
+        image, mask = _fixture(2, "dense")
+    else:
+        image, liver, _ = hcc_crop(np.s_[103:108, 214:220, 60:67])
+        mask = liver == 1
     spacing = (0.7, 1.3) if ndim == 2 else (1.7, 0.7, 1.3)
     mask = np.transpose(mask, permutation)
+    image = np.transpose(image, permutation)
     spacing = tuple(spacing[axis] for axis in permutation)
     expected = shape_features(
         mask, spacing, settings_for(conventions).covariance_divisor,
@@ -162,7 +175,7 @@ def test_shape_catalogue(
     # This independent marching-surface oracle owns the original geometric quantities;
     # the extended morphology tests own hull, ellipsoid and intensity-dependent outputs.
     selected = tuple(expected)
-    actual = extract_original(np.ones(mask.shape), mask.astype(np.uint8), spacing=spacing,
+    actual = extract_original(image, mask.astype(np.uint8), spacing=spacing,
                      settings=settings_for(conventions, features=selected)).features
     assert set(expected) == set(selected)
     for name, target in expected.items():
@@ -172,13 +185,13 @@ def test_shape_catalogue(
 
 @pytest.mark.parametrize("axis", [0, 1, 2])
 def test_force2d_shape_catalogue(axis: int) -> None:
-    mask = np.ones((3, 5), dtype=bool)
+    image, mask = _fixture(2, "dense")
     expected = shape_features(mask, (0.7, 1.3))
     volume = np.expand_dims(mask, axis)
     spacing = [0.7, 1.3]
     spacing.insert(axis, 2.0)
     result = extract_original(
-        np.ones(volume.shape), volume.astype(np.uint8), spacing=tuple(spacing),
+        np.expand_dims(image, axis), volume.astype(np.uint8), spacing=tuple(spacing),
                      settings=settings_for("pyradiomics",
                          features=tuple(expected), force2d_axis=axis))
     for name, target in expected.items():

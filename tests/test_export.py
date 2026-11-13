@@ -9,6 +9,7 @@ import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import Settings, export, export_files, extract_files
 from mlxradiomics.config.transforms import (
@@ -22,11 +23,9 @@ from mlxradiomics.medmlx import run
 
 
 def _inputs(root: Path) -> tuple[Path, Path, NDArray[np.float64], NDArray[np.uint8]]:
+    """Write paired HCC-TACE voxels on a controlled export-test grid."""
     root.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(11)
-    values = rng.integers(-80, 80, size=(9, 10, 11)).astype(np.float64)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[1:8, 1:9, 1:9] = 1
+    values, labels, _ = hcc_crop(np.s_[103:112, 214:224, 60:71])
     image = sitk.GetImageFromArray(values)
     mask = sitk.GetImageFromArray(labels)
     image.SetSpacing((1.5, 1.0, 0.8))
@@ -40,8 +39,9 @@ def _inputs(root: Path) -> tuple[Path, Path, NDArray[np.float64], NDArray[np.uin
 
 def test_python_and_medmlx_exports_share_reports_and_physical_map_values(tmp_path: Path) -> None:
     paths = tmp_path / "image.nii.gz", tmp_path / "mask.nii.gz"
+    ct, labels, _ = hcc_crop(np.s_[105:107, 217:219, 62])
     for values, path in zip(
-        (np.array([[1.0, 2.0], [3.0, 4.0]]), np.ones((2, 2), dtype=np.uint8)), paths, strict=True,
+        (ct, labels), paths, strict=True,
     ):
         image = sitk.GetImageFromArray(values)
         image.SetSpacing((3.0, 2.0))
@@ -63,7 +63,8 @@ def test_python_and_medmlx_exports_share_reports_and_physical_map_values(tmp_pat
         assert report["mode"] == "voxel"
         assert report["details"]["feature_count"] == 1
         values = read_image(report["maps"]["original_firstorder_Mean"])
-        np.testing.assert_array_equal(values.array, np.full((2, 2), 2.5, dtype=np.float32))
+        # Every clipped radius-one neighborhood contains the whole 2x2 liver crop.
+        np.testing.assert_array_equal(values.array, np.full(ct.shape, ct.mean(), dtype=np.float32))
         assert values.spacing == (2.0, 3.0)
         assert values.origin == (7.0, 11.0)
 
@@ -164,14 +165,15 @@ def test_export_rejects_shape_features_before_writing(tmp_path: Path) -> None:
 
 def test_export_ibsi_maps_preserve_lattice_values_and_geometry(tmp_path: Path) -> None:
     """GLDZM, intensity-histogram and IVH maps keep their values and geometry in NIfTI."""
-    values = np.full((5, 6, 7), 5.0, dtype=np.float64)
-    mask = np.zeros(values.shape, dtype=np.uint8)
-    mask[1:4, 1:5, 1:6] = 1
+    values, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62:64])
+    # Each neighborhood contains all eight liver voxels. Their 43..106 HU values
+    # form one connected zone in the anchored [0, 256) bin, while IVH uses raw HU.
+    assert np.all(mask == 1) and np.all((values >= 0) & (values < 256))
     expected = {
         "gldzm_ZoneDistanceEntropy": 0.0,
-        "intensityhistogram_Mean": 6.0,
-        "ivh_VolumeAtIntensityFraction10": 1.0,
-        "ivh_VolumeAtIntensityFraction90": 0.0,
+        "intensityhistogram_Mean": 1.0,
+        "ivh_VolumeAtIntensityFraction10": float(np.mean(values >= 20)),
+        "ivh_VolumeAtIntensityFraction90": float(np.mean(values >= 180)),
     }
     source = sitk.GetImageFromArray(values)
     source.SetSpacing((0.7, 1.2, 2.3))
@@ -185,8 +187,8 @@ def test_export_ibsi_maps_preserve_lattice_values_and_geometry(tmp_path: Path) -
     result = export_files(
         image_path, mask_path, tmp_path / "out",
         settings=Settings(
-            features=tuple(expected), bin_width=1,
-            bin_anchor=0, ivh_intensity_range=(0, 10), scratch_mib=1,
+            features=tuple(expected), bin_width=256,
+            bin_anchor=0, ivh_intensity_range=(0, 200), scratch_mib=1,
         ),
     )
     for name, value in expected.items():
@@ -222,9 +224,9 @@ def test_export_files_rejects_nonboolean_overwrite_and_preserves_outputs(tmp_pat
 def test_export_rejects_invalid_scratch_before_deriving_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str,
 ) -> None:
-    shape = (65, 65, 65) if problem == "dense_budget" else (4, 5)
-    image = np.ones(shape, dtype=np.int16)
-    mask = np.ones(shape, dtype=np.uint8)
+    crop = (np.s_[100:165, 180:245, 25:90] if problem == "dense_budget"
+            else np.s_[105:109, 215:220, 64])
+    image, mask, _ = hcc_crop(crop)
     scratch, output = tmp_path / "scratch", tmp_path / "out"
     if problem != "missing_directory":
         scratch.mkdir()
@@ -254,16 +256,13 @@ def test_export_rejects_invalid_scratch_before_deriving_images(
 def test_export_images_reports_invalid_requests_as_input_errors(
     tmp_path: Path, spacing: tuple[float, ...], settings: Settings,
 ) -> None:
-    image = np.arange(6**3, dtype=np.float64).reshape(6, 6, 6)
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    mask[1:5, 1:5, 1:5] = 1
+    image, mask, _ = hcc_crop(np.s_[105:111, 215:221, 62:68])
     with pytest.raises(InvalidInputError):
         export(image, mask, tmp_path / "out", spacing=spacing, settings=settings)
 
 
 def test_array_export_warns_about_synthetic_geometry(tmp_path: Path) -> None:
-    image = np.array([[1.0, 2.0], [3.0, 4.0]])
-    mask = np.ones((2, 2), dtype=np.uint8)
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
     settings = Settings(features=("firstorder_Mean",))
     with pytest.warns(UserWarning, match="synthetic geometry"):
         warned = export(image, mask, tmp_path / "warned", settings=settings, spacing=(2.0, 3.0))
@@ -276,4 +275,4 @@ def test_array_export_warns_about_synthetic_geometry(tmp_path: Path) -> None:
         assert volume.origin == (0.0, 0.0)
         assert volume.spacing == (2.0, 3.0)
         assert volume.direction == (1.0, 0.0, 0.0, 1.0)
-        np.testing.assert_array_equal(volume.array, np.full((2, 2), 2.5))
+        np.testing.assert_array_equal(volume.array, np.full(image.shape, image.mean()))

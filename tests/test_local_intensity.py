@@ -4,6 +4,7 @@ from math import fsum, pi
 
 import numpy as np
 import pytest
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics import Settings, extract
 
@@ -16,10 +17,11 @@ from mlxradiomics import Settings, extract
 def test_physical_peaks_match_exact_sums_with_cancellation_and_truncated_rows(
     scale: float, selected: tuple[str, ...],
 ) -> None:
-    image = (np.arange(4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6) % 19 - 9) * scale
+    ct, _, _ = hcc_patch((4, 5, 6))
+    image = (ct - ct.mean()) * scale
     mask = np.zeros(image.shape, dtype=np.bool_)
     mask[0, 0, 0] = mask[2, 2, 2] = mask[3, 4, 5] = True
-    image[mask] = 13 * scale
+    image[mask] = image.max()
     spacing = (3.0, 2.0, 4.0)
     radius_squared = (3000 / (4 * pi)) ** (2 / 3)
     means = [
@@ -42,16 +44,20 @@ def test_physical_peaks_match_exact_sums_with_cancellation_and_truncated_rows(
 
 
 def test_local_peak_uses_all_tied_maximum_neighborhoods_with_separated_support() -> None:
-    image = np.zeros((1, 1, 30), dtype=np.float64)
+    image, _, _ = hcc_patch((1, 1, 30))
     mask = np.zeros(image.shape, dtype=np.bool_)
     mask[0, 0, 1] = mask[0, 0, 28] = True
-    image[mask] = 100
-    image[0, 0, 27] = 90
-    image[0, 0, 29] = 80
+    image[mask] = image.max()
+    if image[0, 0, :3].mean() > image[0, 0, 27:].mean():
+        image = image[..., ::-1].copy()
+    # Place the stronger real-source neighborhood at the later tied candidate;
+    # a first-maximum shortcut must not choose the weaker one.
+    assert image[0, 0, 27:].mean() > image[0, 0, :3].mean()
+    expected = float(np.float32(image[0, 0, 27:].mean()))
     result = extract(image, mask, spacing=(1.0, 1.0, 6.0), settings=Settings(
         features=("localintensity_LocalIntensityPeak",),
     ))
-    assert result.features["original_localintensity_LocalIntensityPeak"] == 90.0
+    assert result.features["original_localintensity_LocalIntensityPeak"] == expected
 
 
 @pytest.mark.parametrize("selected", [
@@ -64,7 +70,7 @@ def test_finite_float32_sources_keep_large_peaks_without_residuals(
     # The three-voxel sum exceeds float32, but its mean is representable. Exact
     # float32 sources have no residual, including on the convolution path.
     value = float(np.float32(2e38))
-    image = np.full((1, 1, 3), value, dtype=np.float64)
+    image = hcc_background((1, 1, 3)) * (-value / 2048)
     result = extract(image, np.ones(image.shape, dtype=np.bool_), spacing=(1.0, 1.0, 6.0),
                      settings=Settings(features=tuple(f"localintensity_{n}" for n in selected)))
     for name in selected:
@@ -73,7 +79,8 @@ def test_finite_float32_sources_keep_large_peaks_without_residuals(
 
 @pytest.mark.parametrize("name", ["LocalIntensityPeak", "GlobalIntensityPeak"])
 def test_nonfinite_background_inside_a_candidate_sphere_is_still_refused(name: str) -> None:
-    image = np.array([[[0.0, 10.0, np.inf]]], dtype=np.float64)
+    image, _, _ = hcc_patch((1, 1, 3))
+    image[0, 0, 2] = np.inf
     mask = np.array([[[False, True, False]]], dtype=np.bool_)
     with pytest.raises(ValueError, match="spheres require finite float32-range samples"):
         extract(image, mask, spacing=(1.0, 1.0, 6.0), settings=Settings(

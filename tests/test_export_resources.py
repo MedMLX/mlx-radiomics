@@ -8,6 +8,7 @@ import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop, hcc_patch
 
 from mlxradiomics.imaging.io import Volume
 from mlxradiomics.medmlx import run
@@ -16,8 +17,14 @@ MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 
 
 def _inputs(root: Path, shape: tuple[int, ...]) -> tuple[Path, Path]:
-    image = sitk.GetImageFromArray(np.full(shape, 17, dtype=np.int16))
-    mask = sitk.GetImageFromArray(np.ones(shape, dtype=np.uint8))
+    if len(shape) == 3:
+        crop = tuple(slice(start, start + size)
+                     for start, size in zip((100, 180, 25), shape, strict=True))
+        values, liver, _ = hcc_crop(crop)
+    else:
+        values, liver, _ = hcc_patch(shape)
+    image = sitk.GetImageFromArray(values.astype(np.int16))
+    mask = sitk.GetImageFromArray(liver)
     paths = root / "image.nii.gz", root / "mask.nii.gz"
     sitk.WriteImage(image, paths[0])
     sitk.WriteImage(mask, paths[1])

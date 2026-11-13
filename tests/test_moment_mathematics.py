@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.contracts.types import HostArray
@@ -43,21 +44,31 @@ _INVARIANT_NAMES = (
 )
 
 
+def _ct_range(length: int, low: float, high: float) -> NDArray[np.float64]:
+    """Calibrate a CT profile to the stated numeric range, retaining its contrast."""
+    if length == 1 or low == high:
+        return hcc_background((1, length)) * (-low / 2048)
+    source = hcc_resampled((1, length))
+    return low + (source - source.min()) / np.ptp(source) * (high - low)
+
+
 @pytest.mark.parametrize("scale", [1e-30, 1e-12, 1., 1e10, 1e13, 1e30, 1.5e38])
 @pytest.mark.parametrize("asymmetric", [False, True])
 def test_standardized_moments_preserve_amplitude_scale(scale: float, asymmetric: bool) -> None:
-    image = np.array([[-1., -1., 2.]] if asymmetric else [[-1., 1.]]) * scale
+    unit = _ct_range(3 if asymmetric else 2, -1, 1)
+    image = unit * scale
+    expected = _first_order(unit)
     result = extract(image, np.ones(image.shape, np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Skewness", "firstorder_Kurtosis"), bin_count=2))
     assert _roi_value(result, "Skewness") == pytest.approx(
-        1 / math.sqrt(2) if asymmetric else 0, rel=2e-6, abs=1e-7)
-    assert _roi_value(result, "Kurtosis") == pytest.approx(1.5 if asymmetric else 1, rel=2e-6)
+        expected["Skewness"], rel=2e-6, abs=1e-7)
+    assert _roi_value(result, "Kurtosis") == pytest.approx(expected["Kurtosis"], rel=2e-6)
 
 
 def test_quantiles_keep_finite_opposite_sign_extremes() -> None:
     amplitude = float(np.float32(2e38))
-    image = np.array([[-amplitude, amplitude]])
+    image = _ct_range(2, -amplitude, amplitude)
     result = extract(image, np.ones(image.shape, np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_10Percentile", "firstorder_Median", "firstorder_90Percentile",
@@ -75,21 +86,22 @@ def test_quantiles_keep_finite_opposite_sign_extremes() -> None:
 def test_robust_deviation_recenters_on_retained_values(
     outlier: float, step: float, outlier_first: bool,
 ) -> None:
-    line = np.concatenate([[outlier], np.arange(10) * step])
+    line = _ct_range(11, 0, 9 * step).reshape(-1)
+    line[0] = outlier
     if not outlier_first:
         line = line[::-1].copy()
     image = line[None, :]
     result = extract(image, np.ones(image.shape, np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_RobustMeanAbsoluteDeviation",), bin_count=2))
-    assert _roi_value(result, "RobustMeanAbsoluteDeviation") == pytest.approx(20 / 9 * step,
-                                                                            rel=1e-6)
+    assert _roi_value(result, "RobustMeanAbsoluteDeviation") == pytest.approx(
+        _first_order(line)["RobustMeanAbsoluteDeviation"], rel=1e-6)
 
 
 @pytest.mark.parametrize("line", [[3e38, 2e38], [-3e38, 1e38, 1e38]])
 def test_mean_and_rms_stay_finite_when_energy_overflows(line: list[float]) -> None:
     # A representable mean and RMS must survive overflowing raw sums and squares.
-    image = np.asarray([line], dtype=np.float64)
+    image = _ct_range(len(line), min(line), max(line))
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Mean", "firstorder_RootMeanSquared"), bin_count=2))
@@ -105,7 +117,8 @@ def test_robust_deviation_excludes_overflowing_opposite_sign_outlier(
 ) -> None:
     # The percentile bounds equal the repeated positive value, so the negative
     # outlier is outside the retained subset even though -3e38 - 1e38 overflows.
-    line = np.array([-3e38] + [1e38] * 10, dtype=np.float32).astype(np.float64)
+    line = hcc_background((1, 11)).reshape(-1) * (-1e38 / 2048)
+    line[0] = -3e38
     image = line[None, :]
     if permutation == 1:
         image = image[:, ::-1].copy()
@@ -124,9 +137,9 @@ def test_robust_deviation_excludes_overflowing_opposite_sign_outlier(
 
 @pytest.mark.parametrize("permutation", [0, 1, 2], ids=["ordered", "reversed", "rolled"])
 def test_robust_deviation_retains_representable_extreme_mad(permutation: int) -> None:
-    # The retained subset [-2e38, -1e38, 0, 1e38, 2e38] has a representable
-    # deviation 1.2e38. Centering on -2e38 without scaling first formed +4e38.
-    line = np.arange(-3, 4, dtype=np.float64) * 1e38
+    # A source profile spanning both signs retains a representable robust deviation.
+    # Centering at a negative endpoint before scaling can overflow the positive span.
+    line = _ct_range(7, -3e38, 3e38).reshape(-1)
     image = line[None, :]
     if permutation == 1:
         image = image[:, ::-1].copy()
@@ -141,28 +154,16 @@ def test_robust_deviation_retains_representable_extreme_mad(permutation: int) ->
         ),
     )
     assert _roi_value(result, "RobustMeanAbsoluteDeviation") == pytest.approx(
-        1.2e38, rel=1e-6
+        _first_order(line)["RobustMeanAbsoluteDeviation"], rel=1e-6
     )
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        pytest.param(
-            np.array([-3e38] + [1e38] * 10, dtype=np.float32).astype(np.float64),
-            id="excluded-outlier",
-        ),
-        pytest.param(np.arange(-3, 4, dtype=np.float64) * 1e38, id="retained-spread"),
-    ],
-)
-def test_robust_deviation_voxel_uses_scaled_subset(
-    line: NDArray[np.float64],
-) -> None:
-    # The radius covers the full line at its middle centers, so the retained extremes
-    # and a representable deviation are present. The scaled center and reduction must
-    # agree with independent float64 evaluation at every voxel center, without an
-    # overflowing opposite-sign span.
-    image = line[None, :]
+@pytest.mark.parametrize("constant", [False, True], ids=["retained-spread", "excluded-outlier"])
+def test_robust_deviation_voxel_uses_scaled_subset(constant: bool) -> None:
+    image = (_ct_range(7, -3e38, 3e38) if not constant
+             else hcc_background((1, 11)) * (-1e38 / 2048))
+    if constant:
+        image[0, 0] = -3e38
     mask = np.ones(image.shape, dtype=np.uint8)
     settings = settings_for("pyradiomics",
         features=("firstorder_RobustMeanAbsoluteDeviation",),
@@ -181,7 +182,7 @@ def test_robust_deviation_voxel_uses_scaled_subset(
 def test_percentile_coefficient_preserves_opposite_sign_cancellation(
     scale: float, sign: int, name: str,
 ) -> None:
-    image = np.array([[-9 * scale, scale]]) * sign
+    image = _ct_range(2, -9 * scale, scale) * sign
     result = extract(image, np.ones(image.shape, np.uint8), settings=settings_for(
         "pyradiomics",
         features=(f"firstorder_{name}",), bin_count=2))
@@ -205,14 +206,18 @@ def _first_order(values: HostArray) -> dict[str, float]:
     source = np.asarray(values, dtype=np.float64).reshape(-1)
     count = source.size
     mean = math.fsum(source.tolist()) / count
-    deviations = source - mean
+    # Center on a source sample first so a rounded large absolute mean does not
+    # introduce a false skew into a narrow, symmetric local population.
+    offsets = source - source[0]
+    deviations = offsets - math.fsum(offsets.tolist()) / count
     second = math.fsum((deviations * deviations).tolist()) / count
     third = math.fsum((deviations**3).tolist()) / count
     fourth = math.fsum((deviations**4).tolist()) / count
     lower = _quantile(source, 0.1)
     upper = _quantile(source, 0.9)
     robust = source[(source >= lower) & (source <= upper)]
-    robust_mean = math.fsum(robust.tolist()) / robust.size
+    robust_offsets = robust - robust[0] if robust.size else robust
+    robust_mean = math.fsum(robust_offsets.tolist()) / robust.size if robust.size else math.nan
     return {
         "Mean": mean,
         "Variance": second,
@@ -224,7 +229,8 @@ def _first_order(values: HostArray) -> dict[str, float]:
         "Range": float(source.max() - source.min()),
         "MeanAbsoluteDeviation": math.fsum(np.abs(deviations).tolist()) / count,
         "RobustMeanAbsoluteDeviation": (
-            math.fsum(np.abs(robust - robust_mean).tolist()) / robust.size
+            math.fsum(np.abs(robust_offsets - robust_mean).tolist()) / robust.size
+            if robust.size else math.nan
         ),
         "10Percentile": lower,
         "90Percentile": upper,
@@ -287,11 +293,12 @@ def _assert_scalar(name: str, actual: float, expected: float) -> None:
 @pytest.mark.parametrize("name", MOMENT_NAMES)
 def test_selected_moment_uses_only_sparse_roi_sources(name: str) -> None:
     # Excluded NaNs and large outliers must not enter compact samples or their sort.
-    image = np.full((11, 13), np.nan)
+    image = hcc_patch((11, 13))[0]
+    image[:] = np.nan
     image[4:7, 4:7] = -1e30
     mask = np.zeros(image.shape, dtype=np.uint8)
     coordinates = ([1, 3, 5, 7, 9], [1, 4, 6, 8, 11])
-    source = 1e8 + np.array([-5.0, -2.0, 1.0, 4.0, 7.0])
+    source = 1e8 + hcc_patch((11, 13))[0][coordinates] / 16
     image[coordinates] = source
     mask[coordinates] = 3
     result = extract(image.T, mask.T, settings=settings_for(
@@ -317,10 +324,9 @@ def _assert_map(name: str, actual: NDArray[np.float32], expected: NDArray[np.flo
 
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "voxel"])
 def test_high_offset_small_variation_preserves_moments(voxel: bool) -> None:
-    # Every source value rounds to the float32 value 1e8. The source population variance
-    # is 2/3 and its standardized moments are defined; centering before reduction must
-    # retain that variation instead of collapsing the row to a constant.
-    line = np.array([1e8, 1e8 + 1, 1e8 + 2], dtype=np.float64)
+    # Every source value rounds to the float32 value 1e8. Centering before reduction
+    # must retain the CT contrast instead of collapsing the row to a constant.
+    line = _ct_range(3, 1e8, 1e8 + 2).reshape(-1)
     image = np.tile(line, (3, 1)) if voxel else line[None, :]
     mask = np.ones(image.shape, dtype=np.uint8)
     result = extract(image, mask, settings=_settings(), mode=("voxel" if voxel else "roi"))
@@ -338,8 +344,7 @@ def test_high_offset_small_variation_preserves_moments(voxel: bool) -> None:
             value = _roi_value(result, name)
             _assert_scalar(name, value, expected[name])
             assert np.isfinite(value), name
-        # The correctly rounded float32 mean is 1e8; the exact float64 mean is 1e8 + 1.
-        assert _roi_value(result, "Mean") == float(np.float32(1e8 + 1))
+        assert _roi_value(result, "Mean") == float(np.float32(image.mean()))
         assert _roi_value(result, "Range") == 2.0
         assert _roi_value(result, "InterquartileRange") == 1.0
 
@@ -348,7 +353,7 @@ def test_high_offset_small_variation_preserves_moments(voxel: bool) -> None:
 def test_residual_only_variation_preserves_moments(voxel: bool) -> None:
     # These source values all convert to the float32 value 10000. Their entire spread is
     # carried by the source residual; variance, range and interquartile range must retain it.
-    line = np.array([9999.99999, 10000.0, 10000.00001], dtype=np.float64)
+    line = _ct_range(3, 9999.99999, 10000.00001).reshape(-1)
     image = np.tile(line, (3, 1)) if voxel else line[None, :]
     mask = np.ones(image.shape, dtype=np.uint8)
     result = extract(image, mask, settings=_settings(), mode=("voxel" if voxel else "roi"))
@@ -375,7 +380,7 @@ def test_translation_does_not_change_dispersion_moments(voxel: bool) -> None:
     # Adding a constant changes the mean but not variance or standardized shape. The
     # translated values are not exactly representable in float32 at this offset, so the
     # residual must carry the original differences.
-    line = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    line = hcc_patch((1, 3))[0].reshape(-1) / 256
     base = np.tile(line, (5, 1)) if voxel else line[None, :]
     translated = base + 1e6
     mask = np.ones(base.shape, dtype=np.uint8)
@@ -409,7 +414,7 @@ def test_translation_does_not_change_dispersion_moments(voxel: bool) -> None:
 
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "voxel"])
 def test_zero_variance_standardized_moments_are_undefined(voxel: bool) -> None:
-    image = np.full((3, 3), 42.5, dtype=np.float64)
+    image = hcc_background((3, 3)) * (-42.5 / 2048)
     mask = np.ones(image.shape, dtype=np.uint8)
     result = extract(image, mask, settings=_settings(), mode=("voxel" if voxel else "roi"))
 
@@ -447,7 +452,7 @@ def test_zero_variance_standardized_moments_are_undefined(voxel: bool) -> None:
 def test_quantiles_interpolate_source_values_before_float32_rounding() -> None:
     # Source median 1e8+4.5 rounds upward; interpolating the already rounded endpoints
     # (1e8 and 1e8+8) instead gives the tie 1e8+4 and rounds downward.
-    image = np.array([[1e8 + 3, 1e8 + 6]], dtype=np.float64)
+    image = _ct_range(2, 1e8 + 3, 1e8 + 6)
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=_settings())
     for name, q in (("10Percentile", 0.1), ("Median", 0.5), ("90Percentile", 0.9)):
         expected = float(np.float32(_quantile(image.reshape(-1), q)))
@@ -457,7 +462,7 @@ def test_quantiles_interpolate_source_values_before_float32_rounding() -> None:
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "voxel"])
 @pytest.mark.parametrize("shift", [-1e8, -1e8 - 0.5])
 def test_shifted_energy_preserves_source_and_shift_residuals(voxel: bool, shift: float) -> None:
-    line = np.array([1e8, 1e8 + 1, 1e8 + 2], dtype=np.float64)
+    line = _ct_range(3, 1e8, 1e8 + 2).reshape(-1)
     image = np.tile(line, (3, 1)) if voxel else line[None, :]
     mask = np.ones(image.shape, dtype=np.uint8)
     names = ("Energy", "TotalEnergy", "RootMeanSquared")
@@ -484,21 +489,21 @@ def test_shifted_energy_preserves_source_and_shift_residuals(voxel: bool, shift:
 
 @pytest.mark.parametrize("count", [0, 1000])
 def test_energy_keeps_squares_below_the_normal_float32_range(count: int) -> None:
-    # Each 1e-19 square (1e-38) is below 2**-126 ~ 1.18e-38 and is flushed to zero on Metal,
-    # but their sum is a normal float32: Energy = 4e-38 + count * 1e-38 by hand.
-    image = np.array([[2e-19] + [1e-19] * count], dtype=np.float64)
+    # Individual low-amplitude squares are subnormal, while the independently summed
+    # energy is normal. Metal must retain those terms through scaled accumulation.
+    image = _ct_range(count + 1, 1e-19 if count else 2e-19, 2e-19)
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Energy",), bin_count=1,
     ))
-    expected = 4e-38 + count * 1e-38
+    expected = math.fsum((image**2).reshape(-1).tolist())
     np.testing.assert_allclose(_roi_value(result, "Energy"), expected, rtol=1e-6, atol=0)
 
 
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "voxel"])
 @pytest.mark.parametrize("shift", [-1e39, 1e39])
 def test_rms_preserves_infinity_for_unrepresentable_shift(voxel: bool, shift: float) -> None:
-    image = np.zeros((2, 2), dtype=np.float64)
+    image = hcc_patch((2, 2))[0]
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_RootMeanSquared",), bin_count=1, voxel_array_shift=shift,
@@ -516,7 +521,7 @@ def test_shifted_energy_refuses_pair_unresolved_cancellation(voxel: bool, name: 
     # pair; the shift cancels that pair exactly. Their true Energy is the representable
     # 1.925929944387236e-34, but it cannot be recovered from the rounded pair, so reporting
     # zero (or any inferred value) is refused.
-    line = np.array([0.1, np.nextafter(0.1, np.inf)], dtype=np.float64)
+    line = _ct_range(2, 0.1, float(np.nextafter(0.1, np.inf))).reshape(-1)
     image = np.tile(line, (2, 1)) if voxel else line[None, :]
     with pytest.raises(RuntimeError, match="unresolved"):
         extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
@@ -533,7 +538,7 @@ def test_shifted_energy_and_rms_classify_finite_sum_overflow_as_infinity(
     # range. The high-part difference is already infinite, so the residual compensation
     # must preserve the positive-infinite classification instead of producing NaN.
     x = float(np.float32(2e38))
-    line = np.array([x, x], dtype=np.float64)
+    line = _ct_range(2, x, x).reshape(-1)
     image = np.tile(line, (2, 1)) if voxel else line[None, :]
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
@@ -548,26 +553,28 @@ def test_shifted_energy_and_rms_classify_finite_sum_overflow_as_infinity(
 
 @pytest.mark.parametrize("voxel", [False, True], ids=["roi", "voxel"])
 def test_coefficient_of_variation_survives_cancelling_mean(voxel: bool) -> None:
-    # The exact mean is 1/3 and the population standard deviation is sqrt(2/3)*1e8.
-    # A plain float32 tree sums 1e8 + 1 - 1e8 to zero and reports infinite CV.
-    line = np.array([1e8, 1.0, -1e8], dtype=np.float64)
+    # A plain float32 tree loses the source middle voxel beside cancelling endpoints
+    # and reports an infinite coefficient of variation.
+    line = hcc_patch((1, 3))[0].reshape(-1)
+    line[[0, -1]] = 1e8, -1e8
     image = np.tile(line, (3, 1)) if voxel else line[None, :]
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Mean", "firstorder_CoefficientOfVariation"), bin_count=2,
     ), mode=("voxel" if voxel else "roi"))
-    expected_cv = math.sqrt(2 / 3) * 1e8 / (1 / 3)
+    mean = math.fsum(line.tolist()) / line.size
+    expected_cv = float(np.std(line)) / mean
     if voxel:
         # Only the center column's radius-1 neighborhoods hold the three columns in
         # equal proportion; edge neighborhoods are clipped to two columns.
         np.testing.assert_allclose(
-            _voxel_map(result, "Mean")[:, 1], float(np.float32(1 / 3)), rtol=1e-6, atol=0,
+            _voxel_map(result, "Mean")[:, 1], float(np.float32(mean)), rtol=1e-6, atol=0,
         )
         np.testing.assert_allclose(
             _voxel_map(result, "CoefficientOfVariation")[:, 1], expected_cv, rtol=1e-6,
         )
     else:
-        assert _roi_value(result, "Mean") == float(np.float32(1 / 3))
+        assert _roi_value(result, "Mean") == float(np.float32(mean))
         np.testing.assert_allclose(
             _roi_value(result, "CoefficientOfVariation"), expected_cv, rtol=1e-6,
         )
@@ -576,7 +583,7 @@ def test_coefficient_of_variation_survives_cancelling_mean(voxel: bool) -> None:
 def test_true_zero_mean_keeps_infinite_coefficient_of_variation() -> None:
     # Exactly opposite representable sources still mean zero; the compensated reduction
     # must not turn that valid classification into an error or a finite value.
-    image = np.array([[-1e8, 1e8]], dtype=np.float64)
+    image = _ct_range(2, -1e8, 1e8)
     result = extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Mean", "firstorder_CoefficientOfVariation"), bin_count=2,
@@ -732,7 +739,7 @@ def test_float32_subnormal_sources_are_refused() -> None:
 def test_extrema_ignore_unrelated_subnormal_sources(
     line: list[float], name: str, expected: float,
 ) -> None:
-    image = np.array([line])
+    image = _ct_range(len(line), min(line), max(line))
     result = extract(image, np.ones(image.shape, np.uint8),
                      settings=settings_for("pyradiomics", features=(f"firstorder_{name}",)))
     assert _roi_value(result, name) == expected
@@ -763,7 +770,7 @@ def test_spread_refuses_inexact_pairs_without_collision() -> None:
 def test_rejections_keep_their_precedence_when_several_apply() -> None:
     # All checks complete in one readback; a sample failing several still reports the
     # first in order: subnormal source, unresolved spread, unresolved shifted energy.
-    inexact = 1e12 + 1e-3 * np.array([[0.0, 3.0, 1.0, 4.0, 1.0, 2.0]])
+    inexact = 1e12 + _ct_range(6, 0, 4e-3)
     with pytest.raises(RuntimeError, match="flushed"):
         _direct_first_order(np.concatenate([[[1e-40]], inexact], axis=1), ("Variance",))
     with pytest.raises(RuntimeError, match="flushed"):
@@ -796,7 +803,7 @@ def test_first_order_selected_and_convention_validation() -> None:
 
 
 def test_extended_first_order_features_through_public_extract() -> None:
-    image = np.array([[1.0, 2.0, 10.0]])
+    image = hcc_patch((1, 3))[0]
     result = extract(
         image,
         np.ones(image.shape, dtype=np.uint8),
@@ -810,12 +817,14 @@ def test_extended_first_order_features_through_public_extract() -> None:
             bin_width=1.0,
         ),
     )
-    assert _roi_value(result, "MedianAbsoluteDeviation") == pytest.approx(3.0, rel=1e-6)
+    assert _roi_value(result, "MedianAbsoluteDeviation") == pytest.approx(
+        float(np.mean(np.abs(image - np.median(image)))), rel=1e-6)
     assert _roi_value(result, "CoefficientOfVariation") == pytest.approx(
-        math.sqrt(146) / 13, rel=1e-6
+        float(np.std(image) / image.mean()), rel=1e-6
     )
     assert _roi_value(result, "QuartileCoefficientOfDispersion") == pytest.approx(
-        0.6, rel=1e-6
+        float((np.quantile(image, 0.75) - np.quantile(image, 0.25))
+              / (np.quantile(image, 0.75) + np.quantile(image, 0.25))), rel=1e-6
     )
 
 
@@ -825,12 +834,12 @@ def test_range_and_iqr_beyond_float32_range_are_positive_infinity() -> None:
     # span that fits stays exact.
     a = float(np.float32(3e38))
     names = ("firstorder_Range", "firstorder_InterquartileRange")
-    image = np.array([[-a, -a, a, a]])
+    image = np.repeat(_ct_range(2, -a, a), 2, axis=1)
     result = extract(image, np.ones(image.shape, np.uint8),
                      settings=settings_for("pyradiomics", features=names, bin_count=4))
     for name in ("Range", "InterquartileRange"):
         assert np.isposinf(_roi_value(result, name)), name
-    image = np.array([[-a / 2, -a / 2, a / 2, a / 2]])
+    image = np.repeat(_ct_range(2, -a / 2, a / 2), 2, axis=1)
     result = extract(image, np.ones(image.shape, np.uint8),
                      settings=settings_for("pyradiomics", features=names, bin_count=4))
     for name in ("Range", "InterquartileRange"):
@@ -843,7 +852,10 @@ def test_mean_keeps_a_small_residual_beside_cancelling_residuals(
 ) -> None:
     # Every source is an exact float32 value plus residual; the exact mean is 2**-28 and
     # CV = sqrt(variance) / mean. Reducing values and residuals separately would give zero.
-    line = np.array([1e8 + 1, 1e8 + 2.0**-26, -1e8 - 1, -1e8])[list(order)]
+    pair = _ct_range(2, 1e8, 1e8 + 1).reshape(-1)
+    line = np.concatenate((pair[::-1], -pair[::-1]))
+    line[1] += 2.0**-26
+    line = line[list(order)]
     result = extract(line[None, :], np.ones((1, 4), np.uint8), settings=settings_for(
         "pyradiomics",
         features=("firstorder_Mean", "firstorder_CoefficientOfVariation"), bin_count=2))
@@ -857,7 +869,7 @@ def test_total_energy_is_finite_when_only_energy_leaves_the_float32_range(
     value: float, spacing: float,
 ) -> None:
     sample = float(np.float32(value))
-    image = np.array([[value, value]])
+    image = hcc_background((1, 2)) * (-value / 2048)
     result = extract(image, np.ones(image.shape, np.uint8), spacing=(spacing, spacing),
                      settings=settings_for(
                          "pyradiomics", features=("firstorder_TotalEnergy",), bin_count=1))

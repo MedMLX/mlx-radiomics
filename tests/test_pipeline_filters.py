@@ -10,6 +10,8 @@ import pytest
 import SimpleITK as sitk
 from conftest import requires_fft
 from numpy.typing import NDArray
+from radiomics_reference.mathematics import masked_neighborhood_mean
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.filtering import LBPMethod, LogKernel
 from mlxradiomics.config.parameters import parse_params
@@ -30,29 +32,29 @@ from mlxradiomics.workflows.extraction import extract, extract_files
 
 
 def test_filter_source_words_reconstruct_source_bits_with_a_required_third_word() -> None:
-    image = np.array([
-        [1.0 + 2.0**-26 + 2.0**-52, -1.0 - 2.0**-26 - 2.0**-52, -0.0],
-        [0.1, np.nextafter(0.1, np.inf), float(np.finfo(np.float32).max)],
-    ], dtype=np.float64)
+    ct, _, _ = hcc_crop(np.s_[105:107, 215:218, 64])
+    image = (ct - 100) * (1.0 + 2.0**-26 + 2.0**-52)
     high = image.astype(np.float32)
     low, tail = filter_source_words(image, high, tail=True)
     assert tail is not None
-    assert low[0, 0] == 2.0**-26 and tail[0, 0] == 2.0**-52
-    assert low[0, 1] == -(2.0**-26) and tail[0, 1] == -(2.0**-52)
+    assert np.any(tail != 0)
     for source, a, b, c in zip(image.flat, high.flat, low.flat, tail.flat, strict=True):
         assert Fraction(float(source)) == sum(Fraction(float(word)) for word in (a, b, c))
 
 
 def test_filter_source_words_refuse_loss_below_all_three_words() -> None:
-    image = np.array([[1.0, 2.0**-200]], dtype=np.float64)
+    image, _, _ = hcc_crop(np.s_[105:106, 217:219, 64])
+    image[0, 1] *= 2.0**-200
     with pytest.raises(ValueError, match="represented by three float32 words"):
         filter_source_words(image, image.astype(np.float32), tail=True)
 
 
 def test_public_feature_images_still_validate_the_complete_input() -> None:
+    image, _, _ = hcc_crop(np.s_[105:107, 217:219, 64])
+    image[0, 1] = np.nan
     with pytest.raises(ValueError, match="feature image intensities must be finite"):
         next(feature_images(
-            mx.array([[1.0, float("nan")], [2.0, 3.0]], dtype=mx.float32), (1.0, 1.0),
+            mx.array(image, dtype=mx.float32), (1.0, 1.0),
             TransformSettings(image_types=(ImageType.SQUARE,)),
         ))
 
@@ -61,9 +63,7 @@ def test_public_feature_images_still_validate_the_complete_input() -> None:
 def test_retained_maps_admit_the_complete_payload_before_allocation(
     monkeypatch: pytest.MonkeyPatch, derived: bool,
 ) -> None:
-    image = np.arange(125, dtype=np.float64).reshape(5, 5, 5)
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    mask[1:4, 1:4, 1:4] = 1
+    image, mask, _ = hcc_crop(np.s_[103:108, 214:219, 60:65])
     # One map fits exactly. A second feature, or eight wavelet bands accumulated
     # across individually small extractions, must refuse the full retained selection.
     actual_device = mx.device_info(mx.gpu)
@@ -84,7 +84,9 @@ def test_retained_maps_admit_the_complete_payload_before_allocation(
             extract_original(image, mask, settings=settings, voxel=True)
     result = extract_original(image, mask,
         settings=Settings(features=("firstorder_Mean",)), voxel=True)
-    assert np.asarray(result.features["original_firstorder_Mean"])[2, 2, 2] == 62
+    expected = masked_neighborhood_mean(image, mask == 1)
+    np.testing.assert_allclose(result.features["original_firstorder_Mean"], expected,
+                               rtol=1e-6, atol=1e-6)
     # The same byte budget admits two float32 maps, through either capacity check.
     compact = (
         extract(image, mask, settings=Settings(features=("firstorder_Mean",)),
@@ -110,15 +112,16 @@ def test_retained_maps_admit_the_complete_payload_before_allocation(
         transforms=options if derived else None, mode="voxel", sink=consume,
     )
     assert not streamed.features
-    assert rows == 27 * (9 if derived else 1)
+    assert rows == int(np.count_nonzero(mask)) * (9 if derived else 1)
 
 
-@pytest.mark.parametrize("direction,expected", [(0.0, 241), (2.0, 255)])
+@pytest.mark.parametrize("direction,expected", [(-4096.0, 241), (0.0, 255)])
 def test_public_extraction_distinguishes_adjacent_float64_source_values(
     direction: float, expected: int,
 ) -> None:
-    image = np.ones((3, 3), dtype=np.float64)
-    image[0, 1] = np.nextafter(1.0, direction)
+    image, _, _ = hcc_crop(np.s_[0:3, 0:3, 64])
+    assert np.all(image == -2048)
+    image[0, 1] = np.nextafter(image[0, 1], direction)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[1, 1] = 1
     result = extract(
@@ -135,10 +138,7 @@ def test_public_extraction_distinguishes_adjacent_float64_source_values(
 
 @requires_fft
 def test_parameter_driven_riesz_images_are_named_and_finite(tmp_path: Path) -> None:
-    rng = np.random.default_rng(53)
-    values = rng.normal(20.0, 4.0, (7, 8, 9))
-    mask = np.zeros(values.shape, dtype=np.uint8)
-    mask[2:5, 2:6, 3:7] = 1
+    values, mask, _ = hcc_crop(np.s_[103:110, 214:222, 60:69])
     image, labels = sitk.GetImageFromArray(values), sitk.GetImageFromArray(mask)
     image.SetSpacing((1.0, 1.0, 1.0))
     labels.CopyInformation(image)
@@ -167,7 +167,8 @@ def test_parameter_driven_riesz_images_are_named_and_finite(tmp_path: Path) -> N
 
 
 def test_parameter_driven_file_filters_keep_geometry_and_physical_controls(tmp_path: Path) -> None:
-    values = np.full((5, 7, 9), 3.0, dtype=np.float64)
+    values, _, _ = hcc_crop(np.s_[0:5, 0:7, 60:69])
+    assert np.all(values == -2048)
     mask = np.zeros(values.shape, dtype=np.uint8)
     mask[1:-1, 1:-1, 1:-1] = 1
     image, labels = sitk.GetImageFromArray(values), sitk.GetImageFromArray(mask)
@@ -196,10 +197,10 @@ def test_parameter_driven_file_filters_keep_geometry_and_physical_controls(tmp_p
     x_gain = np.sum(np.exp(-x*x / (2*0.7**2)) * np.cos(2*pi*x / 3.0))
     y_gain = np.sum(np.exp(-y*y / (2*0.7**2)))
     expected = {
-        "mean-M5-periodic_firstorder_Mean": 3.0,
+        "mean-M5-periodic_firstorder_Mean": float(values.flat[0]),
         "laws-E3L3-periodic-pool-max-energy-d1_firstorder_Mean": 0.0,
         "gabor-s0p7mm-l3mm-g1-t0-modulus-periodic-axis0_firstorder_Mean":
-            3.0 * abs(x_gain * y_gain),
+            abs(float(values.flat[0]) * x_gain * y_gain),
     }
     assert set(result.features) == set(expected)
     for name, value in expected.items():
@@ -217,11 +218,14 @@ def test_parameter_driven_file_filters_keep_geometry_and_physical_controls(tmp_p
 def test_identity_filter_preserves_the_gldzm_morphology_mask(
     resegment_shape: bool, expected: float,
 ) -> None:
-    image = np.zeros((5, 5), dtype=np.float64)
-    image[1:4, 1:4] = 1.0
-    mask = np.ones((5, 5), dtype=np.uint8)
+    image, mask, _ = hcc_crop(np.s_[100:105, 225:230, 64])
+    assert np.all(mask == 1)
+    # The three voxels >=117 HU form one connected zone entirely inside the ROI;
+    # its minimum distance to the original boundary is two, versus one after resegmentation.
+    assert np.count_nonzero(image >= 117) == 3
     settings = Settings(
-        features=("gldzm_SmallDistanceEmphasis",), resegment_range=(1.0,),
+        features=("gldzm_SmallDistanceEmphasis",), resegment_range=(117.0,),
+        bin_width=256, bin_anchor=0,
         resegment_shape=resegment_shape,
     )
     transforms = TransformSettings(
@@ -229,8 +233,8 @@ def test_identity_filter_preserves_the_gldzm_morphology_mask(
     )
     result = extract(image, mask, settings=settings, transforms=transforms)
     # A unit-support mean is the identity, so it must not change a GLDZM value: the
-    # intensity ROI stays at the central 3x3 while morphology keeps the original 5x5
-    # mask (resegment_shape=False) or its resegmented 3x3 support (True).
+    # intensity ROI keeps the three selected liver voxels while morphology keeps
+    # the full liver crop (False) or only those selected voxels (True).
     for key in (
         "original_gldzm_SmallDistanceEmphasis",
         "mean-M1-mirror_gldzm_SmallDistanceEmphasis",
@@ -240,9 +244,7 @@ def test_identity_filter_preserves_the_gldzm_morphology_mask(
 
 @pytest.mark.parametrize("mode", ["roi", "retained", "streamed"])
 def test_adjacent_sampled_log_sigmas_survive_every_delivery_path(mode: str) -> None:
-    image = np.random.default_rng(61).normal(20.0, 4.0, (6, 6, 6))
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    mask[1:-1, 1:-1, 1:-1] = 1
+    image, mask, _ = hcc_crop(np.s_[103:109, 214:220, 60:66])
     settings = Settings(bin_width=2.0, features=("firstorder_Mean",))
     transforms = TransformSettings(
         image_types=(ImageType.LOG,),

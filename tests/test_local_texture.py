@@ -7,6 +7,7 @@ import pytest
 from conftest import settings_for
 from numpy.typing import NDArray
 from radiomics_reference import catalogue
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.config.settings import FAMILIES
@@ -17,12 +18,10 @@ NAMES = tuple(
     f"{family}_{name}" for family in ("glcm", "glrlm", "glszm", "gldm", "ngtdm")
     for name in FAMILIES[family]
 )
-_RNG = np.random.default_rng(7)
-_LEVELS = _RNG.integers(0, 4, size=(7, 8, 9)).astype(np.float64) * 25
-_HOLES = (_RNG.random(_LEVELS.shape) > 0.25).astype(np.uint8)
-_PLANE = _RNG.integers(0, 6, size=(14, 15)).astype(np.float64)
-_PLANE_MASK = (_RNG.random(_PLANE.shape) > 0.2).astype(np.uint8)
-_CONTINUOUS = _RNG.normal(100, 40, size=(7, 8, 9))
+_CONTINUOUS, _HOLES, _ = hcc_crop(np.s_[103:110, 214:222, 60:69])
+_LEVELS = np.floor(_CONTINUOUS / 25) * 25
+_PLANE, _PLANE_MASK, _ = hcc_crop(np.s_[103:117, 214:229, 64])
+_BACKGROUND, _, _ = hcc_crop(np.s_[0:5, 0:5, 60:65])
 
 CASES = {
     "levels-holes": (_LEVELS, _HOLES, Settings(bin_width=25)),
@@ -32,9 +31,9 @@ CASES = {
     "distances": (_LEVELS, _HOLES, settings_for("pyradiomics",
         bin_width=25, distances=(1, 2), gldm_alpha=1)),
     "force2d": (_LEVELS, _HOLES, settings_for("pyradiomics", bin_width=25, force2d_axis=0)),
-    "plane-radius2": (_PLANE, _PLANE_MASK, Settings(bin_width=1, kernel_radius=2)),
+    "plane-radius2": (_PLANE, _PLANE_MASK, Settings(bin_width=25, kernel_radius=2)),
     "flat": (
-        np.full((5, 5, 5), 7.0, dtype=np.float64),
+        _BACKGROUND,
         np.ones((5, 5, 5), dtype=np.uint8), settings_for("pyradiomics"),
     ),
 }

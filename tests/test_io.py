@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.config.spatial import IbsiInterpolation, ImageSettings, Interpolator
@@ -48,7 +49,8 @@ def _write_pair(root: Path, image: sitk.Image, mask: sitk.Image) -> tuple[Path, 
 
 
 def _fixture(*, reflected: bool = False) -> tuple[sitk.Image, sitk.Image]:
-    values = np.random.default_rng(71).normal(-50, 300, (7, 8, 9))
+    """Place a real CT crop and the grid test's selected ROI on controlled geometry."""
+    values, _, _ = hcc_crop(np.s_[103:110, 214:222, 60:69])
     labels = np.zeros(values.shape, dtype=np.uint8)
     labels[2:6, 2:7, 1:6] = 1
     image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
@@ -303,9 +305,10 @@ def test_normalization_precedes_resampling_and_runs_once(
 
 
 def _oblique_pair(ndim: int, label: int = 17) -> tuple[sitk.Image, sitk.Image]:
-    """Create an asymmetric grid with an oblique reflection and known integer support."""
-    shape = (7, 8, 9)[-ndim:]
-    values = np.arange(np.prod(shape), dtype=np.float64).reshape(shape) - 50
+    """Put real CT pixels on an oblique grid with controlled integer ROI support."""
+    crop = np.s_[103:110, 214:222, 60:69] if ndim == 3 else np.s_[103:111, 214:223, 64]
+    values, _, _ = hcc_crop(crop)
+    shape = values.shape
     labels = np.zeros(shape, dtype=np.uint64)
     labels[tuple(slice(2, size - 2) for size in shape)] = label
     image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
@@ -414,7 +417,8 @@ def test_geometry_match_is_judged_in_voxels_at_micrometre_spacing(tmp_path: Path
     # 0.1 um voxels in metres: a mask origin 5 voxels along x (5e-7) is a different grid
     # even though every coordinate differs by less than 1e-6.
     spacing = 1e-7
-    image = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+    values, _, _ = hcc_crop(np.s_[103:111, 214:222, 60:68])
+    image = sitk.GetImageFromArray(values.astype(np.float32))
     image.SetSpacing((spacing,) * 3)
     labels = np.zeros((8, 8, 8), dtype=np.uint8)
     labels[2, 2, 2] = 1
@@ -464,7 +468,9 @@ def test_spatial_paths_do_not_merge_large_adjacent_labels(tmp_path: Path, mode: 
 def test_scaled_nifti_applies_scaling_and_lps_axis_conventions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ndim: int, endian: str,
 ) -> None:
-    raw = np.arange(np.prod((4, 5, 6)[:ndim]), dtype=np.int16).reshape((4, 5, 6)[:ndim])
+    crop = np.s_[105:109, 215:220, 62:68] if ndim == 3 else np.s_[105:109, 215:220, 64]
+    values, _, _ = hcc_crop(crop)
+    raw = values.astype(np.int16)
     affine = np.eye(4)
     cosine, sine = np.cos(0.37), np.sin(0.37)
     direction = np.array(((-cosine, -sine, 0), (-sine, cosine, 0), (0, 0, 1)))
@@ -504,7 +510,7 @@ def test_file_masks_preserve_uint64_label_values(tmp_path: Path, suffix: str, la
 def test_file_reader_rejects_nonfinite_source_voxels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str, nonfinite: float,
 ) -> None:
-    values = np.arange(30, dtype=np.float64).reshape(5, 6)
+    values, _, _ = hcc_crop(np.s_[105:110, 215:221, 64])
     values[-1, -1] = nonfinite
     path = tmp_path / f"nonfinite{suffix}"
     sitk.WriteImage(sitk.GetImageFromArray(values), path)
@@ -516,11 +522,13 @@ def test_file_reader_rejects_nonfinite_source_voxels(
 @pytest.mark.parametrize("kind", ["floating_mask", "vector_image", "four_dimensions"])
 def test_file_readers_reject_unsupported_pixel_contracts(tmp_path: Path, kind: str) -> None:
     if kind == "floating_mask":
-        image = sitk.GetImageFromArray(np.ones((5, 6), dtype=np.float64))
+        _, labels, _ = hcc_crop(np.s_[105:110, 215:221, 64])
+        image = sitk.GetImageFromArray(labels.astype(np.float64))
         reader, message = read_mask, "integer labels"
     else:
-        image = sitk.GetImageFromArray(np.zeros((2, 3, 4, 5), dtype=np.float32),
-                                       isVector=kind == "vector_image")
+        values, _, _ = hcc_crop(np.s_[105:108, 215:219, 62:67])
+        image = sitk.GetImageFromArray(np.stack((values, values)).astype(np.float32),
+                                      isVector=kind == "vector_image")
         reader = read_image
         message = "single-channel" if kind == "vector_image" else "2D or 3D"
     path = tmp_path / "unsupported.nrrd"
@@ -530,13 +538,11 @@ def test_file_readers_reject_unsupported_pixel_contracts(tmp_path: Path, kind: s
 
 
 def _ibsi_linear_pair() -> tuple[sitk.Image, sitk.Image]:
-    """Create an oblique linear-ramp image and a binary mask inside it."""
+    """Put a CT crop and selected ROI on the centered-grid reference geometry."""
     shape, spacing, origin = (5, 6, 7), (0.75, 1.4, 2.5), (10.0, -5.0, 3.0)
     cosine, sine = np.cos(0.37), np.sin(0.37)
     direction = np.array(((cosine, -sine, 0.0), (sine, cosine, 0.0), (0.0, 0.0, 1.0)))
-    index = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij"), axis=-1)
-    physical = origin + (index * spacing) @ direction.T
-    values = 3 * physical[..., 0] + 5 * physical[..., 1] - 2 * physical[..., 2] + 7
+    values, _, _ = hcc_crop(np.s_[105:110, 215:221, 62:69])
     labels = np.zeros(shape, dtype=np.uint8)
     labels[1:4, 2:5, 2:6] = 1
     image = sitk.GetImageFromArray(values.transpose(2, 1, 0))
@@ -549,10 +555,9 @@ def _ibsi_linear_pair() -> tuple[sitk.Image, sitk.Image]:
 
 
 def _ibsi_nonlinear_pair() -> tuple[sitk.Image, sitk.Image]:
-    """Create an oblique nonlinear image and a non-1-label mask for cubic interpolation."""
+    """Put a real CT slice and non-1 ROI label on an oblique interpolation grid."""
     shape = (8, 9)
-    row, column = np.indices(shape, dtype=np.float64)
-    values = 3.0 * column**2 + 2.0 * row**3 + 5.0 * row * column - 30.0 + 0.5
+    values, _, _ = hcc_crop(np.s_[103:111, 214:223, 64])
     labels = np.zeros(shape, dtype=np.uint8)
     labels[1:7, 1:8] = 5
     image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
@@ -583,10 +588,9 @@ def _ibsi_bspline_reference(
     )
 
 
-def test_ibsi_centered_grid_matches_closed_form(tmp_path: Path) -> None:
+def test_ibsi_centered_grid_matches_independent_itk(tmp_path: Path) -> None:
     image, mask = _ibsi_linear_pair()
-    # Target spacing keeps every output center inside the source center extent, so the
-    # linear ramp is reproduced exactly without boundary clamping.
+    # Target spacing keeps every output center inside the source center extent.
     options = ImageSettings(
         ibsi_interpolation=IbsiInterpolation(spacing=(3.0, 1.75, 1.0), round_intensities=False),
     )
@@ -603,10 +607,15 @@ def test_ibsi_centered_grid_matches_closed_form(tmp_path: Path) -> None:
     np.testing.assert_allclose(pair.image.spacing, target[::-1], rtol=0, atol=1e-12)
     np.testing.assert_allclose(pair.image.origin, expected_origin, rtol=0, atol=1e-12)
     np.testing.assert_allclose(pair.image.direction, image.GetDirection(), rtol=0, atol=1e-12)
-    index = np.moveaxis(np.indices(shape, dtype=np.float64), 0, -1)
-    physical = expected_origin + (index * target) @ direction.T
-    expected = 3 * physical[..., 0] + 5 * physical[..., 1] - 2 * physical[..., 2] + 7
-    np.testing.assert_allclose(pair.image.array.astype(np.float64), expected.transpose(2, 1, 0),
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize(shape)
+    resampler.SetOutputSpacing(target.tolist())
+    resampler.SetOutputOrigin(expected_origin.tolist())
+    resampler.SetOutputDirection(image.GetDirection())
+    resampler.SetOutputPixelType(sitk.sitkFloat64)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    expected = np.asarray(sitk.GetArrayFromImage(resampler.Execute(image)), dtype=np.float64)
+    np.testing.assert_allclose(pair.image.array.astype(np.float64), expected,
                                rtol=0, atol=1e-9)
 
 
@@ -670,7 +679,7 @@ def test_ibsi_bspline_image_keeps_linear_mask_and_rounding(tmp_path: Path) -> No
 def test_ibsi_interpolation_pads_edges_and_thresholds_only_the_selected_label(
     tmp_path: Path, label: int,
 ) -> None:
-    values = np.tile((np.arange(4) * 10.0)[None, :], (4, 1))
+    values, _, _ = hcc_crop(np.s_[105:109, 215:219, 64])
     labels = np.zeros((4, 4), dtype=np.uint8)
     labels[1:3, 1:3] = label
     # An adjacent region must not blend its label magnitude into selected occupancy.
@@ -681,9 +690,13 @@ def test_ibsi_interpolation_pads_edges_and_thresholds_only_the_selected_label(
     options = ImageSettings(ibsi_interpolation=IbsiInterpolation(spacing=(2.0, 2.0)))
     pair = load_image_pair(*_write_pair(tmp_path, image, mask), settings=Settings(label=label),
                            image_settings=options)
-    # Output centers are at input indexes -1/6, 1/2, 7/6, 11/6, 5/2, 19/6. The ramp
-    # gives 0, 5, 35/3, 55/3, 25 and a boundary-clamped 30; rounding then applies.
-    expected = np.tile(np.array((0.0, 5.0, 12.0, 18.0, 25.0, 30.0)), (6, 1))
+    # Output centers are at source indexes -1/6 + 2k/3. SciPy supplies the
+    # independent bilinear interpolation and nearest boundary extension.
+    from scipy.ndimage import map_coordinates
+
+    axes = -1 / 6 + 2 * np.arange(6) / 3
+    grid = np.meshgrid(axes, axes, indexing="ij")
+    expected = np.rint(map_coordinates(values, np.asarray(grid), order=1, mode="nearest"))
     np.testing.assert_array_equal(pair.image.array, expected)
     assert pair.mask.array.dtype == np.uint8
     assert set(np.unique(pair.mask.array)) == {0, label}
@@ -702,7 +715,8 @@ def test_ibsi_mask_threshold_includes_exactly_covered_voxels(
 ) -> None:
     labels = np.zeros((4, 10), dtype=np.uint8)
     labels[:, :2] = 1
-    image, mask = sitk.GetImageFromArray(np.zeros((4, 10))), sitk.GetImageFromArray(labels)
+    values, _, _ = hcc_crop(np.s_[105:109, 215:225, 64])
+    image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
     options = ImageSettings(ibsi_interpolation=IbsiInterpolation(
         spacing=(0.0, 0.4), mask_threshold=threshold, round_intensities=False,
     ))
@@ -726,7 +740,8 @@ def test_ibsi_mask_extrapolation_zero_excludes_centers_beyond_source_centers(
     labels = np.zeros((4, 10), dtype=np.uint8)
     labels[:, :2] = 1
     labels[:, 8:] = 1
-    image, mask = sitk.GetImageFromArray(np.zeros((4, 10))), sitk.GetImageFromArray(labels)
+    values, _, _ = hcc_crop(np.s_[105:109, 215:225, 64])
+    image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
     options = ImageSettings(ibsi_interpolation=IbsiInterpolation(
         spacing=(0.0, 0.4), round_intensities=False,
     ))
@@ -832,7 +847,8 @@ def test_ibsi_zero_spacing_keeps_the_source_grid(tmp_path: Path, explicit: bool)
 def test_ibsi_exact_spacing_ratio_preserves_dimensions(
     tmp_path: Path, size: int, spacing: float, target: float, expected: int,
 ) -> None:
-    image = sitk.GetImageFromArray(np.ones((size, size)))
+    values, _, _ = hcc_crop(np.s_[5:5 + size, 5:5 + size, 64])
+    image = sitk.GetImageFromArray(values)
     image.SetSpacing((spacing, spacing))
     mask = sitk.GetImageFromArray(np.ones((size, size), np.uint8))
     mask.CopyInformation(image)
@@ -847,7 +863,10 @@ def test_ibsi_exact_spacing_ratio_preserves_dimensions(
 def test_ibsi_ceiling_retains_fractional_extents_and_small_images(
     tmp_path: Path, spacing: float, size: int,
 ) -> None:
-    image = sitk.GetImageFromArray(np.ones((4, 4), dtype=np.float64))
+    # Constant source background retains the dimension and boundary corner cases.
+    values, _, _ = hcc_crop(np.s_[0:4, 0:4, 64])
+    assert np.all(values == values.flat[0])
+    image = sitk.GetImageFromArray(values)
     mask = sitk.GetImageFromArray(np.ones((4, 4), dtype=np.uint8))
     options = ImageSettings(ibsi_interpolation=IbsiInterpolation(spacing=(spacing, spacing)))
     pair = load_image_pair(
@@ -857,36 +876,40 @@ def test_ibsi_ceiling_retains_fractional_extents_and_small_images(
     # A true ratio just above 2 must ceil to 3; a positive ratio below 1 still needs one
     # voxel. Both cases would be reduced incorrectly by subtracting a fixed tolerance.
     assert pair.image.array.shape == (size, size)
-    np.testing.assert_array_equal(pair.image.array, np.ones((size, size)))
+    np.testing.assert_array_equal(pair.image.array, np.full((size, size), values.flat[0]))
     np.testing.assert_array_equal(pair.mask.array, np.ones((size, size), dtype=np.uint8))
 
 
 def test_ordinary_resampling_is_independent_of_integer_file_storage(tmp_path: Path) -> None:
-    # A four-value ramp resampled from unit to half spacing samples source indexes
-    # -1/4, 1/4, ..., 13/4. Linear interpolation (with the source value clamped outside)
-    # gives [0, 1/4, 3/4, 5/4, 7/4, 9/4, 11/4, 3] and mean 3/2. An integer-valued output
-    # buffer would truncate those quarters and change the radiomic input to mean 9/8.
-    ramp = np.broadcast_to(np.arange(4, dtype=np.float32), (4, 4)).copy()
-    mask = np.ones((4, 4), dtype=np.uint8)
+    from scipy.ndimage import map_coordinates
+
+    values, mask, _ = hcc_crop(np.s_[105:109, 215:219, 64])
+    # Half-spacing samples source indexes -1/4, 1/4, ..., 13/4. Integer output
+    # buffers would truncate fractional CT values produced by interpolation.
+    assert np.all(mask == 1)
+    axes = -0.25 + 0.5 * np.arange(8)
+    expected = np.asarray(map_coordinates(
+        values, np.asarray(np.meshgrid(axes, axes, indexing="ij"), dtype=np.float64),
+        order=1, mode="nearest",
+    ), dtype=np.float64)
     mask_path = tmp_path / "mask.nrrd"
     sitk.WriteImage(sitk.GetImageFromArray(mask), mask_path)
-    expected_row = np.array((0.0, 0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.0))
     options = ImageSettings(
         resampled_spacing=(0.5, 0.5), interpolator=Interpolator.LINEAR, pad_distance=0,
     )
     arrays: list[NDArray[np.float64]] = []
     means: list[float] = []
     for dtype in (np.int16, np.float32):
-        image_path = tmp_path / f"ramp_{np.dtype(dtype).name}.nrrd"
-        sitk.WriteImage(sitk.GetImageFromArray(ramp.astype(dtype)), image_path)
+        image_path = tmp_path / f"ct_{np.dtype(dtype).name}.nrrd"
+        sitk.WriteImage(sitk.GetImageFromArray(values.astype(dtype)), image_path)
         pair = load_image_pair(image_path, mask_path, image_settings=options)
-        values = np.asarray(pair.image.array, dtype=np.float64)
-        arrays.append(values)
+        resampled = np.asarray(pair.image.array, dtype=np.float64)
+        arrays.append(resampled)
         assert pair.image.array.dtype == np.dtype(np.float64)
         assert pair.mask.array.dtype == np.dtype(np.uint8)
         assert pair.image.array.shape == (8, 8)
         np.testing.assert_allclose(
-            values, np.broadcast_to(expected_row, values.shape), rtol=0, atol=1e-12,
+            resampled, expected, rtol=0, atol=1e-12,
         )
         result = extract_files(
             image_path, mask_path, settings=Settings(features=("firstorder_Mean",)),
@@ -894,7 +917,7 @@ def test_ordinary_resampling_is_independent_of_integer_file_storage(tmp_path: Pa
         )
         means.append(float(result.features["original_firstorder_Mean"]))
     np.testing.assert_allclose(arrays[0], arrays[1], rtol=0, atol=1e-12)
-    np.testing.assert_allclose(means, (1.5, 1.5), rtol=0, atol=1e-6)
+    np.testing.assert_allclose(means, expected.mean(), rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("ibsi", [False, True])
@@ -903,10 +926,12 @@ def test_spatial_loading_refuses_lossy_64_bit_integers_before_resampling(
 ) -> None:
     # Resampling casts to float64 (and IBSI rounding follows) before extraction's own
     # integer check could see that 2**53 + 1 had already become 2**53.
-    image = np.array([[[2**53, 2**53 + 1], [2**53, 2**53 + 1]]] * 2, np.int64)
+    values, labels, _ = hcc_crop(np.s_[105:107, 217:219, 62:64])
+    image = values.astype(np.int64) + 2**53
+    assert np.any(image % 2)  # Odd integers above 2**53 cannot survive a float64 cast.
     paths = (tmp_path / "image.nrrd", tmp_path / "mask.nrrd")
     sitk.WriteImage(sitk.GetImageFromArray(image), str(paths[0]))
-    sitk.WriteImage(sitk.GetImageFromArray(np.ones(image.shape, np.uint8)), str(paths[1]))
+    sitk.WriteImage(sitk.GetImageFromArray(labels), str(paths[1]))
     options = (ImageSettings(ibsi_interpolation=IbsiInterpolation(spacing=(1.0, 1.0, 1.0)))
                if ibsi else ImageSettings(resampled_spacing=(1.0, 1.0, 1.0)))
     with pytest.raises(ValueError, match="cannot represent exactly"):
@@ -916,7 +941,7 @@ def test_spatial_loading_refuses_lossy_64_bit_integers_before_resampling(
 def test_ibsi_bspline_nearest_boundary_matches_scipy_map_coordinates(tmp_path: Path) -> None:
     from scipy.ndimage import map_coordinates
 
-    values = np.random.default_rng(0).normal(0, 100, (9, 11, 13))
+    values, _, _ = hcc_crop(np.s_[103:112, 214:225, 60:73])
     image = sitk.GetImageFromArray(values)
     image.SetSpacing((1.3, 1.7, 3.0))
     mask = sitk.GetImageFromArray(np.ones(values.shape, np.uint8))

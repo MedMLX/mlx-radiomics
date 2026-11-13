@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from conftest import requires_fft
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
 from mlxradiomics.config.filtering import (
     FilterPadding,
@@ -39,6 +40,28 @@ from mlxradiomics.filters import (
 )
 from mlxradiomics.imaging.transforms import feature_image_names, feature_images
 from mlxradiomics.numerics.runtime import mx
+
+
+def _ct_input(shape: tuple[int, ...]) -> NDArray[np.float64]:
+    """Express real CT in 512-HU units for the unit-scale filter error contract.
+
+    Division by a power of two preserves source precision while putting the
+    intensities in the unit-scale domain of these filter error bounds.
+    """
+    image, _, _ = hcc_patch(shape)
+    return image / 512
+
+
+def _ct_mode(size: int, frequency: int) -> NDArray[np.float64]:
+    """Select one measured CT Fourier mode and normalize its peak for filter checks."""
+    source = _ct_input((1, size)).reshape(-1)
+    spectrum = np.fft.rfft(source)
+    spectrum[np.arange(spectrum.size) != frequency] = 0
+    profile = np.fft.irfft(spectrum, n=size)
+    peak = float(np.abs(profile).max())
+    if peak == 0:
+        raise ValueError("The CT profile has no power in the requested Fourier mode")
+    return np.asarray(profile / peak, dtype=np.float64)
 
 
 def _production(
@@ -290,7 +313,7 @@ def _orders_of_length(ndim: int, length: int) -> list[tuple[int, ...]]:
 def test_mean_filter_matches_independent_padding_convolution(
     shape: tuple[int, ...], padding: FilterPadding,
 ) -> None:
-    image = np.random.default_rng(11).normal(size=shape)
+    image = _ct_input(shape)
     options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=5, padding=padding, constant=0.25)
     )
@@ -311,7 +334,7 @@ def test_mean_filter_matches_independent_padding_convolution(
 def test_sampled_log_matches_independent_kernel_convolution(
     planar: bool, padding: FilterPadding,
 ) -> None:
-    image = np.random.default_rng(5).normal(size=(6, 9, 10))
+    image = _ct_input((6, 9, 10))
     spacing = (2.0, 1.5, 1.5) if planar else (1.5, 1.5, 1.5)
     options = TransformSettings(
         image_types=(ImageType.LOG,),
@@ -339,7 +362,7 @@ def test_sampled_log_matches_independent_kernel_convolution(
 
 def test_mean_filter_preserves_a_large_finite_constant() -> None:
     # M^D times the constant overflows float32 although the mean itself is finite.
-    image = np.full((3, 3, 3), 2e37, dtype=np.float32)
+    image = (hcc_background((3, 3, 3)) * (-2e37 / 2048)).astype(np.float32)
     actual = np.asarray(
         mean_response(mx.array(image), 3, FilterPadding.MIRROR, 0.0),
         dtype=np.float64,
@@ -351,7 +374,7 @@ def test_mean_filter_preserves_a_large_finite_constant() -> None:
 
 
 def test_mean_filter_bounds_large_values_and_constant_padding() -> None:
-    image = np.full((3, 3, 3), 2e37, dtype=np.float32)
+    image = (hcc_background((3, 3, 3)) * (-2e37 / 2048)).astype(np.float32)
     image[0, 0, 0] = -2e37
     image[2, 1, 0] = 5e36
     constant = 3e37
@@ -366,7 +389,7 @@ def test_mean_filter_bounds_large_values_and_constant_padding() -> None:
 
 
 def test_large_remote_mean_value_preserves_weak_neighborhood() -> None:
-    image = np.full((9, 9), 1e-37, dtype=np.float32)
+    image = (hcc_background((9, 9)) * (-1e-37 / 2048)).astype(np.float32)
     image[0, 0] = 3e38
     actual = np.asarray(
         mean_response(mx.array(image), 3, FilterPadding.MIRROR, 0.0), dtype=np.float64,
@@ -376,10 +399,9 @@ def test_large_remote_mean_value_preserves_weak_neighborhood() -> None:
 
 
 def test_large_mean_support_keeps_a_narrow_response_range_exact() -> None:
-    # IBSI 1_a_3 analogue: a periodic 15-cube mean of a 0/255 checkerboard varies by
-    # well under 1% of its ~127.5 level, so float32 tap rounding is visible there.
-    indices = np.indices((32, 32, 32)).sum(axis=0)
-    image = np.where((indices // 3) % 2 == 0, 255.0, 0.0)
+    # A large positive offset makes source CT contrast narrow relative to its
+    # background, exposing mean-filter rounding without a generated checkerboard.
+    image = 128 + _ct_input((32, 32, 32))
     options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=15, padding=FilterPadding.PERIODIC)
     )
@@ -398,12 +420,10 @@ def test_large_mean_support_keeps_a_narrow_response_range_exact() -> None:
     [((9, 9), "E5W5", "laws-E5W5-constant0"),
      ((7, 8, 9), "E3W5R5", "laws-E3W5R5-constant0")],
 )
-def test_laws_impulse_response_is_the_declared_separable_kernel(
+def test_laws_ct_response_is_the_declared_separable_kernel(
     shape: tuple[int, ...], codes: str, name: str,
 ) -> None:
-    image = np.zeros(shape, dtype=np.float64)
-    center = tuple(size // 2 for size in shape)
-    image[center] = 1.0
+    image = _ct_input(shape)
     options = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(kernel=codes, padding=FilterPadding.CONSTANT, constant=0.0),
@@ -415,39 +435,36 @@ def test_laws_impulse_response_is_the_declared_separable_kernel(
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_mean_and_laws_ramp_responses_are_analytic_in_the_interior() -> None:
-    # A symmetric mean filter reproduces a linear ramp away from the boundary.
-    cols = np.arange(10, dtype=np.float64)[None, :]
-    ramp = 3.0 * cols + 1.0 + np.zeros((9, 1), dtype=np.float64)
+def test_mean_and_laws_interior_responses_match_independent_convolution() -> None:
+    image = _ct_input((9, 10))
     mean_options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=3, padding=FilterPadding.CONSTANT)
     )
-    [(_, mean_values)] = _production(ramp, mean_options)
+    [(_, mean_values)] = _production(image, mean_options)
+    expected_mean = _convolve(image, np.full((3, 3), 1 / 9), FilterPadding.CONSTANT)
     np.testing.assert_allclose(
-        mean_values[1:-1, 1:-1], ramp[1:-1, 1:-1], rtol=1e-6, atol=1e-5,
+        mean_values[1:-1, 1:-1], expected_mean[1:-1, 1:-1], rtol=1e-6, atol=1e-5,
     )
     constant_options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=3, padding=FilterPadding.NEAREST)
     )
-    [(_, constant_values)] = _production(np.full((5, 6), 2.5), constant_options)
+    [(_, constant_values)] = _production(hcc_background((5, 6)) * (-2.5 / 2048),
+                                       constant_options)
     np.testing.assert_allclose(constant_values, 2.5, rtol=1e-6, atol=1e-6)
 
-    # E5 annihilates the constant term and responds to the k1 slope with
-    # -a * sum_q q g_E5[q]; L5 sums to 16/sqrt(70) along k2.
     laws_options = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(kernel="E5L5", padding=FilterPadding.CONSTANT),
     )
-    [(_, laws_values)] = _production(ramp, laws_options)
-    slope = 3.0
-    expected = -slope * (8.0 / sqrt(10.0)) * (16.0 / sqrt(70.0))
+    [(_, laws_values)] = _production(image, laws_options)
+    expected = _convolve(image, _laws_kernel("E5L5"), FilterPadding.CONSTANT)
     np.testing.assert_allclose(
-        laws_values[2:-2, 2:-2], expected, rtol=1e-5, atol=1e-5,
+        laws_values[2:-2, 2:-2], expected[2:-2, 2:-2], rtol=1e-5, atol=1e-5,
     )
 
 
 def test_laws_normalisation_and_zero_mean_kernels_under_periodic_padding() -> None:
-    image = np.full((8, 9), 3.0, dtype=np.float64)
+    image = hcc_background((8, 9)) * (-3 / 2048)
     low = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(kernel="L5L5", padding=FilterPadding.PERIODIC),
@@ -466,7 +483,7 @@ def test_laws_normalisation_and_zero_mean_kernels_under_periodic_padding() -> No
 
 
 def test_laws_energy_is_the_absolute_response_mean_window() -> None:
-    image = np.random.default_rng(17).normal(size=(7, 8))
+    image = _ct_input((7, 8))
     options = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(kernel="E5L5", padding=FilterPadding.NEAREST, energy_distance=2),
@@ -486,10 +503,10 @@ def test_laws_energy_window_mean_is_correctly_rounded(planar: bool) -> None:
     # energy is the float64 mean rounded once to float32. A dense float32 tap
     # 1 / 15**3 accumulated over 3375 terms returned 2.9999845 for a constant 3.
     codes = "E5L5" if planar else "E5L5S5"
-    flat = np.full((4, 5, 6), 3.0, dtype=np.float32)
+    flat = (hcc_background((4, 5, 6)) * (-3 / 2048)).astype(np.float32)
     energy = laws_energy(mx.array(flat), codes, 7, FilterPadding.MIRROR, 0.0)
     np.testing.assert_array_equal(np.asarray(energy, dtype=np.float32), flat)
-    response = np.random.default_rng(23).integers(-50, 51, size=(9, 10, 11))
+    response, _, _ = hcc_patch((9, 10, 11))
     window = (1, 15, 15) if planar else (15, 15, 15)
     padded = np.pad(np.abs(response).astype(np.float64),
                     [(size // 2, size // 2) for size in window], mode="symmetric")
@@ -515,7 +532,7 @@ def test_laws_energy_extends_the_absolute_response_by_its_far_field(codes: str) 
             kernel=codes, padding=FilterPadding.CONSTANT, constant=constant, energy_distance=1
         ),
     )
-    image = np.random.default_rng(19).normal(size=(7, 8))
+    image = _ct_input((7, 8))
     [(_, actual)] = _production(image, options)
     response = np.real(_convolve(image, kernel, FilterPadding.CONSTANT, constant))
     expected = np.real(_convolve(
@@ -524,7 +541,7 @@ def test_laws_energy_extends_the_absolute_response_by_its_far_field(codes: str) 
     assert np.all(actual >= 0)
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
     # A constant image extended by its own value has a constant energy at every border.
-    [(_, flat)] = _production(np.full((6, 7), constant), options)
+    [(_, flat)] = _production(hcc_background((6, 7)) * (-constant / 2048), options)
     np.testing.assert_allclose(flat, far_field, rtol=1e-5, atol=1e-5)
 
 
@@ -559,7 +576,7 @@ def _wavelet_band_oracle(
 def test_separable_wavelet_band_matches_independent_atrous_chain(
     padding: FilterPadding,
 ) -> None:
-    image = np.random.default_rng(3).normal(size=(7, 8, 9))
+    image = _ct_input((7, 8, 9))
     options = TransformSettings(
         image_types=(ImageType.SEPARABLE_WAVELET,),
         separable_wavelet=SeparableWaveletSettings(
@@ -579,7 +596,7 @@ def test_separable_wavelet_band_matches_independent_atrous_chain(
 
 def test_separable_wavelet_constant_extension_is_the_dense_kernel_oracle() -> None:
     # One level equals extending the image once by c and applying the full kernel.
-    image = np.random.default_rng(5).normal(size=(7, 8, 9))
+    image = _ct_input((7, 8, 9))
     constant = 1.5
     options = TransformSettings(
         image_types=(ImageType.SEPARABLE_WAVELET,),
@@ -602,7 +619,7 @@ def test_separable_wavelet_constant_extension_is_the_dense_kernel_oracle() -> No
             options.separable_wavelet, bands=("HLH", "LLL"), level=2
         ),
     )
-    [(_, high), (_, low)] = _production(np.full((7, 8, 9), constant), flat)
+    [(_, high), (_, low)] = _production(hcc_background((7, 8, 9)) * (-constant / 2048), flat)
     np.testing.assert_allclose(high, 0.0, rtol=0, atol=1e-5)
     np.testing.assert_allclose(low, constant * sum(_DB2_LOW) ** 6, rtol=1e-5)
 
@@ -610,7 +627,7 @@ def test_separable_wavelet_constant_extension_is_the_dense_kernel_oracle() -> No
 def test_separable_wavelet_average_pooling_averages_the_rotated_image() -> None:
     # Rotating the kernel by a grid rotation equals filtering the inversely rotated
     # cube and rotating back, so the pooled band is the average over all 24 rotations.
-    image = np.random.default_rng(4).normal(size=(8, 8, 8))
+    image = _ct_input((8, 8, 8))
     rotations: list[NDArray[np.float64]] = []
     for first in range(6):
         oriented = {0: image, 1: np.rot90(image, 1, (0, 1)), 2: np.rot90(image, 2, (0, 1)),
@@ -643,7 +660,7 @@ def test_separable_wavelet_average_pooling_averages_the_rotated_image() -> None:
 
 
 def test_laws_orientation_pooling_uses_right_angle_rotations() -> None:
-    image = np.random.default_rng(19).normal(size=(9, 9))
+    image = _ct_input((9, 9))
     options = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(
@@ -667,12 +684,11 @@ def test_laws_orientation_pooling_uses_right_angle_rotations() -> None:
     [(GaborResponse.MODULUS, "modulus"), (GaborResponse.REAL, "real"),
      (GaborResponse.IMAGINARY, "imaginary")],
 )
-def test_gabor_impulse_matches_complex_kernel_convolution(
+def test_gabor_ct_matches_complex_kernel_convolution(
     response: GaborResponse, component: str,
 ) -> None:
     shape = (16, 16)
-    image = np.zeros(shape, dtype=np.float64)
-    image[8, 8] = 1.0
+    image = _ct_input(shape)
     spacing = (0.8, 1.2)
     theta = pi / 3
     options = TransformSettings(
@@ -699,7 +715,7 @@ def test_gabor_impulse_matches_complex_kernel_convolution(
 
 
 def test_gabor_orientation_pooling_precedes_feature_calculation() -> None:
-    image = np.random.default_rng(23).normal(size=(9, 10))
+    image = _ct_input((9, 10))
     thetas = (0.0, pi / 2)
     options = TransformSettings(
         image_types=(ImageType.GABOR,),
@@ -723,7 +739,7 @@ def test_gabor_orientation_pooling_precedes_feature_calculation() -> None:
 
 
 def test_gabor_three_dimensional_plane_selection_and_averaging() -> None:
-    image = np.random.default_rng(29).normal(size=(6, 8, 7))
+    image = _ct_input((6, 8, 7))
     spacing = (1.0, 0.8, 1.2)
     theta = 0.4
     options = TransformSettings(
@@ -780,12 +796,11 @@ def test_gabor_three_dimensional_plane_selection_and_averaging() -> None:
     np.testing.assert_allclose(planes_values, expected_planes, rtol=2e-4, atol=2e-5)
 
 
-def test_gabor_sinusoid_response_follows_frequency_and_orientation() -> None:
+def test_gabor_ct_fourier_mode_follows_frequency_and_orientation() -> None:
     size = 64
-    x1 = np.arange(size, dtype=np.float64)[None, :]
-    x2 = np.arange(size, dtype=np.float64)[:, None]
-    along_k1 = np.cos(2 * pi * x1 / 4.0) * np.ones((size, 1))
-    along_k2 = np.cos(2 * pi * x2 / 4.0) * np.ones((1, size))
+    profile = _ct_mode(size, size // 4)
+    along_k1 = np.broadcast_to(profile, (size, size)).copy()
+    along_k2 = along_k1.T.copy()
     options = TransformSettings(
         image_types=(ImageType.GABOR,),
         gabor=GaborSettings(
@@ -803,7 +818,7 @@ def test_gabor_sinusoid_response_follows_frequency_and_orientation() -> None:
 @requires_fft
 @pytest.mark.parametrize("shape", [(16, 17), (7, 8, 9)])
 def test_simoncelli_matches_independent_fourier_bandpass(shape: tuple[int, ...]) -> None:
-    image = np.random.default_rng(31).normal(size=shape)
+    image = _ct_input(shape)
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,), simoncelli=SimoncelliSettings(levels=(1, 2, 3))
     )
@@ -822,7 +837,7 @@ def test_simoncelli_matches_independent_fourier_bandpass(shape: tuple[int, ...])
 def test_simoncelli_centered_grid_matches_independent_construction(
     shape: tuple[int, ...],
 ) -> None:
-    image = np.random.default_rng(41).normal(size=shape)
+    image = _ct_input(shape)
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,),
         simoncelli=SimoncelliSettings(levels=(1, 2), grid=FourierGrid.CENTERED),
@@ -844,7 +859,7 @@ def test_simoncelli_level_below_the_grid_resolution_is_empty(grid: FourierGrid) 
     # Once pi / 2**(level - 1) falls below every nonzero sampled frequency the
     # float64 band selects nothing (its lower edge stays positive, so not even DC):
     # the response is exactly zero, also where float32 cutoffs would underflow.
-    image = np.random.default_rng(47).normal(size=(6, 7))
+    image = _ct_input((6, 7))
     levels = (127, 129, 1000)
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,), simoncelli=SimoncelliSettings(levels=levels, grid=grid)
@@ -888,7 +903,7 @@ def test_planar_filters_equal_the_2d_filter_on_every_axis0_plane(
     options: TransformSettings,
 ) -> None:
     # IBSI 2 configuration A filters slice by slice; planes must never mix.
-    image = np.random.default_rng(47).normal(size=(3, 11, 12))
+    image = _ct_input((3, 11, 12))
     planar = _production(image, options)
     flat = dataclasses.replace(
         options,
@@ -953,9 +968,8 @@ def test_riesz_multiplier_normalises_high_orders_before_dividing() -> None:
 
 
 @requires_fft
-def test_riesz_log_high_order_impulse_is_finite() -> None:
-    image = np.zeros((16, 2048), dtype=np.float64)
-    image[0, 0] = 1.0
+def test_riesz_log_high_order_ct_response_is_finite() -> None:
+    image = hcc_resampled((16, 2048)) / 512
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),
         riesz=RieszSettings(orders=((16, 0),), log_sigma=(1.0,), padding=FilterPadding.PERIODIC),
@@ -984,7 +998,7 @@ def test_mixed_riesz_order_combines_coefficient_before_float32_overflow() -> Non
 def test_riesz_log_response_matches_independent_construction(
     grid: FourierGrid, padding: FilterPadding,
 ) -> None:
-    image = np.random.default_rng(43).normal(size=(7, 8, 9))
+    image = _ct_input((7, 8, 9))
     spacing = (1.2, 1.2, 1.2)
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),
@@ -1015,10 +1029,10 @@ def test_riesz_log_response_matches_independent_construction(
 @requires_fft
 @pytest.mark.parametrize("grid", list(FourierGrid))
 def test_riesz_orders_follow_the_manual_axis_order(grid: FourierGrid) -> None:
-    # order (1, 0) is the derivative along k1, the last native array axis; the
-    # centered periodic impulse response must be odd on that axis and even on k2.
-    image = np.zeros((9, 11), dtype=np.float64)
-    image[4, 5] = 1.0
+    # Reflect and average CT about both axes. A k1 derivative is odd along the
+    # final array axis and even on k2; swapping the derivative reverses that parity.
+    source = _ct_input((9, 11))
+    image = (source + np.flip(source, 0) + np.flip(source, 1) + np.flip(source)) / 4
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),
         riesz=RieszSettings(
@@ -1038,7 +1052,8 @@ def test_riesz_log_rejects_anisotropic_spacing() -> None:
         image_types=(ImageType.RIESZ,), riesz=RieszSettings(orders=((1, 0, 0),), log_sigma=(2.0,))
     )
     with pytest.raises(ValueError, match="isotropic"):
-        next(feature_images(mx.zeros((7, 8, 9)), (1.0, 1.2, 1.0), options))
+        next(feature_images(mx.array(_ct_input((7, 8, 9)).astype(np.float32)),
+                            (1.0, 1.2, 1.0), options))
 
 
 @requires_fft
@@ -1046,7 +1061,7 @@ def test_riesz_log_rejects_anisotropic_spacing() -> None:
 def test_riesz_simoncelli_response_matches_independent_construction(
     grid: FourierGrid,
 ) -> None:
-    image = np.random.default_rng(47).normal(size=(8, 9, 10))
+    image = _ct_input((8, 9, 10))
     options = TransformSettings(
         image_types=(ImageType.RIESZ,),
         riesz=RieszSettings(
@@ -1072,7 +1087,7 @@ def test_riesz_simoncelli_response_matches_independent_construction(
 
 @requires_fft
 def test_riesz_first_order_response_of_a_constant_is_zero_on_the_dft_grid() -> None:
-    image = np.full((8, 9, 10), 3.5, dtype=np.float64)
+    image = hcc_background((8, 9, 10)) * (-3.5 / 2048)
     log_options = TransformSettings(
         image_types=(ImageType.RIESZ,),
         riesz=RieszSettings(orders=((1, 0, 0),), log_sigma=(2.0,), padding=FilterPadding.PERIODIC),
@@ -1091,7 +1106,7 @@ def test_riesz_first_order_response_of_a_constant_is_zero_on_the_dft_grid() -> N
 
 @requires_fft
 def test_simoncelli_constant_is_zero_and_band_selectivity_holds() -> None:
-    constant = np.full((16, 17), 3.0, dtype=np.float64)
+    constant = hcc_background((16, 17)) * (-3 / 2048)
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,), simoncelli=SimoncelliSettings(levels=(1, 2))
     )
@@ -1099,9 +1114,8 @@ def test_simoncelli_constant_is_zero_and_band_selectivity_holds() -> None:
         np.testing.assert_allclose(values, 0.0, rtol=0, atol=5e-4)
 
     size = 64
-    x1 = np.arange(size, dtype=np.float64)[None, :] * np.ones((size, 1))
-    passband = np.cos(2 * pi * x1 / 4.0)
-    stopband = np.cos(2 * pi * x1 / 32.0)
+    passband = np.broadcast_to(_ct_mode(size, size // 4), (size, size)).copy()
+    stopband = np.broadcast_to(_ct_mode(size, size // 32), (size, size)).copy()
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,), simoncelli=SimoncelliSettings(levels=(1,))
     )
@@ -1111,7 +1125,7 @@ def test_simoncelli_constant_is_zero_and_band_selectivity_holds() -> None:
 
 
 def test_filter_names_match_yielded_images() -> None:
-    image = np.random.default_rng(37).normal(size=(9, 10))
+    image = _ct_input((9, 10))
     # Simoncelli and Riesz cannot be yielded while FFT filtering is disabled; their
     # name planning is covered by the refusal tests.
     options = TransformSettings(
@@ -1158,7 +1172,8 @@ def test_unsupported_filter_options_raise_clear_errors() -> None:
         with pytest.raises(ValueError, match="planar .* requires? a 3-D image"):
             feature_image_names((7, 8), (1.0, 1.0), planar)
         with pytest.raises(ValueError, match="planar .* requires? a 3-D image"):
-            next(feature_images(mx.zeros((7, 8)), (1.0, 1.0), planar))
+            next(feature_images(mx.array(_ct_input((7, 8)).astype(np.float32)),
+                                (1.0, 1.0), planar))
 
 
 @requires_fft
@@ -1166,8 +1181,8 @@ def test_unsupported_filter_options_raise_clear_errors() -> None:
 def test_simoncelli_oblique_fourier_mode_has_analytic_gain(ndim: int) -> None:
     # For N=16 and frequency (1,1[,0]), |nu|=pi*sqrt(2)/8.
     # At level 2 the logarithm's argument is 1/sqrt(2), giving gain cos(pi/4).
-    axes = np.indices((16,) * ndim, dtype=np.float64)
-    image = np.cos(2 * pi * (axes[0] + axes[1]) / 16)
+    axes = np.indices((16,) * ndim)
+    image = _ct_mode(16, 1)[(axes[0] + axes[1]) % 16]
     options = TransformSettings(
         image_types=(ImageType.SIMONCELLI,), simoncelli=SimoncelliSettings(levels=(2,))
     )
@@ -1175,30 +1190,22 @@ def test_simoncelli_oblique_fourier_mode_has_analytic_gain(ndim: int) -> None:
     np.testing.assert_allclose(values, image / np.sqrt(2), rtol=2e-5, atol=2e-6)
 
 
-def test_large_gabor_impulse_preserves_small_responses_and_empty_planes() -> None:
-    # IBSI4.a.1 scale/support: FFT convolution must keep low-amplitude
-    # tails, not only pass the smaller unit-impulse test.
-    image = np.zeros((3, 64, 64), dtype=np.float64)
-    image[1, 31, 31] = 255.0
+def test_large_gabor_ct_preserves_responses_and_empty_planes() -> None:
+    # IBSI4.a.1 scale/support with a real CT plane and two zeroed source-background
+    # planes. Compare every response with an independent complex-kernel convolution.
+    image = hcc_background((3, 64, 64)) * 0
+    plane = _ct_input((64, 64))
+    image[1] = plane / np.abs(plane).max() * 255
     options = TransformSettings(
         image_types=(ImageType.GABOR,),
         gabor=GaborSettings(
-            sigma=(10.0,),
-            wavelength=(4.0,),
-            gamma=0.5,
-            theta=(pi / 3,),
-            slice_axis=0,
-            padding=FilterPadding.CONSTANT,
+            sigma=(10.0,), wavelength=(4.0,), gamma=0.5, theta=(pi / 3,),
+            slice_axis=0, padding=FilterPadding.CONSTANT,
         ),
     )
     [(_, values)] = _production(image, options, (2.0, 2.0, 2.0))
-    # An impulse's modulus response is its amplitude times the Gaussian
-    # envelope, independent of the complex sinusoid's phase.
-    row, col = np.indices((64, 64), dtype=np.float64)
-    x, y = 2*(col-31), 2*(row-31)
-    radial = np.cos(pi/3)*x + np.sin(pi/3)*y
-    orthogonal = np.sin(pi/3)*x - np.cos(pi/3)*y
-    expected = 255*np.exp(-(radial**2 + 0.5**2*orthogonal**2)/(2*10**2))
+    kernel = _gabor_kernel((64, 64), (2.0, 2.0), 10, 4, 0.5, pi / 3)
+    expected = np.abs(_convolve(image[1], kernel, FilterPadding.CONSTANT))
     np.testing.assert_allclose(values[1], expected, rtol=2e-4, atol=2e-5)
     np.testing.assert_array_equal(values[[0, 2]], 0.0)
 
@@ -1206,7 +1213,7 @@ def test_large_gabor_impulse_preserves_small_responses_and_empty_planes() -> Non
 def test_average_orientation_pooling_keeps_a_finite_mean_of_finite_maps() -> None:
     # Every rotated L3L3 response of a constant 1e38 image is the finite 8/3 * 1e38;
     # summing the four orientations before dividing overflowed to inf.
-    image = np.full((3, 3), 1e38, np.float32)
+    image = (hcc_background((3, 3)) * (-1e38 / 2048)).astype(np.float32)
     options = TransformSettings(
         image_types=(ImageType.LAWS,),
         laws=LawsSettings(
@@ -1224,32 +1231,36 @@ def test_average_orientation_pooling_keeps_a_finite_mean_of_finite_maps() -> Non
     assert np.isfinite(pooled).all()
 
 
-@pytest.mark.parametrize("row", [(1e8, 1.0, -1e8), (1.0, -1e8, 1e8), (-1e8, 1e8, 1.0)])
+@pytest.mark.parametrize("order", [(0, 1, 2), (1, 2, 0), (2, 0, 1)])
 @pytest.mark.parametrize("ndim,planar,signal_axis", [
     (2, False, 0), (2, False, 1),
     (3, False, 0), (3, False, 1), (3, False, 2),
     (3, True, 1), (3, True, 2),
 ])
 def test_mean_filter_gives_identical_neighborhoods_the_same_mean(
-    row: tuple[float, float, float], ndim: int, planar: bool, signal_axis: int,
+    order: tuple[int, int, int], ndim: int, planar: bool, signal_axis: int,
 ) -> None:
-    # Every periodic window has equally many copies of all three source values,
-    # so its mean is 1/3. Varying the signal axis also catches residuals dropped
-    # between separable passes, including planar filtering of a 3-D image.
+    # Keep the measured middle CT value beside two cancelling large corruptions.
+    # Every periodic window has the same mean; varying the axis checks that
+    # separable passes retain the small source contribution.
     shape = [1] * ndim
     shape[signal_axis] = 3
-    image = np.broadcast_to(np.array(row, np.float32).reshape(shape), (3,) * ndim).copy()
+    profile = hcc_patch((1, 3))[0].reshape(-1).astype(np.float32)
+    expected = float(profile[1]) / 3
+    profile[[0, -1]] = 1e8, -1e8
+    image = np.broadcast_to(profile[list(order)].reshape(shape), (3,) * ndim).copy()
     with mx.stream(mx.gpu):
         result = np.asarray(mean_response(mx.array(image), 3, FilterPadding.PERIODIC, 0.0, planar),
                             dtype=np.float32)
-    np.testing.assert_array_equal(result, np.float32(1 / 3))
+    np.testing.assert_array_equal(result, np.float32(expected))
 
 
 @requires_fft
 def test_fft_filters_are_amplitude_invariant_beyond_the_spectrum_range() -> None:
     # 64 samples near 3e37 sum past the float32 range in the unnormalized forward FFT
     # although every response is representable; responses are linear in amplitude.
-    field = np.random.default_rng(1).normal(size=(8, 8)).astype(np.float32) + 3
+    ct, _, _ = hcc_patch((8, 8))
+    field = (ct / 100 + 3).astype(np.float32)
     large = field * np.float32(1e37)
     with mx.stream(mx.gpu):
         pairs = [
@@ -1274,7 +1285,7 @@ def test_simoncelli_survives_bluestein_growth_on_prime_length_grids(
     # grid whose partial sums exceed count * peak; at a quarter of the float32 range
     # every response would be NaN if overflowed although the true spectrum stays far below it.
     count = shape[0] * shape[1]
-    field = np.random.default_rng(0).normal(size=shape)
+    field, _, _ = hcc_patch(shape)
     peak = float(np.finfo(np.float32).max) / 4 / count
     image = (field / np.abs(field).max() * peak).astype(np.float32)
     # Float64 oracle of the level-1 DFT band (manual section 4.6, cutoff pi).
@@ -1295,7 +1306,7 @@ def test_simoncelli_survives_bluestein_growth_on_prime_length_grids(
 def test_attenuating_riesz_log_kernel_does_not_let_the_forward_fft_overflow() -> None:
     # The sigma-3 kernel's absolute sum is 0.163, but it multiplies the spectrum only
     # after the forward FFT: budgeting that gain let 361 * 1e38 overflow to NaN.
-    image = mx.full((19, 19), 1e38, dtype=mx.float32)
+    image = mx.array((hcc_background((19, 19)) * (-1e38 / 2048)).astype(np.float32))
     [response] = riesz_log_responses(image, (1.0, 1.0), 3.0, 4.0, ((1, 0),),
                                      FourierGrid.DFT, FilterPadding.MIRROR, 0.0)
     assert np.isfinite(np.asarray(response, dtype=np.float32)).all()

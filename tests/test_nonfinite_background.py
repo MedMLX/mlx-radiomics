@@ -8,15 +8,18 @@ from typing import assert_type
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics import ImageType, Result, Settings, TransformSettings, export, extract
 from mlxradiomics.imaging.io import read_image
 from mlxradiomics.workflows.engine import extract as extract_original
 
 # Two finite ROI voxels over a background that a whole-image finite check rejects.
-IMAGE: NDArray[np.float64] = np.array([[1.0, 2.0], [np.nan, np.nan]])
+IMAGE, _, _ = hcc_patch((2, 2))
+IMAGE[1] = np.nan
 MASK: NDArray[np.uint8] = np.array([[1, 1], [0, 0]], dtype=np.uint8)
 MEAN = "original_firstorder_Mean"
+SOURCE_MEAN = float(np.mean(IMAGE[MASK == 1]))
 
 
 def _settings() -> Settings:
@@ -30,15 +33,15 @@ def test_original_only_roi_matches_direct_extract_over_nonfinite_background() ->
     shape = extract(IMAGE, MASK, settings=Settings(features=("shape2D_PixelSurface",)))
     # Two unit-spacing ROI pixels occupy area 2.
     assert shape.features["original_shape2D_PixelSurface"] == pytest.approx(2.0)
-    # The selected values 1 and 2 have mean 1.5; background NaNs are outside the sample.
-    assert direct.features[MEAN] == pytest.approx(1.5, abs=1e-7)
-    assert images.features[MEAN] == pytest.approx(1.5, abs=1e-7)
+    # Background NaNs remain outside the two-pixel source CT sample.
+    assert direct.features[MEAN] == pytest.approx(SOURCE_MEAN, abs=1e-7)
+    assert images.features[MEAN] == pytest.approx(SOURCE_MEAN, abs=1e-7)
     assert images.metadata.get("gray_levels_by_image") == {"original": 1}
 
 
 def test_original_only_retained_streamed_and_exported_maps_agree(tmp_path: Path) -> None:
     expected = np.zeros(IMAGE.shape, dtype=np.float32)
-    expected[0, :] = 1.5
+    expected[0, :] = SOURCE_MEAN
     retained = extract(IMAGE, MASK, settings=_settings(), mode="voxel")
     assert_type(retained, Result[NDArray[np.float64]])
     np.testing.assert_array_equal(retained.features[MEAN], expected)
@@ -73,7 +76,8 @@ def test_lbp_reports_a_nonfinite_float32_background(kind: ImageType, background:
     # 1e39 is finite in float64 but exceeds float32 max (~3.4e38), so the float32 filter
     # input is infinite. The source-precision split must not misreport any of these as
     # an unresolved LBP2D sign or warn about an overflowing cast first.
-    image = np.array([[[1.0, 2.0], [background, 3.0]]] * 3)
+    image, _, _ = hcc_patch((3, 2, 2))
+    image[:, 1, 0] = background
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[:, 0, :] = 1
     transforms = TransformSettings(image_types=(kind,))

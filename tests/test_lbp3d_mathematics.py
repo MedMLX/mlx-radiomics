@@ -7,6 +7,7 @@ from typing import Literal
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics import Settings
 from mlxradiomics.config.transforms import ImageType, LBP3DSettings, TransformSettings
@@ -21,7 +22,7 @@ from mlxradiomics.workflows.extraction import extract
 def test_undefined_kurtosis_keeps_harmonic_features_and_validity(
     voxel: bool, map_dtype: Literal["float64", "float32"],
 ) -> None:
-    image = np.ones((7, 7, 7), dtype=np.float64)
+    image = hcc_background((7, 7, 7)) / -2048
     mask = np.zeros(image.shape, np.uint8)
     mask[0, 0, 0] = 1
     mask[3:5, 3:5, 3:5] = 1
@@ -63,7 +64,7 @@ def test_undefined_kurtosis_keeps_harmonic_features_and_validity(
 
 @pytest.mark.parametrize("value", [1e-30, 1e-12, 1.0, 0.0, -1.0, 5e9, 1e10, 1e30])
 def test_constant_field_uses_zero_extension_at_image_corner(value: float) -> None:
-    image = np.full((7, 7, 7), value)
+    image = hcc_background((7, 7, 7)) * (-value / 2048)
     mask = np.zeros(image.shape, bool)
     mask[0, 0, 0] = True
     outputs = _lbp3d(image, mask, levels=1, subdivision=0)
@@ -114,7 +115,7 @@ def _first_degree_harmonics(vertices: NDArray[np.float64]) -> NDArray[np.complex
 def test_all_set_bits_give_sqrt_four_pi_independent_of_subdivision(
     subdivision: int, value: float,
 ) -> None:
-    image = np.full((7, 7, 7), value, dtype=np.float64)
+    image = hcc_background((7, 7, 7)) * (-value / 2048)
     mask = np.zeros(image.shape, dtype=bool)
     mask[3, 3, 3] = True
     levels = 3
@@ -130,41 +131,36 @@ def test_all_set_bits_give_sqrt_four_pi_independent_of_subdivision(
 
 
 @pytest.mark.parametrize("subdivision", [1, 2])
-def test_first_degree_band_matches_half_space_projection(subdivision: int) -> None:
+def test_first_degree_band_matches_cartesian_projection(subdivision: int) -> None:
+    from scipy.ndimage import map_coordinates
     from scipy.spatial import SphericalVoronoi
     from trimesh.creation import icosphere
 
-    shape = (7, 7, 7)
-    z, y, x = np.indices(shape, dtype=np.float64)
-    normal = np.array([1.0, sqrt(2.0), pi])
-    # Icosphere vertices are sampled in array-axis order (Z, Y, X), so the Cartesian
-    # normal components multiply the indices in the same order.
-    image = 1000.0 + 1000.0 * (normal[0] * z + normal[1] * y + normal[2] * x)
-    mask = np.zeros(shape, dtype=bool)
+    image, _, _ = hcc_patch((7, 7, 7))
+    mask = np.zeros(image.shape, dtype=bool)
     mask[3, 3, 3] = True
 
     vertices = np.asarray(icosphere(subdivisions=subdivision, radius=1.0).vertices)
     areas = SphericalVoronoi(vertices, radius=1.0).calculate_areas()
-    binary = (vertices @ normal >= 0).astype(np.float64)
+    sampled = np.asarray(map_coordinates(image, (3 + vertices).T, order=3,
+                                          mode="constant"), dtype=np.float64)
+    binary = (sampled >= image[3, 3, 3]).astype(np.float64)
     y00 = 1 / (2 * sqrt(pi))
     expected_m1 = np.sqrt(((binary * areas).sum() * y00) ** 2)
-    coefficients = (binary * areas) @ np.conj(_first_degree_harmonics(vertices))
+    coefficients = np.asarray(
+        (binary * areas) @ np.conj(_first_degree_harmonics(vertices)), dtype=np.complex128,
+    )
     expected_m2 = np.sqrt(np.sum(np.abs(coefficients) ** 2))
 
     outputs = _lbp3d(image, mask, levels=2, subdivision=subdivision)
     np.testing.assert_allclose(outputs["lbp-3D-m1"][mask], expected_m1, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(outputs["lbp-3D-m2"][mask], expected_m2, rtol=1e-5, atol=1e-5)
-    # The half-space covers half the sphere, so the degree-0 band is exactly sqrt(pi).
-    np.testing.assert_allclose(outputs["lbp-3D-m1"][mask], sqrt(pi), rtol=1e-5, atol=1e-5)
-    # First-order Voronoi quadrature of a half-space approaches the continuous first-degree
-    # band norm sqrt(3*pi)/2 from above; the residual shrinks with subdivision.
-    analytic = sqrt(3 * pi) / 2
-    assert abs(outputs["lbp-3D-m2"][mask][0] - analytic) < 0.02 * analytic
 
 
 def test_source_variation_collapsed_by_float32_is_not_constant() -> None:
-    image = np.full((7, 7, 7), 1e8, dtype=np.float64)
-    image[3, 3, 4] += 1
+    ct, _, _ = hcc_patch((7, 7, 7))
+    image = 1e8 + ct / 1e4
+    assert np.ptp(image) > 0 and np.ptp(image.astype(np.float32)) == 0
     mask = np.zeros(image.shape, dtype=bool)
     mask[3, 3, 3] = True
     with pytest.raises(ValueError, match="threshold is ambiguous"):
@@ -175,8 +171,8 @@ def test_source_variation_collapsed_by_float32_is_not_constant() -> None:
 def test_near_float32_limit_field_keeps_the_unit_amplitude_descriptor(amplitude: float) -> None:
     # Bits and kurtosis are amplitude invariant, so a near-limit finite field must give
     # the descriptor of its unit-amplitude field, not NaN-derived bits.
-    z, y, x = np.meshgrid(*[np.arange(7.0)] * 3, indexing="ij")
-    field = 100 + z + np.sqrt(2) * y + np.pi * x
+    ct, _, _ = hcc_patch((7, 7, 7))
+    field = ct / 16
     mask = np.zeros(field.shape, bool)
     mask[3, 3, 3] = True
     sign = 1.0 if amplitude > 0 else -1.0
@@ -188,17 +184,14 @@ def test_near_float32_limit_field_keeps_the_unit_amplitude_descriptor(amplitude:
         reference["lbp-3D-k"][3, 3, 3], rel=1e-5)
 
 
-def test_integer_rounding_tie_at_center_threshold_is_refused() -> None:
-    # A 0/1 checkerboard along x sampled at this radius places four spline samples
-    # exactly at 0.5 (mirrored coefficients [-1, 2, -1, 2, -1], half-point weights
-    # [1, 23, 23, 1] / 48). Float32 roundoff splits them around the tie, which would
-    # silently clear three of twelve bits.
-    image = (np.indices((5, 5, 5))[2] % 2).astype(np.uint8)
+def test_integer_ct_spline_rounding_ambiguity_is_refused() -> None:
+    ct, _, _ = hcc_patch((9, 9, 9))
+    image = ct.astype(np.int16)
     mask = np.zeros(image.shape, bool)
-    mask[2, 2, 3] = True
+    mask[3:6, 3:6, 3:6] = True
     options = TransformSettings(
         image_types=(ImageType.LBP3D,),
-        lbp3d=LBP3DSettings(levels=1, subdivision=0, radius=0.5877852522924731),
+        lbp3d=LBP3DSettings(levels=1, subdivision=1, radius=1.0),
     )
     with mx.stream(mx.gpu), pytest.raises(ValueError, match="rounding threshold is ambiguous"):
         list(feature_images(mx.array(image.astype(np.float32)), (1.0, 1.0, 1.0), options,

@@ -10,6 +10,7 @@ import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
 from medmlx_core.outputs import OutputEntry, validate_outputs
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.filtering import FilterPadding, FourierGrid, RieszBase
 from mlxradiomics.config.parameters import load_params, parse_params, settings_from_params
@@ -25,11 +26,12 @@ def _inputs(
     root: Path, *, direction: tuple[float, ...] | None = None,
 ) -> tuple[Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(21)
-    values = rng.integers(-120, 120, size=(10, 11, 12)).astype(np.int16)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[2:9, 2:9, 3:10] = 1
-    image = sitk.GetImageFromArray(values)
+    values, liver, _ = hcc_crop(np.s_[103:113, 214:225, 60:72])
+    # Select a central part of the source annotation so zero-padding crops leave
+    # a smaller output grid; keep its actual liver boundary and tumor exclusions.
+    labels = np.zeros_like(liver)
+    labels[2:9, 2:9, 3:10] = liver[2:9, 2:9, 3:10]
+    image = sitk.GetImageFromArray(values.astype(np.int16))
     mask = sitk.GetImageFromArray(labels)
     image.SetSpacing((1.5, 1.0, 0.8))
     image.SetOrigin((3.0, -2.0, 5.0))

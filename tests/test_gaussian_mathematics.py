@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_background, hcc_crop, hcc_patch
 
 from mlxradiomics.filters.recursive_gaussian import laplacian_gaussian, recursive_gaussian
 from mlxradiomics.numerics.runtime import mx
@@ -12,13 +13,11 @@ RATIOS = (0.1, 0.5, 1.0, 2.0, 20.0, 50.0, 200.0)
 
 
 def _signals(length: int) -> NDArray[np.float32]:
-    coordinate = np.linspace(0.0, 1.0, length)
-    return np.stack([
-        np.eye(1, length, length // 2).ravel(),
-        np.linspace(-1.0, 1.0, length),
-        np.sin(3.0 * np.pi * coordinate),
-        5.0 + np.sin(3.0 * np.pi * coordinate),
-    ]).astype(np.float32)
+    """Read four neighboring full-width CT profiles in 512-HU units."""
+    image, _, _ = hcc_crop(np.s_[:length, 250:254, 64])
+    if image.shape != (length, 4):
+        raise ValueError("The CT does not cover the requested profile length")
+    return (image.T / 512).astype(np.float32)
 
 
 @pytest.mark.parametrize("ratio", RATIOS)
@@ -26,7 +25,10 @@ def _signals(length: int) -> NDArray[np.float32]:
 def test_constant_line_keeps_analytic_response(ratio: float, order: int) -> None:
     # Constant equilibrium is a stronger independent check than reproducing another
     # finite-precision recursive filter's DC drift, especially at near-unit poles.
-    image = np.stack([np.full(250, 7.25), np.full(250, -3.5), np.zeros(250)]).astype(np.float32)
+    # Nearest-neighbor expansion of constant source background provides long
+    # profiles at positive, negative, and zero intensity scales.
+    background = np.repeat(hcc_background((3, 3))[:, :1], 250, axis=1)
+    image = (background * (np.asarray([7.25, -3.5, 0.0]) / -2048)[:, None]).astype(np.float32)
     with mx.stream(mx.gpu):
         values = np.asarray(
             recursive_gaussian(mx.array(image), ratio, 1.0, 1, order), dtype=np.float64,
@@ -62,11 +64,8 @@ def test_recurrence_matches_pinned_simpleitk(ratio: float, order: int) -> None:
 def test_anisotropic_laplacian_matches_pinned_simpleitk(constant: bool) -> None:
     sigma, spacing = 1.0, (0.5, 1.0, 2.0)
     shape = (8, 9, 10)
-    coordinate = np.indices(shape).sum(axis=0)
-    image = (0.1 * np.sin(coordinate / 2.0)).astype(np.float32)
-    image[4, 4, 5] += 1.0
-    if constant:
-        image.fill(-17)
+    image = ((hcc_background(shape) * (17 / 2048)) if constant
+             else hcc_patch(shape)[0] / 512).astype(np.float32)
     source = sitk.GetImageFromArray(image.astype(np.float64))
     source.SetSpacing(spacing[::-1])
     reference = sitk.LaplacianRecursiveGaussianImageFilter()
@@ -82,7 +81,7 @@ def test_anisotropic_laplacian_matches_pinned_simpleitk(constant: bool) -> None:
 
 @pytest.mark.parametrize("sigma", [1e-3, 1e-2])
 def test_tiny_smoothing_sigma_is_the_identity_delta_limit(sigma: float) -> None:
-    values = np.arange(20, dtype=np.float32).reshape(4, 5)
+    values = hcc_patch((4, 5))[0].astype(np.float32)
     with mx.stream(mx.gpu):
         result = np.asarray(
             recursive_gaussian(mx.array(values), sigma, 1.0, 0, 0), dtype=np.float64,
@@ -115,12 +114,14 @@ def test_invalid_or_unresolved_filter_parameters_raise(
     sigma: float, spacing: float, order: int,
 ) -> None:
     with pytest.raises(ValueError):
-        recursive_gaussian(mx.zeros((4, 5)), float(sigma), float(spacing), 0, order)
+        recursive_gaussian(mx.array(hcc_patch((4, 5))[0].astype(np.float32)),
+                           float(sigma), float(spacing), 0, order)
 
 
 def test_laplacian_rejects_unresolved_second_derivative() -> None:
     with pytest.raises(ValueError, match="second-order recursive Gaussian"):
-        laplacian_gaussian(mx.zeros((4, 4, 4)), (1.0, 1.0, 1.0), 1e-3)
+        laplacian_gaussian(mx.array(hcc_patch((4, 4, 4))[0].astype(np.float32)),
+                           (1.0, 1.0, 1.0), 1e-3)
 
 
 @pytest.mark.parametrize(
@@ -132,4 +133,5 @@ def test_recursive_gaussian_rejects_invalid_topology(
     shape: tuple[int, ...], axis: int, order: int,
 ) -> None:
     with pytest.raises(ValueError):
-        recursive_gaussian(mx.zeros(shape), 1.0, 1.0, axis, order)
+        recursive_gaussian(mx.array(hcc_patch(shape)[0].astype(np.float32)),
+                           1.0, 1.0, axis, order)
