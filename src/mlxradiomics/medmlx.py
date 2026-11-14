@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from medmlx_core.errors import InvalidInputError
-from medmlx_core.outputs import OutputEntry, output_entry
+from medmlx_core.outputs import Artifact, artifact
 
 from mlxradiomics.config.parameters import ExtractionParameters, load_params, parse_params
 from mlxradiomics.config.settings import Settings
@@ -54,9 +54,15 @@ class RunFiles(TypedDict):
 
 
 class RunResult(TypedDict):
-    """MedMLX output entries, grouped file paths and metadata returned by :func:`run`."""
+    """Paths by role, their MedMLX descriptions, grouped paths and metadata from :func:`run`.
 
-    outputs: list[OutputEntry]
+    ``outputs`` and ``files`` hold the same paths. ``outputs`` names each file by role:
+    ``features_json``, ``features_csv`` when written, and one role per map named by
+    its feature. ``artifacts`` describes every ``outputs`` role.
+    """
+
+    outputs: dict[str, str]
+    artifacts: dict[str, Artifact]
     files: RunFiles
     details: RunDetails
 
@@ -90,13 +96,13 @@ def _load_parameters(
     return result
 
 
-def _scalar_field_entry(
-    path: str | Path, *, processed: Volume, source: ImageGeometryPayload | None,
-) -> OutputEntry:
+def _scalar_field_artifact(
+    *, processed: Volume, source: ImageGeometryPayload | None,
+) -> Artifact:
     """Describe a voxel map on the input grid only when every geometry field matches.
 
     A cropped or resampled map is still physically positioned by its NIfTI affine, but it
-    is no longer an array over the input volume's voxel grid. Such an entry uses
+    is no longer an array over the input volume's voxel grid. Such a map uses
     ``image_physical`` and omits ``grid_of``, which must name an input argument sharing the
     output grid. The run metadata keeps ``source_geometry`` for input provenance.
     """
@@ -107,10 +113,8 @@ def _scalar_field_entry(
         and tuple(processed.direction) == tuple(source["direction"])
     )
     if matches_input:
-        return output_entry(
-            path, kind="scalar_field", coordinate_space="image_voxel", grid_of="image_path",
-        )
-    return output_entry(path, kind="scalar_field", coordinate_space="image_physical")
+        return artifact(kind="scalar_field", coordinate_space="image_voxel", grid_of="image_path")
+    return artifact(kind="scalar_field", coordinate_space="image_physical")
 
 
 def run(
@@ -165,12 +169,13 @@ def run(
             may alias a referenced data file. Paired NIfTI/Analyze inputs are rejected.
 
     Returns:
-        ``outputs`` lists MedMLX file descriptions. ``files.features_json`` points to a
+        ``outputs`` maps roles to paths and ``artifacts`` describes them; ``files``
+        groups the same paths. ``files.features_json`` points to a
         metadata-plus-values (ROI) or metadata-plus-map-paths (voxel) JSON file. ROI mode
         also writes ``features_csv``; voxel mode also writes one float32 NIfTI per feature
         and image type at ``<output_dir>/maps/<prefix>_<feature>.nii.gz``, reusing the
         processed image geometry (zero outside the ROI, with nonfinite values possible
-        inside). A map entry uses ``coordinate_space="image_voxel"`` and
+        inside). A map's artifact uses ``coordinate_space="image_voxel"`` and
         ``grid_of="image_path"`` only when the processed grid exactly matches the input's
         shape, spacing, origin and direction. After a crop or resampling it uses
         ``image_physical`` with no ``grid_of``, and ``source_geometry`` in the execution
@@ -251,17 +256,20 @@ def run_loaded_case(
         metadata_settings=settings, voxel=voxel,
         input_volumes=(source_image, source_mask),
     )
-    entries = [output_entry(saved.report, kind="report", coordinate_space="not_applicable")]
+    outputs = {"features_json": saved.report.as_posix()}
+    artifacts = {"features_json": artifact(kind="report", coordinate_space="not_applicable")}
     if saved.table is not None:
-        entries.append(
-            output_entry(saved.table, kind="measurement", coordinate_space="not_applicable")
+        outputs["features_csv"] = saved.table.as_posix()
+        artifacts["features_csv"] = artifact(
+            kind="measurement", coordinate_space="not_applicable",
         )
-    entries.extend(
-        _scalar_field_entry(path, processed=processed, source=pair.source_geometry)
-        for path in saved.maps.values()
-    )
+    # Feature names have an image-type prefix, so they cannot collide with the report roles.
+    for name, path in saved.maps.items():
+        outputs[name] = path.as_posix()
+        artifacts[name] = _scalar_field_artifact(processed=processed, source=pair.source_geometry)
     return {
-        "outputs": entries,
+        "outputs": outputs,
+        "artifacts": artifacts,
         "files": {
             "features_json": saved.report.as_posix(),
             "features_csv": saved.table.as_posix() if saved.table else None,

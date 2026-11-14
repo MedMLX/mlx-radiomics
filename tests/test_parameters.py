@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
-from medmlx_core.outputs import OutputEntry, validate_outputs
+from medmlx_core.outputs import Artifact, validate_outputs
 from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.filtering import FilterPadding, FourierGrid, RieszBase
@@ -52,10 +52,9 @@ def _params(*, image_types: dict[str, object], setting: dict[str, object]) -> di
     }
 
 
-def _scalar_fields(result: RunResult) -> list[OutputEntry]:
-    return [
-        entry for entry in validate_outputs(result["outputs"]) if entry["kind"] == "scalar_field"
-    ]
+def _scalar_fields(result: RunResult) -> list[Artifact]:
+    artifacts = validate_outputs(result).artifacts
+    return [entry for entry in artifacts.values() if entry["kind"] == "scalar_field"]
 
 
 def _geometry(result: RunResult) -> tuple[dict[str, object], dict[str, object]]:

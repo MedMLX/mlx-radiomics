@@ -49,10 +49,13 @@ takes the arguments of `run`.
 | ROI | `features.json`, `features.csv` |
 | Voxel | `features.json`, `maps/<feature>.nii.gz` (float32, processed grid, zero outside the ROI) |
 
-The return value has `outputs` (standard MedMLX output entries), `files`
-(`features_json`, `features_csv`, `maps`) and `details`. A map references
-`image_path` as its grid only when the processed grid is unchanged; cropped or
-resampled maps use physical coordinates.
+The return value has `outputs`, `artifacts`, `files` and `details`. `outputs`
+maps each file's role to its path: `features_json`, `features_csv` in ROI mode,
+and one role per map named by its feature. `artifacts` gives each role's MedMLX
+kind and coordinate space. `files` groups the same paths as `features_json`,
+`features_csv` and `maps`. A map references `image_path` as its grid only when
+the processed grid is unchanged; cropped or resampled maps use physical
+coordinates.
 
 `features.json` uses report schema 2. Finite values are JSON numbers; NaN and
 infinities are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`. CSV files and

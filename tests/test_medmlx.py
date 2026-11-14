@@ -61,10 +61,13 @@ def test_run_roi_writes_independent_first_order_values(tmp_path: Path) -> None:
     selected = array[labels == 1]
     expected = {"original_firstorder_Mean": float(np.mean(selected)),
                 "original_firstorder_Variance": float(np.var(selected))}
-    entries = validate_outputs(result["outputs"])
-    assert {entry["kind"] for entry in entries} == {"report", "measurement"}
-    assert {entry["path"] for entry in entries} == {
-        str(output / "features.json"), str(output / "features.csv"),
+    paths, artifacts = validate_outputs(result)
+    assert paths == {
+        "features_json": str(output / "features.json"),
+        "features_csv": str(output / "features.csv"),
+    }
+    assert {role: entry["kind"] for role, entry in artifacts.items()} == {
+        "features_json": "report", "features_csv": "measurement",
     }
     payload = json.loads(Path(result["files"]["features_json"]).read_text())
     assert payload["features"] == pytest.approx(expected)
@@ -81,12 +84,12 @@ def test_run_voxel_writes_local_means_on_the_input_grid(tmp_path: Path) -> None:
     source, mask = read_image(image_path), read_image(mask_path)
     expected = masked_neighborhood_mean(source.array.astype(np.float64), mask.array == 1)
     name = "original_firstorder_Mean"
-    entries = validate_outputs(result["outputs"])
-    fields = [entry for entry in entries if entry["kind"] == "scalar_field"]
-    assert len(entries) == 2 and len(fields) == 1
-    assert fields[0]["path"] == result["files"]["maps"][name]
-    assert fields[0].get("grid_of") == "image_path"
-    assert fields[0]["coordinate_space"] == "image_voxel"
+    paths, artifacts = validate_outputs(result)
+    assert set(paths) == set(artifacts) == {"features_json", name}
+    assert paths[name] == result["files"]["maps"][name]
+    assert artifacts[name]["kind"] == "scalar_field"
+    assert artifacts[name].get("grid_of") == "image_path"
+    assert artifacts[name]["coordinate_space"] == "image_voxel"
     output = read_image(result["files"]["maps"][name])
     np.testing.assert_allclose(output.array.astype(np.float64), expected, rtol=1e-4, atol=1e-4)
     assert output.spacing == source.spacing
