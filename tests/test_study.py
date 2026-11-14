@@ -44,11 +44,11 @@ def test_study_runs_every_case_and_label_independently(tmp_path: Path) -> None:
     ]
     values: dict[tuple[str, int], float] = {}
     for outcome in outcomes:
-        files = outcome["files"]
-        assert files is not None
-        payload = json.loads(Path(files["features_json"]).read_text())
+        outputs = outcome["outputs"]
+        assert outputs is not None
+        payload = json.loads(Path(outputs["features_json"]).read_text())
         assert payload["details"]["label"] == outcome["label"]
-        assert Path(files["features_json"]).parent == (
+        assert Path(outputs["features_json"]).parent == (
             tmp_path / "out" / outcome["case_id"] / f"label-{outcome['label']}"
         )
         values[(outcome["case_id"], outcome["label"])] = payload["features"][
@@ -100,7 +100,7 @@ def test_study_reads_each_source_once_and_matches_independent_label_runs(
             )
             actual = tmp_path / "study" / case["case_id"] / f"label-{label}" / "features.json"
             assert json.loads(actual.read_text()) == json.loads(
-                Path(baseline["files"]["features_json"]).read_text(),
+                Path(baseline["outputs"]["features_json"]).read_text(),
             )
 
 
@@ -109,7 +109,8 @@ def test_study_records_missing_label_and_continues(tmp_path: Path) -> None:
     outcomes = run_study([case], tmp_path / "out", labels=(1, 5), params=MEAN)
     assert [outcome["status"] for outcome in outcomes] == ["completed", "failed"]
     assert outcomes[1]["error_type"] == "InvalidInputError"
-    assert outcomes[1]["files"] is None
+    assert outcomes[1]["outputs"] is None
+    assert outcomes[1]["artifacts"] is None
     assert "absent" in (outcomes[1]["error_message"] or "")
     assert (tmp_path / "out" / "case-a" / "label-1" / "features.json").is_file()
 
@@ -175,10 +176,15 @@ def test_study_records_invalid_transform_dimension_and_continues(tmp_path: Path)
     assert [outcome["status"] for outcome in outcomes] == ["failed", "completed"]
     assert outcomes[0]["error_type"] == "InvalidInputError"
     assert "requires a 3D image" in (outcomes[0]["error_message"] or "")
-    files = outcomes[1]["files"]
-    assert files is not None
-    assert set(files["maps"]) == {"lbp-3D-m1_firstorder_Mean", "lbp-3D-k_firstorder_Mean"}
-    assert all(Path(path).is_file() for path in files["maps"].values())
+    outputs, artifacts = outcomes[1]["outputs"], outcomes[1]["artifacts"]
+    assert outputs is not None
+    assert artifacts is not None
+    maps = {
+        role: path for role, path in outputs.items()
+        if artifacts[role]["kind"] == "scalar_field"
+    }
+    assert set(maps) == {"lbp-3D-m1_firstorder_Mean", "lbp-3D-k_firstorder_Mean"}
+    assert all(Path(path).is_file() for path in maps.values())
 
 
 def test_study_rejects_duplicate_or_unsafe_identifiers(tmp_path: Path) -> None:

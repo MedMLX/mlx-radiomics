@@ -35,7 +35,7 @@ def main() -> None:
         },
         overwrite=True,
     )
-    print(json.dumps(result["files"], indent=2))
+    print(json.dumps(result["outputs"], indent=2))
 
 
 if __name__ == "__main__":

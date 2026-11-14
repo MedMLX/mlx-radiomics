@@ -69,9 +69,9 @@ def test_run_roi_writes_independent_first_order_values(tmp_path: Path) -> None:
     assert {role: entry["kind"] for role, entry in artifacts.items()} == {
         "features_json": "report", "features_csv": "measurement",
     }
-    payload = json.loads(Path(result["files"]["features_json"]).read_text())
+    payload = json.loads(Path(paths["features_json"]).read_text())
     assert payload["features"] == pytest.approx(expected)
-    with Path(cast(str, result["files"]["features_csv"])).open(newline="") as handle:
+    with Path(paths["features_csv"]).open(newline="") as handle:
         header, values = csv.reader(handle)
     assert dict(zip(header, map(float, values), strict=True)) == pytest.approx(expected)
     assert unrelated.read_bytes() == b"previous features"
@@ -86,18 +86,17 @@ def test_run_voxel_writes_local_means_on_the_input_grid(tmp_path: Path) -> None:
     name = "original_firstorder_Mean"
     paths, artifacts = validate_outputs(result)
     assert set(paths) == set(artifacts) == {"features_json", name}
-    assert paths[name] == result["files"]["maps"][name]
     assert artifacts[name]["kind"] == "scalar_field"
     assert artifacts[name].get("grid_of") == "image_path"
     assert artifacts[name]["coordinate_space"] == "image_voxel"
-    output = read_image(result["files"]["maps"][name])
+    output = read_image(paths[name])
     np.testing.assert_allclose(output.array.astype(np.float64), expected, rtol=1e-4, atol=1e-4)
     assert output.spacing == source.spacing
     assert output.origin == source.origin
     assert output.direction == source.direction
     assert result["details"]["feature_count"] == 1
-    payload = json.loads(Path(result["files"]["features_json"]).read_text())
-    assert payload["maps"] == result["files"]["maps"]
+    payload = json.loads(Path(paths["features_json"]).read_text())
+    assert payload["maps"] == {name: paths[name]}
 
 
 def _reject_json_constant(value: str) -> Never:
@@ -129,7 +128,7 @@ def test_run_roi_reports_nonfinite_values_as_json_strings(
     result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
     payload = cast(dict[str, JsonValue], json.loads(
-        Path(result["files"]["features_json"]).read_text(), parse_constant=_reject_json_constant,
+        Path(result["outputs"]["features_json"]).read_text(), parse_constant=_reject_json_constant,
     ))
     assert payload["schema_version"] == 2
     features = payload["features"]
@@ -434,7 +433,7 @@ def test_run_refuses_a_concurrent_call_to_the_same_directory(
         finally:
             resume.set()
         result = first.result(timeout=20)
-    assert Path(result["files"]["features_json"]).is_file()
+    assert Path(result["outputs"]["features_json"]).is_file()
     assert {path.name for path in output.iterdir()} == {"features.json", "features.csv"}
 
 

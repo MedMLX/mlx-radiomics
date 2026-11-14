@@ -55,7 +55,7 @@ def test_python_and_medmlx_exports_share_reports_and_physical_map_values(tmp_pat
         params={"featureClass": {"firstorder": ["Mean"]}},
     )
     reports = [json.loads(path.read_text()) for path in (
-        exported.report, Path(adapted["files"]["features_json"]),
+        exported.report, Path(adapted["outputs"]["features_json"]),
     )]
     assert reports[0]["details"] == reports[1]["details"]
     for report in reports:

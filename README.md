@@ -196,7 +196,7 @@ The MCP `run_model` tool takes the arguments of `mlxradiomics.medmlx.run` below.
 from mlxradiomics.medmlx import run
 
 result = run(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
-result["files"]["features_json"]  # path to the report
+result["outputs"]["features_json"]  # path to the report
 ```
 
 ### Inputs and outputs
@@ -210,7 +210,7 @@ defaults to 1. Set `overwrite=True` to replace existing outputs.
 | `voxel=True` | float32 NIfTI maps under `maps/`, zero outside the ROI |
 
 Feature keys include image, family and name, such as `original_glcm_Contrast`.
-The result contains `outputs`, `files` and `details`. See the
+The result contains `outputs`, `artifacts` and `details`. See the
 [runner guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/runner.md)
 for all arguments, report fields, geometry and error handling.
 

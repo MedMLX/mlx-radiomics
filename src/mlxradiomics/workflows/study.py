@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Literal, TypedDict, cast
 
 from medmlx_core.errors import InvalidInputError, ModelExecutionError
+from medmlx_core.outputs import Artifact
 
 from mlxradiomics.imaging.spatial import LoadedCase
-from mlxradiomics.medmlx import RunFiles, run_loaded_case
+from mlxradiomics.medmlx import run_loaded_case
 from mlxradiomics.workflows.publication import reject_input_aliases
 
 _CASE_KEYS: frozenset[str] = frozenset(("case_id", "image_path", "mask_path"))
@@ -34,14 +35,16 @@ class CaseOutcome(TypedDict):
     """Status for one ``(case_id, label)`` combination.
 
     ``status`` is ``completed`` or ``failed``. Completed entries carry the runner's
-    grouped file paths; failed entries carry the exception type and message.
+    ``outputs`` and ``artifacts`` from :func:`mlxradiomics.medmlx.run`; failed entries
+    carry the exception type and message.
     """
 
     case_id: str
     label: int
     status: Literal["completed", "failed"]
     output_dir: str
-    files: RunFiles | None
+    outputs: dict[str, str] | None
+    artifacts: dict[str, Artifact] | None
     error_type: str | None
     error_message: str | None
 
@@ -175,13 +178,14 @@ def run_study(
             except (InvalidInputError, ModelExecutionError, OSError) as error:
                 outcomes.append({
                     "case_id": case["case_id"], "label": label, "status": "failed",
-                    "output_dir": destination.as_posix(), "files": None,
+                    "output_dir": destination.as_posix(), "outputs": None, "artifacts": None,
                     "error_type": type(error).__name__, "error_message": str(error),
                 })
             else:
                 outcomes.append({
                     "case_id": case["case_id"], "label": label, "status": "completed",
-                    "output_dir": destination.as_posix(), "files": result["files"],
+                    "output_dir": destination.as_posix(), "outputs": result["outputs"],
+                    "artifacts": result["artifacts"],
                     "error_type": None, "error_message": None,
                 })
         del loaded

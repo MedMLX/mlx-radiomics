@@ -45,25 +45,16 @@ MODEL = {
 }
 
 
-class RunFiles(TypedDict):
-    """Absolute paths written by a run; voxel runs set ``maps`` and leave ``features_csv`` None."""
-
-    features_json: str
-    features_csv: str | None
-    maps: dict[str, str]
-
-
 class RunResult(TypedDict):
-    """Paths by role, their MedMLX descriptions, grouped paths and metadata from :func:`run`.
+    """Paths by role, their MedMLX descriptions and metadata from :func:`run`.
 
-    ``outputs`` and ``files`` hold the same paths. ``outputs`` names each file by role:
-    ``features_json``, ``features_csv`` when written, and one role per map named by
-    its feature. ``artifacts`` describes every ``outputs`` role.
+    ``outputs`` names each file by role: ``features_json``, ``features_csv`` when
+    written, and one role per map named by its feature. ``artifacts`` describes every
+    ``outputs`` role.
     """
 
     outputs: dict[str, str]
     artifacts: dict[str, Artifact]
-    files: RunFiles
     details: RunDetails
 
 
@@ -169,8 +160,8 @@ def run(
             may alias a referenced data file. Paired NIfTI/Analyze inputs are rejected.
 
     Returns:
-        ``outputs`` maps roles to paths and ``artifacts`` describes them; ``files``
-        groups the same paths. ``files.features_json`` points to a
+        ``outputs`` maps roles to paths and ``artifacts`` describes them.
+        ``outputs["features_json"]`` points to a
         metadata-plus-values (ROI) or metadata-plus-map-paths (voxel) JSON file. ROI mode
         also writes ``features_csv``; voxel mode also writes one float32 NIfTI per feature
         and image type at ``<output_dir>/maps/<prefix>_<feature>.nii.gz``, reusing the
@@ -270,10 +261,5 @@ def run_loaded_case(
     return {
         "outputs": outputs,
         "artifacts": artifacts,
-        "files": {
-            "features_json": saved.report.as_posix(),
-            "features_csv": saved.table.as_posix() if saved.table else None,
-            "maps": {name: path.as_posix() for name, path in saved.maps.items()},
-        },
         "details": saved.details,
     }
