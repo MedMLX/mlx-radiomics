@@ -11,10 +11,10 @@ import dataclasses
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TypedDict
 
 from medmlx_core.errors import InvalidInputError
 from medmlx_core.outputs import Artifact, artifact
+from medmlx_core.outputs import RunResult as _RunResult
 
 from mlxradiomics.config.parameters import ExtractionParameters, load_params, parse_params
 from mlxradiomics.config.settings import Settings
@@ -45,17 +45,12 @@ MODEL = {
 }
 
 
-class RunResult(TypedDict):
-    """Paths by role, their MedMLX descriptions and metadata from :func:`extract`.
-
-    ``outputs`` names each file by role: ``features``, ``features_table`` when
-    written, and one role per map named by its feature. ``artifacts`` describes every
-    ``outputs`` role.
-    """
-
-    outputs: dict[str, str]
-    artifacts: dict[str, Artifact]
-    details: RunDetails
+# Paths by role, their MedMLX descriptions and metadata from :func:`extract`.
+#
+# ``outputs`` names each file by role: ``features``, ``features_table`` when
+# written, and one role per map named by its feature. ``artifacts`` describes every
+# ``outputs`` role.
+type RunResult = _RunResult[RunDetails]
 
 
 def _load_parameters(
