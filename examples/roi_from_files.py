@@ -12,7 +12,7 @@ import argparse
 import json
 from pathlib import Path
 
-from mlxradiomics.medmlx import run
+from mlxradiomics.medmlx import extract
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument("--label", type=int, default=1)
     parser.add_argument("--bin-width", type=float, default=25.0)
     args = parser.parse_args()
-    result = run(
+    result = extract(
         image_path=args.image, mask_path=args.mask, output_dir=args.output,
         label=args.label,
         params={

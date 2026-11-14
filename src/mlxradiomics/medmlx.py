@@ -29,13 +29,13 @@ from mlxradiomics.imaging.spatial import LoadedCase, prepare_image_pair
 from mlxradiomics.workflows.reporting import publish_report
 
 # Registered through the ``medmlx.models`` entry point in pyproject.toml; MedMLX
-# calls ``run`` with an image path, mask path and output directory.
+# calls ``extract`` with an image path, mask path and output directory.
 MODEL = {
     "id": "mlxradiomics",
     "requires_weights": False,
     "label": "Radiomics feature extraction on Metal",
     "task": "feature-extraction",
-    "run": "mlxradiomics.medmlx:run",
+    "run": "mlxradiomics.medmlx:extract",
     # Approximate GPU memory in GB for the default ROI features of one organ.
     "peak_memory_gb": 0.1,
     "summary": (
@@ -46,9 +46,9 @@ MODEL = {
 
 
 class RunResult(TypedDict):
-    """Paths by role, their MedMLX descriptions and metadata from :func:`run`.
+    """Paths by role, their MedMLX descriptions and metadata from :func:`extract`.
 
-    ``outputs`` names each file by role: ``features_json``, ``features_csv`` when
+    ``outputs`` names each file by role: ``features``, ``features_table`` when
     written, and one role per map named by its feature. ``artifacts`` describes every
     ``outputs`` role.
     """
@@ -108,7 +108,7 @@ def _scalar_field_artifact(
     return artifact(kind="scalar_field", coordinate_space="image_physical")
 
 
-def run(
+def extract(
     *,
     image_path: str | os.PathLike[str],
     mask_path: str | os.PathLike[str],
@@ -118,8 +118,8 @@ def run(
     label: int | None = None,
     voxel: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> RunResult:
     """Extract radiomics features from one NIfTI/NRRD image and label mask.
 
@@ -141,9 +141,9 @@ def run(
             float32 map at a time is expanded and written. Temporary files are removed
             on failure or success. Disk use grows with ROI size, feature count and image
             types.
-        temporary_dir: Existing directory for voxel scratch; None uses the system default.
+        scratch_dir: Existing directory for voxel scratch; None uses the system default.
             Publication staging remains on the output filesystem for atomic renames.
-        max_temporary_mib: Positive integer cap for logical voxel scratch (compact spool
+        max_scratch_mib: Positive integer cap for logical voxel scratch (compact spool
             plus one dense float32 grid), in MiB. Checked before extraction and each batch.
             This excludes staged/final outputs and is not an RSS cap. Output filesystem
             capacity is admitted separately with a conservative staging estimate.
@@ -161,9 +161,9 @@ def run(
 
     Returns:
         ``outputs`` maps roles to paths and ``artifacts`` describes them.
-        ``outputs["features_json"]`` points to a
+        ``outputs["features"]`` points to a
         metadata-plus-values (ROI) or metadata-plus-map-paths (voxel) JSON file. ROI mode
-        also writes ``features_csv``; voxel mode also writes one float32 NIfTI per feature
+        also writes ``features_table`` (CSV); voxel mode also writes one float32 NIfTI per feature
         and image type at ``<output_dir>/maps/<prefix>_<feature>.nii.gz``, reusing the
         processed image geometry (zero outside the ROI, with nonfinite values possible
         inside). A map's artifact uses ``coordinate_space="image_voxel"`` and
@@ -183,15 +183,15 @@ def run(
             is false or is not a boolean.
         ModelExecutionError: Extraction itself failed.
     """
-    return run_loaded_case(
+    return extract_case(
         LoadedCase(Path(image_path).expanduser(), Path(mask_path).expanduser()),
         output_dir=output_dir, params=params, params_path=params_path, label=label,
-        voxel=voxel, overwrite=overwrite, temporary_dir=temporary_dir,
-        max_temporary_mib=max_temporary_mib,
+        voxel=voxel, overwrite=overwrite, scratch_dir=scratch_dir,
+        max_scratch_mib=max_scratch_mib,
     )
 
 
-def run_loaded_case(
+def extract_case(
     case: LoadedCase,
     *,
     output_dir: str | os.PathLike[str],
@@ -200,20 +200,20 @@ def run_loaded_case(
     label: int | None = None,
     voxel: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> RunResult:
-    """Run one label with case-scoped source I/O and the ordinary publication contract."""
+    """Extract one label of a loaded case with the ordinary publication contract."""
     if type(overwrite) is not bool:
         raise InvalidInputError("overwrite must be a boolean")
     if type(voxel) is not bool:  # JSON callers can send "false", which is truthy
         raise InvalidInputError("voxel must be a boolean")
-    if max_temporary_mib is not None and (
-        type(max_temporary_mib) is not int or max_temporary_mib <= 0
+    if max_scratch_mib is not None and (
+        type(max_scratch_mib) is not int or max_scratch_mib <= 0
     ):
-        raise InvalidInputError("max_temporary_mib must be a positive integer")
-    if not voxel and (temporary_dir is not None or max_temporary_mib is not None):
-        raise InvalidInputError("temporary storage options require voxel=True")
+        raise InvalidInputError("max_scratch_mib must be a positive integer")
+    if not voxel and (scratch_dir is not None or max_scratch_mib is not None):
+        raise InvalidInputError("scratch_dir and max_scratch_mib require voxel=True")
 
     source_image, source_mask = case.image_path, case.mask_path
     try:
@@ -243,15 +243,15 @@ def run_loaded_case(
         processed.array, pair.mask.array, output_dir=output_dir, settings=extraction,
         transforms=transforms, reference=processed, inputs=inputs,
         source_geometry=pair.source_geometry, image_settings=parameters.image_settings,
-        overwrite=overwrite, temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+        overwrite=overwrite, temporary_dir=scratch_dir, max_temporary_mib=max_scratch_mib,
         metadata_settings=settings, voxel=voxel,
         input_volumes=(source_image, source_mask),
     )
-    outputs = {"features_json": saved.report.as_posix()}
-    artifacts = {"features_json": artifact(kind="report", coordinate_space="not_applicable")}
+    outputs = {"features": saved.report.as_posix()}
+    artifacts = {"features": artifact(kind="report", coordinate_space="not_applicable")}
     if saved.table is not None:
-        outputs["features_csv"] = saved.table.as_posix()
-        artifacts["features_csv"] = artifact(
+        outputs["features_table"] = saved.table.as_posix()
+        artifacts["features_table"] = artifact(
             kind="measurement", coordinate_space="not_applicable",
         )
     # Feature names have an image-type prefix, so they cannot collide with the report roles.

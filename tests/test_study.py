@@ -46,9 +46,9 @@ def test_study_runs_every_case_and_label_independently(tmp_path: Path) -> None:
     for outcome in outcomes:
         outputs = outcome["outputs"]
         assert outputs is not None
-        payload = json.loads(Path(outputs["features_json"]).read_text())
+        payload = json.loads(Path(outputs["features"]).read_text())
         assert payload["details"]["label"] == outcome["label"]
-        assert Path(outputs["features_json"]).parent == (
+        assert Path(outputs["features"]).parent == (
             tmp_path / "out" / outcome["case_id"] / f"label-{outcome['label']}"
         )
         values[(outcome["case_id"], outcome["label"])] = payload["features"][
@@ -63,7 +63,7 @@ def test_study_reads_each_source_once_and_matches_independent_label_runs(
 ) -> None:
     """Reuse source pixels while keeping normalization/crop/resegmentation label-local."""
     from mlxradiomics.imaging import spatial as spatial_io
-    from mlxradiomics.medmlx import run
+    from mlxradiomics.medmlx import extract
 
     cases = [_case(tmp_path / "inputs", "case-a", 0), _case(tmp_path / "inputs", "case-b", 20)]
     params: dict[str, object] = {
@@ -93,14 +93,14 @@ def test_study_reads_each_source_once_and_matches_independent_label_runs(
     ]
     for case in cases:
         for label in (1, 2):
-            baseline = run(
+            baseline = extract(
                 image_path=case["image_path"], mask_path=case["mask_path"],
                 output_dir=tmp_path / "independent" / case["case_id"] / f"label-{label}",
                 params=params, label=label,
             )
             actual = tmp_path / "study" / case["case_id"] / f"label-{label}" / "features.json"
             assert json.loads(actual.read_text()) == json.loads(
-                Path(baseline["outputs"]["features_json"]).read_text(),
+                Path(baseline["outputs"]["features"]).read_text(),
             )
 
 

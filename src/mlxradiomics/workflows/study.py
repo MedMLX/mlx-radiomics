@@ -17,7 +17,7 @@ from medmlx_core.errors import InvalidInputError, ModelExecutionError
 from medmlx_core.outputs import Artifact
 
 from mlxradiomics.imaging.spatial import LoadedCase
-from mlxradiomics.medmlx import run_loaded_case
+from mlxradiomics.medmlx import extract_case
 from mlxradiomics.workflows.publication import reject_input_aliases
 
 _CASE_KEYS: frozenset[str] = frozenset(("case_id", "image_path", "mask_path"))
@@ -91,8 +91,8 @@ def run_study(
     params_path: str | os.PathLike[str] | None = None,
     voxel: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> list[CaseOutcome]:
     """Run one image/mask pair per case and label, reporting every outcome.
 
@@ -117,8 +117,8 @@ def run_study(
         params_path: YAML file holding the same mapping.
         voxel: Export voxel maps instead of ROI features.
         overwrite: Replace existing outputs instead of refusing them.
-        temporary_dir: Existing directory for voxel scratch.
-        max_temporary_mib: Positive cap in MiB for logical voxel scratch.
+        scratch_dir: Existing directory for voxel scratch.
+        max_scratch_mib: Positive cap in MiB for logical voxel scratch.
 
     Returns:
         One outcome per case and label, in case-major order.
@@ -169,11 +169,11 @@ def run_study(
         for label in selected_labels:
             destination = root / case["case_id"] / f"label-{label}"
             try:
-                result = run_loaded_case(
+                result = extract_case(
                     loaded,
                     output_dir=destination, params=params, params_path=params_path,
                     label=label, voxel=voxel, overwrite=overwrite,
-                    temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+                    scratch_dir=scratch_dir, max_scratch_mib=max_scratch_mib,
                 )
             except (InvalidInputError, ModelExecutionError, OSError) as error:
                 outcomes.append({

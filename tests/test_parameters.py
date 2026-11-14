@@ -18,7 +18,7 @@ from mlxradiomics.config.settings import Settings
 from mlxradiomics.config.spatial import ImageSettings, Interpolator
 from mlxradiomics.config.transforms import ImageType, TransformSettings
 from mlxradiomics.imaging.io import read_image
-from mlxradiomics.medmlx import RunResult, run
+from mlxradiomics.medmlx import RunResult, extract
 from mlxradiomics.workflows.extraction import extract_files
 
 
@@ -119,7 +119,7 @@ def test_parameter_file_matches_equivalent_python_call(tmp_path: Path) -> None:
             "interpolator": "sitkLinear", "padDistance": 1,
         },
     )
-    result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "run",
+    result = extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "run",
                  params=params, voxel=True)
     expected = extract_files(
         image_path, mask_path,
@@ -131,7 +131,7 @@ def test_parameter_file_matches_equivalent_python_call(tmp_path: Path) -> None:
         transforms=TransformSettings(image_types=(ImageType.ORIGINAL, ImageType.WAVELET)),
         mode="voxel",
     )
-    payload = json.loads(Path(result["outputs"]["features_json"]).read_text())
+    payload = json.loads(Path(result["outputs"]["features"]).read_text())
     assert result["details"]["shape"] == [9, 11, 15]
     assert result["details"]["spacing"] == [1.0, 1.0, 1.0]
     assert payload["details"]["execution"]["source_geometry"]["shape"] == [10, 11, 12]
@@ -163,16 +163,16 @@ def test_parameter_file_correct_mask_and_effective_settings(tmp_path: Path) -> N
 
     params = _params(image_types={"Original": {}, "Square": {}}, setting={"correctMask": True})
     with pytest.raises(InvalidInputError, match="geometry mismatch"):
-        run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "refused",
+        extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "refused",
             params={"setting": {}, "featureClass": {"firstorder": ["Mean"]}})
-    result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
+    result = extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
     execution = cast(dict[str, object], result["details"]["execution"])
     source = cast(dict[str, object], execution["source_geometry"])
     image_settings = cast(dict[str, object], execution["image_settings"])
     assert source["shape"] == [10, 11, 12]
     assert image_settings["correct_mask"] is True
-    features = json.loads(Path(result["outputs"]["features_json"]).read_text())["features"]
+    features = json.loads(Path(result["outputs"]["features"]).read_text())["features"]
     assert set(features) == {
         "original_firstorder_Mean", "original_glcm_Contrast",
         "square_firstorder_Mean", "square_glcm_Contrast",
@@ -184,7 +184,7 @@ def test_map_descriptor_claims_the_input_voxel_grid_only_when_geometry_matches(
     tmp_path: Path,
 ) -> None:
     image_path, mask_path = _inputs(tmp_path / "inputs")
-    result = run(
+    result = extract(
         image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
         params=_params(image_types={"Original": {}}, setting={}), voxel=True,
     )
@@ -204,7 +204,7 @@ def test_map_descriptor_reports_a_cropped_grid_as_physical(tmp_path: Path) -> No
         image_types={"Original": {}},
         setting={"resampledPixelSpacing": [1.5, 1.0, 0.8], "padDistance": 1},
     )
-    result = run(
+    result = extract(
         image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
         params=params, voxel=True,
     )
@@ -236,7 +236,7 @@ def test_map_descriptor_preserves_oblique_direction_through_crop(tmp_path: Path)
         0.0, 0.0, 1.0,
     )
     image_path, mask_path = _inputs(tmp_path / "inputs", direction=direction)
-    unchanged = run(
+    unchanged = extract(
         image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "unchanged",
         params=_params(image_types={"Original": {}}, setting={}), voxel=True,
     )
@@ -246,7 +246,7 @@ def test_map_descriptor_preserves_oblique_direction_through_crop(tmp_path: Path)
         image_types={"Original": {}},
         setting={"resampledPixelSpacing": [1.5, 1.0, 0.8], "padDistance": 1},
     )
-    cropped = run(
+    cropped = extract(
         image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "cropped",
         params=params, voxel=True,
     )
@@ -340,9 +340,9 @@ def test_planar_separable_wavelet_parameter_file_runs_on_3d_input(tmp_path: Path
         image_types={"SeparableWavelet": {"wavelet": "haar", "bands": ["LH"], "planar": True}},
         setting={},
     )
-    result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
+    result = extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
-    features = json.loads(Path(result["outputs"]["features_json"]).read_text())["features"]
+    features = json.loads(Path(result["outputs"]["features"]).read_text())["features"]
     assert any(name.startswith("separablewavelet-haar-L1-LH-") and "-2D_firstorder_Mean" in name
                for name in features)
 

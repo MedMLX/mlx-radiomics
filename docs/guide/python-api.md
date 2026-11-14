@@ -17,7 +17,7 @@ All options are keyword-only.
 - File operations read spacing from the image. They accept `image_settings=`
   ({class}`~mlxradiomics.ImageSettings`) for resampling and mask correction.
 - Array `export` accepts `allow_synthetic_geometry=` to acknowledge its synthetic grid.
-- Exports accept `overwrite=`, `temporary_dir=` and `max_temporary_mib=`.
+- Exports accept `overwrite=`, `scratch_dir=` and `max_scratch_mib=`.
 
 Settings, enums and parameter-file parsing load without MLX or SimpleITK. The
 execution runtime loads when extraction or export is imported.
@@ -80,7 +80,7 @@ dimension; it does not change the 93-feature default. Unknown family names raise
 explicit `force2d_axis`. Inspect the returned names before using a large selection.
 
 `export` and `export_files` always write voxel maps, not ROI scalar reports.
-Use `mlxradiomics.medmlx.run` for ROI JSON/CSV, or consume `Result.features` in
+Use `mlxradiomics.medmlx.extract` for ROI JSON/CSV, or consume `Result.features` in
 Python.
 
 ## Derived images

@@ -36,8 +36,8 @@ def export(
     spacing: tuple[float, ...] | None = None,
     allow_synthetic_geometry: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> MapExport:
     """Stream derived-image voxel maps to NIfTI files with bounded host storage.
 
@@ -62,9 +62,9 @@ def export(
             saved maps. False preserves the export but warns; use ``export_files`` to
             retain physical geometry from a source image.
         overwrite: Replace existing outputs instead of refusing them.
-        temporary_dir: Existing directory for voxel scratch; ``None`` uses the system
+        scratch_dir: Existing directory for voxel scratch; ``None`` uses the system
             temporary directory.
-        max_temporary_mib: Positive cap in MiB for logical voxel scratch (compact spool
+        max_scratch_mib: Positive cap in MiB for logical voxel scratch (compact spool
             plus one dense float32 grid); not an RSS cap.
 
     Returns:
@@ -99,7 +99,7 @@ def export(
         image, mask, output_dir=output_dir, settings=settings, transforms=transforms,
         reference=reference, inputs=(),
         source_geometry=None, image_settings=None, overwrite=overwrite,
-        temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+        temporary_dir=scratch_dir, max_temporary_mib=max_scratch_mib,
     )
     return MapExport(saved.report, saved.maps, saved.metadata)
 
@@ -113,8 +113,8 @@ def export_files(
     image_settings: ImageSettings | None = None,
     transforms: TransformSettings | None = None,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> MapExport:
     """Read one image/mask pair and export derived-image voxel maps to disk.
 
@@ -130,9 +130,9 @@ def export_files(
         image_settings: Resampling, IBSI interpolation and mask-correction options.
         transforms: Derived images to export; defaults to the original image.
         overwrite: Replace existing outputs instead of refusing them.
-        temporary_dir: Existing directory for voxel scratch; ``None`` uses the system
+        scratch_dir: Existing directory for voxel scratch; ``None`` uses the system
             temporary directory.
-        max_temporary_mib: Positive cap in MiB for logical voxel scratch (compact spool
+        max_scratch_mib: Positive cap in MiB for logical voxel scratch (compact spool
             plus one dense float32 grid); not an RSS cap.
 
     Returns:
@@ -160,7 +160,7 @@ def export_files(
         reference=pair.image, inputs=(source_image, source_mask),
         source_geometry=pair.source_geometry,
         image_settings=image_settings or ImageSettings(), overwrite=overwrite,
-        temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+        temporary_dir=scratch_dir, max_temporary_mib=max_scratch_mib,
         metadata_settings=options,
         input_volumes=(source_image, source_mask),
     )
