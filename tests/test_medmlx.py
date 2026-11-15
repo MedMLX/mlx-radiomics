@@ -24,11 +24,11 @@ from radiomics_reference.real_images import hcc_crop
 import mlxradiomics
 from mlxradiomics.contracts.json import JsonValue
 from mlxradiomics.imaging.io import read_image
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
 MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 # Untyped view of the runner for deserialized invalid argument values.
-extract_untyped = cast(Callable[..., object], extract)
+extract_untyped = cast(Callable[..., object], run)
 
 
 def _write_pair(directory: Path) -> tuple[Path, Path]:
@@ -54,7 +54,7 @@ def test_run_roi_writes_independent_first_order_values(tmp_path: Path) -> None:
     (output / "features.csv").write_bytes(b"previous features")
     unrelated = tmp_path / "unrelated.csv"
     unrelated.hardlink_to(output / "features.csv")
-    result = extract(image_path=image_path, mask_path=mask_path, output_dir=output,
+    result = run(image_path=image_path, mask_path=mask_path, output_dir=output,
                  params_path=params, overwrite=True)
     array = sitk.GetArrayFromImage(sitk.ReadImage(str(image_path))).astype(np.float64)
     labels = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_path)))
@@ -79,7 +79,7 @@ def test_run_roi_writes_independent_first_order_values(tmp_path: Path) -> None:
 
 def test_run_voxel_writes_local_means_on_the_input_grid(tmp_path: Path) -> None:
     image_path, mask_path = _write_pair(tmp_path / "inputs")
-    result = extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
+    result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=MEAN, voxel=True)
     source, mask = read_image(image_path), read_image(mask_path)
     expected = masked_neighborhood_mean(source.array.astype(np.float64), mask.array == 1)
@@ -125,7 +125,7 @@ def test_run_roi_reports_nonfinite_values_as_json_strings(
     params = {"setting": {"binCount": 1, "binWidth": bin_width, "voxelArrayShift": 1e30,
                           "zeroVarianceMoments": "nan"},
               "featureClass": {"firstorder": ["Mean", "Energy", "Skewness"]}}
-    result = extract(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
+    result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
     payload = cast(dict[str, JsonValue], json.loads(
         Path(result["outputs"]["features"]).read_text(), parse_constant=_reject_json_constant,
@@ -220,7 +220,7 @@ def test_run_rejects_unsafe_targets_before_extraction(
 
     monkeypatch.setattr("mlxradiomics.workflows.engine.extract", forbidden_extraction)
     with pytest.raises(InvalidInputError, match="output|aliases"):
-        extract(image_path=image, mask_path=mask, output_dir=output,
+        run(image_path=image, mask_path=mask, output_dir=output,
             params=None if problem == "params_alias" else MEAN,
             params_path=metadata if problem == "params_alias" else None,
             voxel=problem == "map_parent_file", overwrite=True)
@@ -277,7 +277,7 @@ def test_run_rolls_back_partial_publication(
     expected_error = ModelExecutionError if rollback_failure else OSError
     message = "cannot restore outputs" if rollback_failure else "injected publication failure"
     with pytest.raises(expected_error, match=message):
-        extract(image_path=image, mask_path=mask, output_dir=output, params=MEAN,
+        run(image_path=image, mask_path=mask, output_dir=output, params=MEAN,
             voxel=voxel, overwrite=existing)
     assert failed
     if rollback_failure:
@@ -296,7 +296,7 @@ from pathlib import Path
 import signal
 import sys
 
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
 image, mask, output = map(Path, sys.argv[1:4])
 signum = getattr(signal, sys.argv[4])
@@ -340,7 +340,7 @@ def link(source, destination, *, follow_symlinks=True):
 
 os.replace, os.link = replace, link
 try:
-    extract(image_path=image, mask_path=mask, output_dir=output,
+    run(image_path=image, mask_path=mask, output_dir=output,
         params={"featureClass": {"firstorder": ["Mean"]}}, overwrite=existing)
 except KeyboardInterrupt:
     if signum != signal.SIGINT:
@@ -423,12 +423,12 @@ def test_run_refuses_a_concurrent_call_to_the_same_directory(
     monkeypatch.setattr(os, "replace", pause_publication)
     # overwrite=True exercises replacement while the first call owns the directory.
     with ThreadPoolExecutor(max_workers=1) as workers:
-        first = workers.submit(extract, image_path=image, mask_path=mask, output_dir=output,
+        first = workers.submit(run, image_path=image, mask_path=mask, output_dir=output,
                                params=MEAN, overwrite=True)
         try:
             assert publishing.wait(timeout=20)
             with pytest.raises(InvalidInputError, match="another run"):
-                extract(image_path=image, mask_path=mask, output_dir=output, params=MEAN,
+                run(image_path=image, mask_path=mask, output_dir=output, params=MEAN,
                     overwrite=True)
         finally:
             resume.set()
@@ -465,7 +465,7 @@ def test_run_preserves_an_output_created_after_preflight(
     monkeypatch.setattr(os, "replace", replace_after_creation)
     monkeypatch.setattr(os, "link", link_after_creation)
     with pytest.raises(InvalidInputError, match="overwrite=True"):
-        extract(image_path=image, mask_path=mask, output_dir=output, params=MEAN)
+        run(image_path=image, mask_path=mask, output_dir=output, params=MEAN)
     assert metadata.read_bytes() == b"created by another writer"
     assert {path.name for path in output.iterdir()} == {"features.json"}
 
@@ -479,7 +479,7 @@ def test_invalid_filter_dimension_is_an_input_error(tmp_path: Path) -> None:
     sitk.WriteImage(image, tmp_path / "image.nii.gz")
     sitk.WriteImage(mask, tmp_path / "mask.nii.gz")
     with pytest.raises(InvalidInputError, match="3-D image"):
-        extract(
+        run(
             image_path=tmp_path / "image.nii.gz", mask_path=tmp_path / "mask.nii.gz",
             output_dir=tmp_path / "out", voxel=True,
             params={"imageType": {"Mean": {"support": 3, "planar": True}},

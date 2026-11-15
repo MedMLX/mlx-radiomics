@@ -188,14 +188,14 @@ claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
 
 For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe mlxradiomics`.
 
-The MCP `run_model` tool takes the arguments of `mlxradiomics.medmlx.extract` below.
+The MCP `run_model` tool takes the arguments of `mlxradiomics.medmlx.run` below.
 
 ### File runner
 
 ```python
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
-result = extract(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
+result = run(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
 result["outputs"]["features"]  # path to the report
 ```
 

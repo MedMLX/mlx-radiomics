@@ -19,7 +19,7 @@ from mlxradiomics.config.transforms import (
     WaveletSettings,
 )
 from mlxradiomics.imaging.io import Volume, read_image
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
 
 def _inputs(root: Path) -> tuple[Path, Path, NDArray[np.float64], NDArray[np.uint8]]:
@@ -50,7 +50,7 @@ def test_python_and_medmlx_exports_share_reports_and_physical_map_values(tmp_pat
     exported = export_files(
         *paths, tmp_path / "python", settings=Settings(features=("firstorder_Mean",)),
     )
-    adapted = extract(
+    adapted = run(
         image_path=paths[0], mask_path=paths[1], output_dir=tmp_path / "medmlx", voxel=True,
         params={"featureClass": {"firstorder": ["Mean"]}},
     )

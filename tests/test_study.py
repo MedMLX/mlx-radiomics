@@ -63,7 +63,7 @@ def test_study_reads_each_source_once_and_matches_independent_label_runs(
 ) -> None:
     """Reuse source pixels while keeping normalization/crop/resegmentation label-local."""
     from mlxradiomics.imaging import spatial as spatial_io
-    from mlxradiomics.medmlx import extract
+    from mlxradiomics.medmlx import run
 
     cases = [_case(tmp_path / "inputs", "case-a", 0), _case(tmp_path / "inputs", "case-b", 20)]
     params: dict[str, object] = {
@@ -93,7 +93,7 @@ def test_study_reads_each_source_once_and_matches_independent_label_runs(
     ]
     for case in cases:
         for label in (1, 2):
-            baseline = extract(
+            baseline = run(
                 image_path=case["image_path"], mask_path=case["mask_path"],
                 output_dir=tmp_path / "independent" / case["case_id"] / f"label-{label}",
                 params=params, label=label,

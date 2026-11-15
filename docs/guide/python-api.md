@@ -80,7 +80,7 @@ dimension; it does not change the 93-feature default. Unknown family names raise
 explicit `force2d_axis`. Inspect the returned names before using a large selection.
 
 `export` and `export_files` always write voxel maps, not ROI scalar reports.
-Use `mlxradiomics.medmlx.extract` for ROI JSON/CSV, or consume `Result.features` in
+Use `mlxradiomics.medmlx.run` for ROI JSON/CSV, or consume `Result.features` in
 Python.
 
 ## Derived images

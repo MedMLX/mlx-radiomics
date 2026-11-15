@@ -1,13 +1,13 @@
 # MedMLX runner
 
-{func}`mlxradiomics.medmlx.extract` is the registered [MedMLX](https://github.com/MedMLX/medmlx)
+{func}`mlxradiomics.medmlx.run` is the registered [MedMLX](https://github.com/MedMLX/medmlx)
 entry point. It reads files, writes a report and returns JSON-compatible
 descriptions of the outputs:
 
 ```python
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
-result = extract(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
+result = run(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
 result["outputs"]["features"]  # path to the report
 ```
 

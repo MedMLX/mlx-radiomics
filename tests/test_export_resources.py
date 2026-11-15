@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from radiomics_reference.real_images import hcc_crop, hcc_patch
 
 from mlxradiomics.imaging.io import Volume
-from mlxradiomics.medmlx import extract
+from mlxradiomics.medmlx import run
 
 MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 
@@ -45,7 +45,7 @@ def test_runner_rejects_invalid_scratch_before_extraction(
 
     monkeypatch.setattr("mlxradiomics.workflows.engine.extract", forbidden_extraction)
     with pytest.raises(InvalidInputError):
-        extract(image_path=paths[0], mask_path=paths[1], output_dir=tmp_path / "out",
+        run(image_path=paths[0], mask_path=paths[1], output_dir=tmp_path / "out",
             params=MEAN, voxel=True, scratch_dir=scratch,
             max_scratch_mib=0 if problem == "invalid_budget" else 1)
     assert not list((tmp_path / "out").glob(".mlxradiomics-*"))
@@ -75,7 +75,7 @@ def test_runner_removes_owned_scratch_and_staging_after_writer_interruption(
 
     monkeypatch.setattr("mlxradiomics.workflows.reporting.write_feature_map", fail_write)
     with pytest.raises(interruption, match="injected writer interruption"):
-        extract(image_path=paths[0], mask_path=paths[1], output_dir=output,
+        run(image_path=paths[0], mask_path=paths[1], output_dir=output,
             params=MEAN, voxel=True, overwrite=True, scratch_dir=scratch, max_scratch_mib=1)
     assert {path: path.read_bytes() for path in previous} == previous
     assert list(scratch.iterdir()) == [marker]
@@ -101,7 +101,7 @@ def test_runner_reclaims_abandoned_staging_and_keeps_recovery_copies(tmp_path: P
     unrelated.mkdir()
     (unrelated / "keep").write_bytes(b"not a private staging name")
 
-    extract(image_path=paths[0], mask_path=paths[1], output_dir=output, params=MEAN)
+    run(image_path=paths[0], mask_path=paths[1], output_dir=output, params=MEAN)
 
     assert not abandoned.exists()
     assert not empty.exists()

@@ -29,13 +29,13 @@ from mlxradiomics.imaging.spatial import LoadedCase, prepare_image_pair
 from mlxradiomics.workflows.reporting import publish_report
 
 # Registered through the ``medmlx.models`` entry point in pyproject.toml; MedMLX
-# calls ``extract`` with an image path, mask path and output directory.
+# calls ``run`` with an image path, mask path and output directory.
 MODEL = {
     "id": "mlxradiomics",
     "requires_weights": False,
     "label": "Radiomics feature extraction on Metal",
     "task": "feature-extraction",
-    "run": "mlxradiomics.medmlx:extract",
+    "run": "mlxradiomics.medmlx:run",
     # Approximate GPU memory in GB for the default ROI features of one organ.
     "peak_memory_gb": 0.1,
     "summary": (
@@ -45,7 +45,7 @@ MODEL = {
 }
 
 
-# Paths by role, their MedMLX descriptions and metadata from :func:`extract`.
+# Paths by role, their MedMLX descriptions and metadata from :func:`run`.
 #
 # ``outputs`` names each file by role: ``features``, ``features_table`` when
 # written, and one role per map named by its feature. ``artifacts`` describes every
@@ -103,7 +103,7 @@ def _scalar_field_artifact(
     return artifact(kind="scalar_field", coordinate_space="image_physical")
 
 
-def extract(
+def run(
     *,
     image_path: str | os.PathLike[str],
     mask_path: str | os.PathLike[str],
