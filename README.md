@@ -28,7 +28,7 @@ model weights to download. Requires Apple Silicon with Metal.
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "mlxradiomics>=1.0.1"
+uv pip install "mlxradiomics>=1.1.0"
 ```
 
 | Extra | Adds |
