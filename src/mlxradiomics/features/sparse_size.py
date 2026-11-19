@@ -86,7 +86,8 @@ def sparse_size_statistics(
         offsets = indices - reference
         mean = mx.sum(weights.astype(mx.int64) * offsets).astype(mx.float32) / safe_total
         centered = offsets.astype(mx.float32) - mean
-        return reduce(weights.astype(mx.float32) * centered**2) / safe_total
+        # Multiplication, not Metal ``pow``: the square of an exact offset stays exact.
+        return reduce(weights.astype(mx.float32) * mx.square(centered)) / safe_total
 
     rows: list[dict[str, mx.array]] = []
     for row in range(counts.shape[0]):

@@ -133,8 +133,10 @@ def size_statistics(
             / safe_total_f
         )
         centered = offsets.astype(mx.float32) - mean_offset[:, None]
+        # Multiplication, not Metal ``pow`` (not correctly rounded on every Apple GPU):
+        # the square of an exact offset stays exact, as in the sparse path.
         return (
-            sum_rows(marginal.astype(mx.float32) * centered**2) / safe_total_f
+            sum_rows(marginal.astype(mx.float32) * mx.square(centered)) / safe_total_f
         )
 
     # Only requested statistics are constructed; building the others would cost host
@@ -309,7 +311,8 @@ def ngtdm_statistics(
         level_difference = i - j
         squared_difference = level_difference**2
         if "Contrast" in requested:
-            ng = sum_rows(present.astype(mx.int32))
+            # int64: Ng*(Ng-1) overflows int32 from 46,342 occupied gray levels.
+            ng = sum_rows(present.astype(mx.int32)).astype(mx.int64)
             pair_sum = (bounded_pairs["Contrast"] if bounded_pairs is not None
                         else sum_rows(pi * pj * squared_difference))
             contrast = pair_sum * sum_s / mx.maximum(total, 1)

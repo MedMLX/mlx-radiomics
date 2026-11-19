@@ -59,3 +59,15 @@ def test_ngtdm_uniform_lattice_matches_closed_form_across_tiles(batch: int) -> N
             np.asarray(result[name], dtype=np.float32), np.full(batch, target),
             rtol=2e-6, atol=0, err_msg=name,
         )
+
+
+def test_ngtdm_contrast_normalizes_beyond_int32_level_pairs() -> None:
+    # 46,342 occupied levels make Ng*(Ng-1) exceed 2**31 - 1. Unit counts and unit
+    # difference sums at consecutive levels give Contrast (K + 1) / (6 K).
+    count = 46_342
+    n = np.ones((1, count), dtype=np.int32)
+    result = ngtdm_statistics(mx.array(n), mx.array(n.astype(np.float32)), ("Contrast",))
+    np.testing.assert_allclose(
+        np.asarray(result["Contrast"], dtype=np.float32), [(count + 1) / (6 * count)],
+        rtol=2e-6, atol=0,
+    )
