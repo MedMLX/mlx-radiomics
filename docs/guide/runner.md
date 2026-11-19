@@ -73,8 +73,8 @@ maps keep the numeric values. `details.execution` records:
 
 | Error | Raised for |
 | --- | --- |
-| `InvalidInputError` | Bad paths, formats, geometry, labels, parameters or unsupported options; raised before extraction |
-| `ModelExecutionError` | Runtime or optional-dependency failures during extraction; incomplete outputs or failed publication rollback |
+| `InvalidInputError` | Bad paths, formats, geometry, labels, parameters or unsupported options, including those found during extraction |
+| `ModelExecutionError` | Runtime, allocation or optional-dependency failures during extraction, including an ROI count buffer above the `scratch_mib` budget; incomplete outputs or failed publication rollback |
 | `OSError` | File I/O failures |
 
 Unexpected programming errors propagate without being converted to a case failure.
