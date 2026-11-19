@@ -118,6 +118,14 @@ validation pass now reads 1 MiB blocks and the peak stays at 264 MiB.
 
 ### Faster
 
+**Voxel maps of GLCM, GLRLM and GLSZM under the IBSI conventions.** These three
+families took the slower matrix pipeline under the default conventions because of
+settings that only GLDM and NGTDM read. They now run on the fused kernels, with the
+same definitions. Values differ from the previous maps by float32 evaluation order,
+within 2e-5 relative plus 2e-6 absolute on the liver, and map validity is identical.
+The 80 texture maps of the liver take 3.3 s instead of 25.8 s on an M1 Max, at
+118 MiB of MLX memory instead of 122 MiB. GLDM, NGTDM and GLDZM maps are unchanged.
+
 **Diameters of large meshes.** A mesh of 32,768 or more vertices searches only the
 vertices that can reach a maximum, and returns the same four diameters bit for bit.
 The liver mesh (491,776 vertices) takes 168 ms instead of 367 ms on an M1 Max.
