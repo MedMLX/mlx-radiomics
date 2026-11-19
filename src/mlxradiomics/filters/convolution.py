@@ -521,16 +521,36 @@ def laws_response(
     orientations = (
         [vectors] if pooling is OrientationPooling.NONE else _laws_orientations(codes)
     )
-    responses: list[mx.array] = []
+    # Pool as each orientation is produced and evaluate it, so one response and the
+    # pool are resident instead of all 24 rotated responses and their padded copies.
+    # The pooling operations and their order are those of ``_pool``.
+    count = len(orientations)
+    mean_scale = _mean_scale(count)
+    state: _MeanState | None = None
+    pooled: mx.array | None = None
     for orientation in orientations:
         kernel = _kernel_from_vectors(orientation)
-        if image.ndim == 2:
-            responses.append(convolve_nd(image, kernel, padding, constant))
-        elif len(vectors) == 2:
-            responses.append(convolve_planes(image, kernel, padding, constant))
+        if image.ndim == 3 and len(vectors) == 2:
+            response = convolve_planes(image, kernel, padding, constant)
         else:
-            responses.append(convolve_nd(image, kernel, padding, constant))
-    return _pool(responses, pooling)
+            response = convolve_nd(image, kernel, padding, constant)
+        if pooling is OrientationPooling.AVERAGE:
+            state = _mean_add(state, response, mean_scale)
+            evaluate(*state)
+            continue
+        if pooled is None:
+            pooled = response
+        elif pooling is OrientationPooling.MAX:
+            pooled = mx.maximum(pooled, response)
+        elif pooling is OrientationPooling.MIN:
+            pooled = mx.minimum(pooled, response)
+        else:
+            raise ValueError(f"unsupported orientation pooling: {pooling}")
+        evaluate(pooled)
+    if state is not None:
+        return _mean_finish(state, count, mean_scale)
+    assert pooled is not None
+    return pooled
 
 
 def laws_energy(
