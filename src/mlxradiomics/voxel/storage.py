@@ -43,8 +43,8 @@ class VoxelMapStore:
         needed = dense_bytes + self.spooled_bytes + additional
         if self.max_temporary_bytes is not None and needed > self.max_temporary_bytes:
             raise ValueError(
-                f"voxel export temporary storage needs {needed} bytes, exceeding "
-                f"the temporary budget of {self.max_temporary_bytes} bytes"
+                f"voxel export scratch needs {needed} bytes, exceeding "
+                f"the max_scratch_mib budget of {self.max_temporary_bytes} bytes"
             )
         # The dense file is sparse until maps are expanded; reserve its full logical size.
         if (dense_bytes + additional + self.reserve_free_bytes
@@ -161,7 +161,8 @@ def voxel_map_store(
     directory = (Path(temporary_dir).expanduser() if temporary_dir is not None
                  else Path(gettempdir()))
     if not directory.is_dir():
-        raise ValueError(f"temporary_dir must be an existing directory: {directory}")
+        # Name the public option: run, export, export_files and run_study pass scratch_dir.
+        raise ValueError(f"scratch_dir must be an existing directory: {directory}")
     with ExitStack() as resources:
         spool = resources.enter_context(TemporaryFile(dir=directory))
         dense = resources.enter_context(TemporaryFile(dir=directory))

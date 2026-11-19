@@ -140,7 +140,7 @@ def test_scratch_budget_rejects_a_batch_before_partial_append(tmp_path: Path) ->
     # 80-byte dense image + 8-byte block header + four (8-byte flat index, 4-byte value) rows.
     with voxel_map_store((4, 5), ("mean",), temporary_dir=tmp_path,
                          max_temporary_bytes=135) as store:
-        with pytest.raises(ValueError, match="temporary.*budget"):
+        with pytest.raises(ValueError, match="max_scratch_mib budget"):
             store.append(np.array([[0, 0], [1, 1], [2, 2], [3, 3]], dtype=np.int32),
                          {"mean": np.arange(4, dtype=np.float32)})
         # Rejection leaves the store usable for a smaller batch, with no rejected values.
