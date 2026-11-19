@@ -117,6 +117,15 @@ def test_array_file_and_streamed_features_share_values_and_preserve_geometry(
         assert streamed.metadata["feature_validity"][name]["finite"] == 4
 
 
+def test_array_spacing_refuses_numpy_scalars_that_the_json_report_cannot_hold() -> None:
+    # np.float32 spacing ran the extraction and then failed in the JSON run report.
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
+    single = cast(float, np.float32(1.0))
+    with pytest.raises(ValueError, match="spacing values"):
+        extract(image, mask, settings=Settings(features=("firstorder_Mean",)),
+                spacing=(single, single))
+
+
 def test_invalid_mode_and_roi_sink_are_rejected_before_file_io(tmp_path: Path) -> None:
     image, mask = tmp_path / "absent-image.nii.gz", tmp_path / "absent-mask.nii.gz"
     invalid_mode = cast(Literal["roi", "voxel"], "volume")

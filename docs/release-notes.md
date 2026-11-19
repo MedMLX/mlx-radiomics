@@ -55,6 +55,13 @@ area densities returned `+inf` for single-slice and other rank-deficient ROIs. B
 are undefined values: they are now NaN, counted as `nan` in `feature_validity`, and
 the other features of the extraction are computed as before.
 
+**NumPy scalars in spacing and mask threshold are refused before extraction.**
+`ImageSettings.resampled_spacing`, `IbsiInterpolation.spacing` and `mask_threshold`,
+and the `spacing` argument of `extract`, accepted values such as `np.float32`. The
+extraction ran, and writing the run report then failed with `cannot serialize value
+of type float32`. They now raise `ValueError` naming the field; Python numbers and
+`np.float64` work as before.
+
 ### Lower memory
 
 Figures are from an M1 Max and a 512×512×99 CT with a 715,158-voxel liver mask.

@@ -768,6 +768,20 @@ def test_ibsi_mask_threshold_includes_exactly_covered_voxels(
     np.testing.assert_array_equal(pair.mask.array, expected)
 
 
+def test_spatial_settings_refuse_numpy_scalars_that_json_reports_cannot_hold() -> None:
+    # np.float32 is neither int nor float, so it passed validation, ran the extraction and
+    # then failed in the JSON report; np.float64 is a float and stays accepted.
+    single = cast(float, np.float32(2.0))
+    with pytest.raises(ValueError, match="resampled_spacing"):
+        ImageSettings(resampled_spacing=(single, single, single))
+    with pytest.raises(ValueError, match="spacing"):
+        IbsiInterpolation(spacing=(single, single, single))
+    with pytest.raises(ValueError, match="mask_threshold"):
+        IbsiInterpolation(spacing=(1.0, 1.0), mask_threshold=cast(float, np.float32(0.5)))
+    double = cast(float, np.float64(2.0))
+    ImageSettings(resampled_spacing=(double, double, double))
+
+
 def test_ibsi_mask_extrapolation_zero_excludes_centers_beyond_source_centers(
     tmp_path: Path,
 ) -> None:

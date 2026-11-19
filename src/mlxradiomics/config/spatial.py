@@ -13,6 +13,16 @@ class Interpolator(StrEnum):
     BSPLINE = "bspline"
 
 
+def _is_json_number(value: object) -> bool:
+    """Whether ``value`` is a Python number or ``np.float64``.
+
+    Other NumPy scalars (``np.float32``, ``np.int64``) are not ``int`` or ``float``
+    instances and cannot be written to the JSON run report, which would otherwise fail
+    only after the extraction has run.
+    """
+    return isinstance(value, int | float)
+
+
 @dataclass(frozen=True)
 class IbsiInterpolation:
     """Explicit IBSI interpolation settings for the file-based extraction and export workflows.
@@ -55,6 +65,10 @@ class IbsiInterpolation:
         """Reject invalid spacing, threshold, rounding or image interpolator values."""
         if type(self.round_intensities) is not bool:
             raise ValueError("round_intensities must be boolean")
+        if not all(_is_json_number(value) for value in self.spacing):
+            raise ValueError("IBSI spacing values must be Python or float64 numbers")
+        if not _is_json_number(self.mask_threshold):
+            raise ValueError("mask_threshold must be a Python or float64 number")
         if len(self.spacing) not in (2, 3) or any(
             not isfinite(value) or value < 0 for value in self.spacing
         ):
@@ -102,6 +116,10 @@ class ImageSettings:
             raise ValueError("correct_mask must be boolean")
         if type(self.pad_distance) is not int or self.pad_distance < 0:
             raise ValueError("pad_distance must be a nonnegative integer")
+        if self.resampled_spacing is not None and not all(
+            _is_json_number(v) for v in self.resampled_spacing
+        ):
+            raise ValueError("resampled_spacing values must be Python or float64 numbers")
         if self.resampled_spacing is not None and (
             len(self.resampled_spacing) not in (2, 3)
             or any(not isfinite(v) or v < 0 for v in self.resampled_spacing)
