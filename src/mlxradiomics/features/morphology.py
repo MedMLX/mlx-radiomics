@@ -95,13 +95,14 @@ def _sum_parts(high: mx.array, low: mx.array) -> mx.array:
 
 
 def _resolved_total(
-    high: mx.array, low: mx.array, error: mx.array, *, allow_zero: bool = False,
+    high: mx.array, low: mx.array, error: mx.array,
 ) -> mx.array:
     """Compensate signed cancellation and qualify the remaining representation error.
 
-    An integral may be zero; a centroid denominator may not. The sum has the same
-    compensated float32 arithmetic contract as first-order Mean. Source-pair error
-    must be below 2**-20 of a nonzero total, or exactly zero for a zero integral.
+    The sum has the same compensated float32 arithmetic contract as first-order Mean.
+    Source-pair error must be below 2**-20 of a nonzero total, or exactly zero for a
+    zero total. Callers decide what a zero total means: an integral keeps it, a
+    centroid denominator makes the centroid undefined.
     """
     total = _sum_parts(high, low)
     bound = 2 * mx.sum(error)
@@ -110,10 +111,6 @@ def _resolved_total(
     source_error = float(cast(float, bound.item()))
     if source_error > abs(value) * 2**-20:
         raise RuntimeError("intensity morphology total intensity is too ill-conditioned to resolve")
-    # An exactly represented total of zero is resolved, so the centroid is undefined
-    # rather than imprecise.
-    if value == 0 and not allow_zero:
-        raise RuntimeError("intensity-weighted centroid is undefined for zero total intensity")
     return total
 
 
@@ -150,13 +147,15 @@ def _centroid_shift(
     values = source.values
     weight_scale = float(np.max(np.abs(values)))
     if weight_scale == 0:
-        raise RuntimeError("intensity-weighted centroid is undefined for zero intensity")
+        return mx.array(float("nan"), dtype=mx.float32)
     # Constant nonzero weights cancel from the centroid ratio exactly, including
     # constants whose binary64 value cannot be represented by two float32 words.
     scaled = (np.ones_like(values) if np.all(values == values[0]) else
               np.ldexp(values, -frexp(weight_scale)[1]))
     weights, residual_weights, source_error = _source_parts(scaled)
     denominator = _resolved_total(weights, residual_weights, source_error)
+    if float(cast(float, denominator.item())) == 0:
+        return mx.array(float("nan"), dtype=mx.float32)
     products = mx.concatenate(
         [numerators * weights[:, None], numerators * residual_weights[:, None]], axis=0,
     )
@@ -205,7 +204,7 @@ def _integrated_intensity(
         return mx.array(0, dtype=mx.float32)
     _, exponent = frexp(scale)
     high, low, error = _source_parts(np.ldexp(values, -exponent))
-    mean = _resolved_total(high, low, error, allow_zero=True) / float(values.size)
+    mean = _resolved_total(high, low, error) / float(values.size)
     result = scale_pow2(
         geometry.enclosed_norm * mean, geometry.enclosed_exponent + exponent,
     )
@@ -446,14 +445,15 @@ def morphology_statistics(
     Returns:
         ``shape_<Name>`` keys mapped to float32 arrays of shape ``(1,)``. Moran's I and
         Geary's C are NaN for a constant intensity ROI or fewer than two intensity-mask
-        voxels, where their weighted variance denominator is zero.
+        voxels, where their weighted variance denominator is zero. The center-of-mass
+        shift is NaN when the intensities sum to exactly zero.
 
     Raises:
         ValueError: If shapes, dimensions, spacing, or feature names are invalid, a
             required mask is empty, or Moran's I or Geary's C is requested for more than
             :data:`MAX_PAIRWISE_VOXELS` intensity-mask voxels.
-        RuntimeError: If the intensity-weighted centroid is undefined or a computed
-            center-of-mass shift exceeds or underflows float32.
+        RuntimeError: If intensity sources or a computed center-of-mass shift cannot be
+            resolved, or the shift exceeds or underflows float32.
     """
     requested = frozenset(features)
     unsupported = requested - _SUPPORTED

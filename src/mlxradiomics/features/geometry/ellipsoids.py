@@ -683,6 +683,8 @@ def enclosing_densities(
     ``volume`` and ``area`` are in units where the largest spacing is one. Their physical
     size is restored from the exact binary decomposition of that scale, so a
     representable density does not require an intermediate cubed or squared spacing.
+    A zero enclosing volume or area (a rank-deficient point set) leaves the density
+    undefined, which is NaN.
     """
     scale, power = frexp(physical_scale)
     volume_density = scale_pow2(
@@ -694,8 +696,8 @@ def enclosing_densities(
         geometry.boundary_exponent - 2 * power,
     )
     return (
-        mx.where(volume > 0, volume_density, float("inf")),
-        mx.where(area > 0, area_density, float("inf")),
+        mx.where(volume > 0, volume_density, float("nan")),
+        mx.where(area > 0, area_density, float("nan")),
     )
 
 

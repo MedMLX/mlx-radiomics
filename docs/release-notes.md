@@ -48,6 +48,13 @@ buffer above `scratch_mib` raised `MemoryError` out of `run_study`, which ended 
 study and lost the outcomes of the cases already finished. The case is now recorded
 as failed, and `run` raises `ModelExecutionError`.
 
+**Undefined `CentreOfMassShift` and enclosing-ellipsoid densities are NaN.**
+`shape_CentreOfMassShift` raised, ending the whole extraction, when the ROI
+intensities summed to exactly zero. The approximate enclosing ellipsoid volume and
+area densities returned `+inf` for single-slice and other rank-deficient ROIs. Both
+are undefined values: they are now NaN, counted as `nan` in `feature_validity`, and
+the other features of the extraction are computed as before.
+
 ### Lower memory
 
 Figures are from an M1 Max and a 512×512×99 CT with a 715,158-voxel liver mask.

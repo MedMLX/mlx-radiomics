@@ -88,6 +88,22 @@ def test_disconnected_2d_mesh_area_is_additive(separation: int) -> None:
     assert result.features["original_shape2D_MeshSurface"] == pytest.approx(0.977**2, rel=1e-6)
 
 
+def test_single_slice_roi_has_undefined_enclosing_ellipsoid_densities() -> None:
+    # A single slice has a zero least covariance eigenvalue, so the approximate
+    # enclosing ellipsoid has zero volume and the density is undefined, not infinite.
+    ct, liver, _ = hcc_crop((slice(100, 300), slice(150, 350), slice(25, 55)))
+    mask = np.zeros(liver.shape, np.uint8)
+    mask[:, :, 10] = liver[:, :, 10]
+    names = ("VolumeDensityApproximateEnclosingEllipsoid", "MeshVolume")
+    settings = settings_for("pyradiomics", features=tuple(f"shape_{name}" for name in names))
+    result = extract(ct.astype(np.float32), mask, settings=settings,
+                     spacing=(0.859375, 0.859375, 2.5))
+    name = "original_shape_VolumeDensityApproximateEnclosingEllipsoid"
+    assert np.isnan(np.asarray(result.features[name], dtype=np.float64)).all()
+    assert result.metadata["feature_validity"][name]["nan"] == 1
+    assert np.isfinite(np.asarray(result.features["original_shape_MeshVolume"])).all()
+
+
 @pytest.mark.parametrize("scale", [0.01, 1.0, 100.0])
 def test_collinear_population_has_zero_transverse_axes(scale: float) -> None:
     mask = np.zeros((4, 4, 4), np.uint8)
