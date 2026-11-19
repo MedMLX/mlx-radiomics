@@ -1,5 +1,93 @@
 # Release notes
 
+## Unreleased
+
+### Fixes
+
+**Incomplete and damaged NIfTI files are refused.** A NIfTI image or mask that ends
+before the voxel data its header declares, or whose gzip stream is cut off or fails its
+checksum, now raises `ValueError`. Such files were read without an error: a mask cut off
+half-way loaded with the missing part empty, so features described a smaller ROI.
+Uncompressed NIfTI and raw NRRD carry no checksum, so a changed byte that keeps the
+file length is still not detectable there.
+
+**An empty `featureClass` list is refused.** `firstorder: []` in a parameter file
+dropped the whole class without an error, while PyRadiomics reads it as every feature
+of the class. It now raises like a missing list: name the features explicitly.
+
+**Repeated keys in a parameter file are refused.** A second `setting:` section or a
+repeated `binWidth` silently replaced the first. The error names the key and its line.
+
+**NumPy numbers in `Settings` get an accurate error.** `bin_width=np.float64(25)` or
+`label=np.int64(1)` reported a range error such as "must be finite and positive". The
+error now names the field and asks for a Python number.
+
+**Scratch errors name the 1.1.0 options.** A `scratch_dir` that is not a directory and a
+voxel export over the `max_scratch_mib` cap now report `scratch_dir` and
+`max_scratch_mib` instead of the retired `temporary_dir` and "temporary budget". A
+`scratch_dir` that does not exist raises `InvalidInputError` naming the option.
+
+**NGTDM `Contrast` no longer overflows from 46,342 occupied gray levels.** The
+level-pair count `Ng (Ng - 1)` wrapped in int32, and the feature came out about two
+billion times too large (3.58e8 for 0.1667). Only very fine binning reaches that
+many levels.
+
+**Texture variances square exactly.** `GrayLevelVariance`, `RunVariance`,
+`ZoneVariance`, `DependenceVariance`, `ZoneDistanceVariance` and the fine-binned
+GLCM `DifferenceVariance` squared deviations with a float32 power that some Apple
+GPUs do not round correctly; they now multiply. On an M1 Max these features change
+by at most 3.3e-7 relative in ROI values and voxel maps. No other feature changes.
+
+**A voxel-map export raises when a scratch write fails.** A write that failed
+part-way, as on a full disk, was not reported. If space returned during the run,
+the exported maps held values at wrong voxels; otherwise the export failed at the
+end with an unrelated shape error. The failed write now raises `OSError`.
+
+**`run_study` continues past an ROI over the working-memory budget.** An ROI count
+buffer above `scratch_mib` raised `MemoryError` out of `run_study`, which ended the
+study and lost the outcomes of the cases already finished. The case is now recorded
+as failed, and `run` raises `ModelExecutionError`.
+
+### Lower memory
+
+Figures are from an M1 Max and a 512×512×99 CT with a 715,158-voxel liver mask.
+Feature values are unchanged apart from the variances above.
+
+**Texture matrices of a large ROI.** GLSZM, GLDZM and fine-binned GLCM sorted every
+voxel of the ROI window instead of the cells that are counted. The default features
+of the liver peak at 153 MiB of MLX memory instead of 416 MiB.
+
+**Recursive LoG.** Each pass writes two image-sized buffers instead of five and
+filters along its axis without a transposed copy. LoG at 3 mm peaks at 693 MB of MLX
+memory instead of 2,079 MB and takes 146 ms instead of 517 ms.
+
+**Laws with orientation pooling.** Rotated responses are pooled as they are computed
+instead of all 24 being held. 3D `E5L5S5` with `max` pooling peaks at 5.8 GB of MLX
+memory instead of 20.4 GB.
+
+**Shape.** The mesh triangulates only cells on the boundary, and oriented bounding
+box projections are evaluated in bounded groups. The geometric shape features of the
+liver add 459 MB to the process footprint instead of 724 MB.
+
+**Whole-image normalization holds one working copy.** Loading a 512×512×99 CT with
+`normalize=True` peaked at 840 MiB and now peaks at 638 MiB on an M1 Max, with
+identical values.
+
+**Reading compressible NIfTI images no longer accumulates memory.** Each read of a
+gzip-compressed float image with a zero background left about 20 MiB behind: eight
+reads of a liver-only float32 CT raised the process peak from 309 to 456 MiB. The
+validation pass now reads 1 MiB blocks and the peak stays at 264 MiB.
+
+### Faster
+
+**Diameters of large meshes.** A mesh of 32,768 or more vertices searches only the
+vertices that can reach a maximum, and returns the same four diameters bit for bit.
+The liver mesh (491,776 vertices) takes 168 ms instead of 367 ms on an M1 Max.
+
+**Voxel-map planning scans the ROI bounding box instead of the whole grid.**
+First-order maps of an 18,114-voxel tumor in the same CT take 196 ms instead of
+311 ms.
+
 ## 1.1.0
 
 ### Breaking changes
@@ -18,8 +106,8 @@
 **`temporary_dir` and `max_temporary_mib` are now `scratch_dir` and `max_scratch_mib`** in `run`, `export`, `export_files` and `run_study`.
 
 ```diff
--export_files(..., voxel=True, temporary_dir="/Volumes/fast", max_temporary_mib=4096)
-+export_files(..., voxel=True, scratch_dir="/Volumes/fast", max_scratch_mib=4096)
+-export_files(..., temporary_dir="/Volumes/fast", max_temporary_mib=4096)
++export_files(..., scratch_dir="/Volumes/fast", max_scratch_mib=4096)
 ```
 
 **Requires `medmlx-core>=0.3,<0.4`** (1.0.1 required `>=0.2.6,<0.3`).
