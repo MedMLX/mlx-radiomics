@@ -519,6 +519,42 @@ def test_file_reader_rejects_nonfinite_source_voxels(
         read_image(path)
 
 
+@pytest.mark.parametrize(
+    "suffix,damage,message",
+    [
+        (".nii", "cut", "bytes its header declares"),
+        (".nii.gz", "cut", "damaged gzip stream"),
+        (".nii.gz", "overwrite", "damaged gzip stream"),
+    ],
+)
+def test_file_readers_reject_incomplete_or_damaged_nifti(
+    tmp_path: Path, suffix: str, damage: str, message: str,
+) -> None:
+    # SimpleITK returns voxels from each of these files without an error, so a cut-off
+    # mask would silently shrink the ROI. Integer CT storage needs no value scan and
+    # must still be read to the end of its gzip stream.
+    values, labels, _ = hcc_crop(np.s_[96:160, 192:256, 40:72])
+    cases = [("image", sitk.GetImageFromArray(values.astype(np.int16)), read_image)]
+    if damage == "cut":
+        # Changed bytes inside a long run of equal labels can decode unchanged, so the
+        # mask is only cut.
+        cases.append(("mask", sitk.GetImageFromArray(labels), read_mask))
+    for name, source, reader in cases:
+        path = tmp_path / f"{name}{suffix}"
+        sitk.WriteImage(source, path)
+        data = bytearray(path.read_bytes())
+        if damage == "cut":
+            del data[len(data) * 3 // 4:]
+        else:
+            # Past the part SimpleITK decodes to recognize the file, where it reads on
+            # without an error.
+            late = len(data) * 3 // 4
+            data[late:late + 16] = bytes(value ^ 0xFF for value in data[late:late + 16])
+        path.write_bytes(data)
+        with pytest.raises(ValueError, match=message):
+            reader(path)
+
+
 @pytest.mark.parametrize("kind", ["floating_mask", "vector_image", "four_dimensions"])
 def test_file_readers_reject_unsupported_pixel_contracts(tmp_path: Path, kind: str) -> None:
     if kind == "floating_mask":
