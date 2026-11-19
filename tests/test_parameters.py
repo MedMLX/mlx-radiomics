@@ -85,6 +85,8 @@ def _geometry(result: RunResult) -> tuple[dict[str, object], dict[str, object]]:
         ("bad_interpolator", {"setting": {"interpolator": "cubic"}}),
         ("unknown_lbp_method", {"setting": {"lbp2DMethod": "nope"}}),
         ("bad_spacing_length", {"setting": {"resampledPixelSpacing": [1.0, 1.0]}}),
+        # PyRadiomics reads an empty list as the whole class; it must not drop the class.
+        ("empty_feature_list", {"featureClass": {"firstorder": [], "glcm": ["Contrast"]}}),
     ],
 )
 def test_parameter_files_reject_unsupported_controls(
@@ -288,6 +290,21 @@ def test_malformed_params_yaml_is_a_value_error_with_parser_context(tmp_path: Pa
     with pytest.raises(ValueError, match="invalid params YAML") as error:
         load_params(params)
     assert "line 1" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "text,key",
+    [
+        ("setting:\n  binWidth: 25\n  label: 1\n  binWidth: 5\n", "binWidth"),
+        ("setting:\n  resampledPixelSpacing: [1, 1, 1]\nsetting:\n  label: 2\n", "setting"),
+    ],
+)
+def test_params_yaml_refuses_repeated_keys(tmp_path: Path, text: str, key: str) -> None:
+    # yaml.safe_load keeps the last value, which would silently drop the first setting.
+    params = tmp_path / "params.yaml"
+    params.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"key '{key}' is repeated"):
+        load_params(params)
 
 
 @pytest.mark.parametrize(
