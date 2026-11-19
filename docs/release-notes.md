@@ -55,6 +55,18 @@ area densities returned `+inf` for single-slice and other rank-deficient ROIs. B
 are undefined values: they are now NaN, counted as `nan` in `feature_validity`, and
 the other features of the extraction are computed as before.
 
+**LBP3D accepts ordinary integer CT and MR ROIs.** It raised "rounding threshold is
+ambiguous" on most CT ROIs above about a thousand voxels. Interpolated samples
+within float32 uncertainty of a rounding threshold, bounded from the spline
+coefficients in each sample's support, are now evaluated in float64 on the CPU with
+SciPy and rounded as PyRadiomics does: about 2% of samples on a CT liver and tumor.
+Codes, band norms and kurtosis match PyRadiomics' arithmetic on the liver, the
+tumor and 28 cubes from liver CT, lung CT and hippocampus MR. On ROIs that were
+accepted before, kurtosis moves by up to 2e-3 at a few voxels, toward the
+reference. The 715,158-voxel liver takes under 1 s on an M1 Max with 61 MB of host
+memory for the float64 coefficients. An exact tie in float64 still raises
+`ValueError`, and floating-point images keep their previous check.
+
 **NumPy scalars in spacing and mask threshold are refused before extraction.**
 `ImageSettings.resampled_spacing`, `IbsiInterpolation.spacing` and `mask_threshold`,
 and the `spacing` argument of `extract`, accepted values such as `np.float32`. The

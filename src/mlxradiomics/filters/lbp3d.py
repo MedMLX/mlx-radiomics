@@ -12,7 +12,11 @@ from numpy.typing import NDArray
 from mlxradiomics.numerics.protocols import IndexedAddition
 from mlxradiomics.numerics.reduction import sum_rows
 from mlxradiomics.numerics.runtime import evaluate, mx
-from mlxradiomics.numerics.spline import cubic_samples, spline_coefficients
+from mlxradiomics.numerics.spline import (
+    cubic_samples,
+    cubic_samples_with_scale,
+    spline_coefficients,
+)
 
 if TYPE_CHECKING:
     from mlxradiomics.config.transforms import TransformSettings
@@ -53,6 +57,83 @@ def _sphere_coefficients(
     # higher-degree integrals and nonconstant patterns retain quadrature error.
     areas = SphericalVoronoi(vertices / radius, radius=1.0).calculate_areas()
     return vertices, harmonics, areas
+
+
+_TIE_TOLERANCE = 1e-9
+_SPLINE_SUPPORT = 32
+# Float32 sample roundoff is bounded by _BOUND_FACTOR * eps32 * sum(|weight * coefficient|) *
+# (1 + largest coordinate): the prefilter and the 4x4x4 sum contribute error proportional to the
+# coefficient magnitude, and rounding the float32 coordinate center + offset contributes the
+# gradient (also proportional to that magnitude) times eps32 times the coordinate. The factor
+# was set from the largest measured ratio of true error to eps32 * scale * (1 + coordinate)
+# over the HCC liver and tumor and 28 cubes (1.13), with a margin of 3.5.
+_BOUND_FACTOR = 4.0
+_EPS32 = 1.1920928955078125e-07
+
+
+def _host_spline(
+    image: mx.array, coordinates: NDArray[np.int32], reach: float
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Float64 cubic B-spline coefficients of the ROI bounding box plus a margin.
+
+    The margin is ``_SPLINE_SUPPORT`` voxels beyond the farthest sample (``reach`` voxels from a
+    center). The prefilter's influence decays by 0.268 per voxel, so the box reproduces the
+    whole-volume float64 spline to about 1e-14 relative; a box edge that is the volume edge keeps
+    the mirror boundary. Returns the coefficients and the box origin in volume coordinates.
+    """
+    try:
+        from scipy.ndimage import spline_filter
+    except ImportError as error:
+        raise ImportError("LBP3D coefficient generation requires mlxradiomics[lbp]") from error
+    margin = _SPLINE_SUPPORT + int(np.ceil(reach))
+    low = np.maximum(coordinates.min(axis=0).astype(np.int64) - margin, 0)
+    high = np.minimum(coordinates.max(axis=0).astype(np.int64) + margin + 1, image.shape)
+    crop = np.asarray(
+        image[tuple(slice(int(a), int(b)) for a, b in zip(low, high, strict=True))],
+        dtype=np.float64,
+    )
+    # SciPy's map_coordinates prefilters mode="constant" with the mirror boundary.
+    return np.asarray(spline_filter(crop, order=3, mode="mirror", output=np.float64)), low
+
+
+def _rounded_samples_float64(
+    spline: tuple[NDArray[np.float64], NDArray[np.int64]],
+    centers: NDArray[np.int32],
+    vertices: NDArray[np.float64],
+    rows: NDArray[np.intp],
+    columns: NDArray[np.intp],
+    limits: tuple[int, int],
+) -> NDArray[np.float32]:
+    """Rounded float64 spline samples for the float32-ambiguous ``(row, vertex)`` pairs.
+
+    Evaluates PyRadiomics' arithmetic (SciPy ``map_coordinates``, order 3, float64) on the
+    prefiltered ``spline`` from ``_host_spline``. Values are rounded half away from zero and
+    clipped to ``limits``, exactly as the integer sampler does.
+
+    Raises:
+        ValueError: If a sample lies within ``_TIE_TOLERANCE`` of a half-integer, where
+            float64 roundoff cannot decide the rounded value either.
+    """
+    try:
+        from scipy.ndimage import map_coordinates
+    except ImportError as error:
+        raise ImportError("LBP3D coefficient generation requires mlxradiomics[lbp]") from error
+    coefficients, low = spline
+    exact = np.empty(len(rows), dtype=np.float32)
+    for start in range(0, len(rows), 1 << 20):
+        part = slice(start, start + (1 << 20))
+        points = centers[rows[part]] - low + vertices[columns[part]]
+        values = np.asarray(
+            map_coordinates(coefficients, points.T, order=3, mode="constant", prefilter=False),
+            dtype=np.float64,
+        )
+        if np.any(np.abs(values - (np.floor(values) + 0.5)) <= _TIE_TOLERANCE):
+            raise ValueError(
+                "LBP3D integer rounding threshold is tied in float64 precision; "
+                "its binary code is undecidable"
+            )
+        exact[part] = np.clip(np.sign(values) * np.floor(np.abs(values) + 0.5), *limits)
+    return exact
 
 
 def _scatter(values: mx.array, centers: mx.array, shape: tuple[int, ...]) -> mx.array:
@@ -98,7 +179,10 @@ def lbp3d_images(
         options: Supplies the levels, radius, icosphere subdivision and scratch budget.
         source_dtype: dtype of the original image. Integer types round the interpolated
             samples to the nearest integer (halves away from zero) and clip them to the
-            dtype range; floating types are checked for ambiguous thresholds (below).
+            dtype range. Samples within the float32 roundoff bound (``_BOUND_FACTOR * eps32 *
+            sum(|weight * coefficient|) * (1 + coordinate)``) of a half-integer are
+            re-evaluated on the CPU with SciPy in float64 (on the order of 2% of CT samples);
+            floating types are checked for ambiguous thresholds (below).
         source_residual: Float32 source-minus-image residual, required to recognize a
             constant float64 source when distinct values could collapse on upload.
 
@@ -110,8 +194,9 @@ def lbp3d_images(
             sample is not finite (floating images at or above ``2**120`` are first
             rescaled by an exact power of two, which preserves every output), an integer
             dtype is too wide to be exact in float32 (anything beyond 8/16-bit), an
-            integer sample lies within the same roundoff bound of its center's rounding
-            threshold ``center - 0.5`` (exact spline ties cannot be certified there), or a
+            integer sample is within 1e-9 of a rounding threshold (a half-integer) in float64
+            (an exact spline tie; samples near a threshold at float32 precision are
+            re-evaluated in float64 on the host), or a
             nonconstant floating-point image has a sample within
             ``64 * float32_eps * max(|sample|, |center|, 1)`` of its center, where float32
             spline roundoff could change the bit. A constant floating-point image is
@@ -162,9 +247,14 @@ def lbp3d_images(
             or bool(mx.all(source_residual == mx.reshape(source_residual, (-1,))[0]).item())
         )
     )
+    reach = float(np.max(np.linalg.norm(vertices, axis=1)))
+    host_spline: tuple[NDArray[np.float64], NDArray[np.int64]] | None = None
     for start in range(0, len(coordinates), batch_size):
         chunk = centers[start : start + batch_size]
-        samples = cubic_samples(coefficients, chunk, offsets)
+        if source_dtype.kind in "iu":
+            samples, scale = cubic_samples_with_scale(coefficients, chunk, offsets)
+        else:
+            samples, scale = cubic_samples(coefficients, chunk, offsets), None
         original = mx.take(mx.reshape(image, (-1,)), mx.sum(chunk * strides, axis=1))
         # NaN compares false against the center, which would encode a legitimate
         # all-clear bit pattern; invalid interpolation must stop before any decision.
@@ -184,20 +274,26 @@ def lbp3d_images(
                 limits = np.iinfo(source_dtype.name)
                 if max(abs(int(limits.min)), abs(int(limits.max))) > 2**24:
                     raise ValueError("LBP3D integer dtype exceeds exact float32 integer range")
-                # With an integer center c, the rounded sample's bit flips exactly at
-                # c - 0.5. Exact spline ties there (for example a 0/1 checkerboard at
-                # half-voxel radius) land on either side under float32 roundoff, so a
-                # sample within the roundoff bound of that threshold is refused rather
-                # than snapped: an epsilon would misclassify genuinely lower samples.
-                threshold_margin = mx.abs(samples - (original[:, None] - 0.5))
-                threshold_bound = 64 * 1.1920928955078125e-7 * mx.maximum(
-                    mx.maximum(mx.abs(samples), mx.abs(original[:, None])), 1,
-                )
-                if bool(mx.any(threshold_margin <= threshold_bound).item()):
-                    raise ValueError(
-                        "LBP3D integer rounding threshold is ambiguous at float32 "
-                        "precision; spline roundoff can change its binary code"
+                # The rounded sample, which feeds both the bit (it flips at c - 0.5 for an
+                # integer center c) and the kurtosis, changes at every half-integer. Samples
+                # within the float32 roundoff bound of one are evaluated in float64 on the
+                # host and replaced by their rounded integer value; every other sample keeps
+                # its float32 value, which rounds identically.
+                threshold_margin = mx.abs(samples - (mx.floor(samples) + 0.5))
+                coordinate = mx.max(chunk, axis=1, keepdims=True) + reach
+                threshold_bound = _BOUND_FACTOR * _EPS32 * cast(mx.array, scale) * (1 + coordinate)
+                ambiguous = threshold_margin <= threshold_bound
+                if bool(mx.any(ambiguous).item()):
+                    rows, columns = np.nonzero(np.asarray(ambiguous, dtype=np.bool_))
+                    if host_spline is None:
+                        host_spline = _host_spline(image, coordinates, reach)
+                    exact = _rounded_samples_float64(
+                        host_spline, coordinates[start : start + batch_size], vertices,
+                        rows, columns, (int(limits.min), int(limits.max)),
                     )
+                    flat = mx.reshape(samples, (-1,))
+                    flat[mx.array(rows * samples.shape[1] + columns)] = mx.array(exact)
+                    samples = mx.reshape(flat, samples.shape)
                 samples = mx.clip(
                     mx.sign(samples) * mx.floor(mx.abs(samples) + 0.5),
                     int(limits.min), int(limits.max),

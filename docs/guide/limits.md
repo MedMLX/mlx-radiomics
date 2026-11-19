@@ -7,9 +7,11 @@ needs at least two ROI voxels.
 
 **Filters.** The default recursive LoG needs 3D input with at least four samples
 per axis and sigma/spacing at most 200. LBP3D needs 3D input, a masked kernel and
-8- or 16-bit integer images. It raises `ValueError` when an interpolated sample
-lies too close to its rounding threshold to resolve in float32, which on CT
-affects most ROIs above about a thousand voxels.
+8- or 16-bit integer images. Samples within float32 uncertainty of a rounding
+threshold (about 2% of CT samples, in 56% of ROI voxels) are evaluated in float64 on
+the CPU with SciPy. It raises `ValueError` only for an exact tie in float64
+(within 1e-9 of a half-integer) and for floating-point images with a sample too
+close to its center.
 
 **Simoncelli and Riesz are unavailable.** Both filters need MLX 0.32.5 or later,
 and this release pins MLX 0.32.4, whose batched Metal FFT can write past its

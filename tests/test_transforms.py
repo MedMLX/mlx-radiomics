@@ -204,7 +204,7 @@ def test_redundant_duplicate_transform_parameters_are_rejected() -> None:
         )
 
 
-def _lbp3d_reference(
+def lbp3d_reference(
     image: HostArray, mask: HostArray, *, levels: int, radius: float, subdivision: int
 ) -> list[NDArray[np.float64]]:
     """CPU reference for the spherical-harmonic band norms and sampled kurtosis."""
@@ -280,7 +280,7 @@ def test_lbp3d_matches_independent_spherical_projection(integer: bool) -> None:
                 source_dtype=image.dtype,
             )
         )
-    expected = _lbp3d_reference(image, mask.astype(bool), levels=levels, radius=1.0,
+    expected = lbp3d_reference(image, mask.astype(bool), levels=levels, radius=1.0,
                                 subdivision=1)
     assert [output.name for output in actual] == [
         *(f"lbp-3D-m{degree}" for degree in range(1, levels + 1)), "lbp-3D-k"
