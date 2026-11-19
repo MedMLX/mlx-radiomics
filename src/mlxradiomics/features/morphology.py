@@ -108,8 +108,12 @@ def _resolved_total(
     evaluate(total, bound)
     value = float(cast(float, total.item()))
     source_error = float(cast(float, bound.item()))
-    if source_error > abs(value) * 2**-20 or (value == 0 and not allow_zero):
+    if source_error > abs(value) * 2**-20:
         raise RuntimeError("intensity morphology total intensity is too ill-conditioned to resolve")
+    # An exactly represented total of zero is resolved, so the centroid is undefined
+    # rather than imprecise.
+    if value == 0 and not allow_zero:
+        raise RuntimeError("intensity-weighted centroid is undefined for zero total intensity")
     return total
 
 

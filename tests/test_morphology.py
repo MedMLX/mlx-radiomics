@@ -290,7 +290,7 @@ def test_zero_signed_mass_does_not_define_a_weighted_centroid() -> None:
     image = hcc_patch((2, 1, 1))[0]
     image -= image.mean()
     mask = np.ones(image.shape, dtype=np.bool_)
-    with pytest.raises(RuntimeError, match="total intensity is too ill-conditioned"):
+    with pytest.raises(RuntimeError, match="undefined for zero total intensity"):
         _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
 
 
