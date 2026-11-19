@@ -138,10 +138,14 @@ def ombb_measures(
     axes = mx.array(host_axes, dtype=mx.float32)
     vertices = points.shape[0]
     block = max(1, min(256, _OMBB_BLOCK_ELEMENTS // max(1, 3 * vertices)))
+    # Blocks are evaluated in groups that together hold at most the block budget of
+    # projections. Left as one lazy graph, the scheduler keeps many groups' projection
+    # blocks alive at once.
+    group = max(1, _OMBB_BLOCK_ELEMENTS // (block * 3 * vertices))
     volumes: list[mx.array] = []
     areas: list[mx.array] = []
     extent_blocks: list[mx.array] = []
-    for start in range(0, axes.shape[0], block):
+    for index, start in enumerate(range(0, axes.shape[0], block)):
         projections = mx.matmul(
             axes[start : start + block],
             mx.swapaxes(points, 0, 1),
@@ -151,6 +155,8 @@ def ombb_measures(
         volumes.append(x * y * z)
         areas.append(2 * (x * y + y * z + z * x))
         extent_blocks.append(extents)
+        if (index + 1) % group == 0:
+            evaluate(*volumes[-group:], *areas[-group:], *extent_blocks[-group:])
     volume_all = mx.concatenate(volumes)
     area_all = mx.concatenate(areas)
     extent_all = mx.concatenate(extent_blocks)
