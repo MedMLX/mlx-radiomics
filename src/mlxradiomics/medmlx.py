@@ -176,7 +176,8 @@ def run(
             geometry disagrees without correction, params are invalid, an output aliases
             a supplied input, ``voxel`` is not a boolean, or outputs exist and ``overwrite``
             is false or is not a boolean.
-        ModelExecutionError: Extraction itself failed.
+        ModelExecutionError: Extraction itself failed, including when a selected ROI count
+            buffer exceeds the working-memory budget or a host allocation fails.
     """
     return extract_case(
         LoadedCase(Path(image_path).expanduser(), Path(mask_path).expanduser()),

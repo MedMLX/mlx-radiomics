@@ -133,6 +133,27 @@ def test_study_records_source_precision_failure_and_continues(tmp_path: Path) ->
     assert (tmp_path / "out" / "case-b" / "label-1" / "features.json").is_file()
 
 
+def test_study_records_refused_count_buffer_and_continues(tmp_path: Path) -> None:
+    cases = [_case(tmp_path / "inputs", "case-a", 0), _case(tmp_path / "inputs", "case-b", 20)]
+    source = sitk.ReadImage(cases[0]["image_path"])
+    # Scaling one case's real HU contrast by 1e5 at bin width 1 needs a run-length count
+    # buffer of hundreds of MiB, above the default 64 MiB ROI budget; the other case fits.
+    values = sitk.GetArrayFromImage(source).astype(np.float64) * 1e5
+    image = sitk.GetImageFromArray(values)
+    image.CopyInformation(source)
+    sitk.WriteImage(image, cases[0]["image_path"])
+    params = {"setting": {"binWidth": 1}, "featureClass": {"glrlm": ["RunEntropy"]}}
+
+    outcomes = run_study(cases, tmp_path / "out", params=params)
+
+    assert [outcome["status"] for outcome in outcomes] == ["failed", "completed"]
+    assert outcomes[0]["error_type"] == "ModelExecutionError"
+    assert "glrlm ROI count buffer requires" in (outcomes[0]["error_message"] or "")
+    assert not list((tmp_path / "out").rglob(".mlxradiomics-*"))
+    assert not (tmp_path / "out" / "case-a" / "label-1" / "features.json").exists()
+    assert (tmp_path / "out" / "case-b" / "label-1" / "features.json").is_file()
+
+
 def test_study_propagates_programming_errors_and_cleans_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -230,7 +230,9 @@ def publish_report(
                 raise
             except ValueError as error:
                 raise InvalidInputError(str(error)) from error
-            except (RuntimeError, ImportError) as error:
+            # MemoryError covers ROI count-buffer admission refusals as well as host
+            # allocation failures; both end this extraction, not the caller's batch.
+            except (RuntimeError, ImportError, MemoryError) as error:
                 raise ModelExecutionError(f"mlxradiomics extraction failed: {error}") from error
             metadata = file_metadata(
                 result.metadata,
