@@ -72,6 +72,13 @@ memory instead of 2,079 MB and takes 146 ms instead of 517 ms.
 instead of all 24 being held. 3D `E5L5S5` with `max` pooling peaks at 5.8 GB of MLX
 memory instead of 20.4 GB.
 
+**Separable wavelets.** Each 1-D pass convolves slabs of 4,194,304 output voxels
+instead of the whole volume, passes are evaluated one at a time, and results shared
+between bands are released after the last band that uses them. One `coif1` level-1
+band peaks at 2,770 MB of MLX memory instead of 11,170 MB, and all eight bands at
+3,497 MB instead of 28,475 MB (5,120 MB instead of 26,714 MB with 24-rotation
+average pooling).
+
 **Shape.** The mesh triangulates only cells on the boundary, and oriented bounding
 box projections are evaluated in bounded groups. The geometric shape features of the
 liver add 459 MB to the process footprint instead of 724 MB.
