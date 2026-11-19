@@ -36,8 +36,9 @@ MODEL = {
     "label": "Radiomics feature extraction on Metal",
     "task": "feature-extraction",
     "run": "mlxradiomics.medmlx:run",
-    # Approximate GPU memory in GB for the default ROI features of one organ.
-    "peak_memory_gb": 0.1,
+    # Approximate GPU memory in GB for the default ROI features of one organ: a whole
+    # liver (715,158 voxels of a 512x512x99 CT) peaks at 153 MiB of MLX memory.
+    "peak_memory_gb": 0.2,
     "summary": (
         "ROI and voxel radiomics features for one image and label mask on "
         "Apple Silicon using native MLX."
