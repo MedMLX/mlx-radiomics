@@ -5,6 +5,7 @@ from collections.abc import Iterable, Iterator
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.features.glcm import glcm_statistics
 from mlxradiomics.features.sparse_glcm import sparse_glcm_statistics, use_sparse_glcm
+from mlxradiomics.features.texture import valid_cells
 from mlxradiomics.imaging.preprocessing import (
     directions,
 )
@@ -73,7 +74,7 @@ def aggregate_glcm(
     for left, right, valid in pairs:
         if use_sparse_glcm(ng):
             keys, sparse = coordinate_counts(
-                left, right, valid, ng, symmetric=settings.symmetrical_glcm,
+                *valid_cells(left, right, valid), ng, symmetric=settings.symmetrical_glcm,
             )
             values, active = sparse_glcm_statistics(
                 keys, sparse, ng, names, settings.scratch_mib,

@@ -104,6 +104,52 @@ def count_matrix(bins: mx.array, sizes: mx.array, valid: mx.array, ng: int, ns: 
     return histogram(bins, sizes, valid, ng, method="metal", columns=ns)
 
 
+def valid_cells(
+    left: mx.array, right: mx.array, valid: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Pack each row's valid int32 ``(left, right)`` pairs at the front of shorter rows.
+
+    Sparse coordinate counting sorts every entry it is given, so passing the whole ROI
+    window costs about 100 bytes per window voxel although only zone roots or valid voxel
+    pairs count. Its coalesced cells depend only on the multiset of valid pairs, so
+    packing leaves every key and count unchanged. A running count gives each valid entry
+    its own slot. Invalid entries add zero to a discarded tail of 1,024 slots, so their
+    integer atomics do not all contend on one address.
+
+    Rows shorter than 65,536 entries are returned as given. Voxel-map batches have many
+    short rows (one kernel neighborhood per voxel), where the per-row tail would cost
+    more than sorting the row whole, and their working-memory estimate assumes the
+    unpacked arrays. Inputs whose packed int32 addresses would overflow are also
+    returned as given.
+
+    Returns:
+        ``left``, ``right`` and validity, packed to ``(batch, max valid count)`` for
+        long rows.
+    """
+    spread = 1024
+    if valid.shape[1] < 65536:
+        return left, right, valid
+    counts = mx.sum(valid.astype(mx.int32), axis=1)
+    width = max(1, cast(int, mx.max(counts).item()))
+    if valid.shape[0] * (width + spread) >= 2**31:
+        return left, right, valid
+    positions = mx.arange(valid.shape[1], dtype=mx.int32)[None, :]
+    slots = mx.where(valid, mx.cumsum(valid.astype(mx.int32), axis=1) - 1,
+                     width + positions % spread)
+    rows = mx.arange(valid.shape[0], dtype=mx.int32)[:, None]
+    targets = mx.reshape(rows * (width + spread) + slots, (-1,))
+
+    def pack(values: mx.array) -> mx.array:
+        storage = mx.zeros((valid.shape[0] * (width + spread),), dtype=mx.int32)
+        packed = cast(IndexedAddition, storage.at[targets]).add(
+            mx.reshape(mx.where(valid, values.astype(mx.int32), 0), (-1,))
+        )
+        return mx.reshape(packed, (valid.shape[0], width + spread))[:, :width]
+
+    packed_valid = mx.arange(width, dtype=mx.int32)[None, :] < counts[:, None]
+    return pack(left), pack(right), packed_valid
+
+
 @lru_cache(maxsize=64)
 def _ngtdm_reduction_kernel(width: int, ng: int, chunks: int, threads: int) -> MetalKernel:
     """Reduce one row/level/tile per group, without floating-point atomics."""
@@ -560,7 +606,7 @@ def zone_statistics(
                      if name.startswith("glszm_"))
     starts = mask & (ids == labels)
     if not fixed_columns and use_sparse_size(ng, maximum_size):
-        keys, counts = coordinate_counts(bins, sizes, starts, maximum_size)
+        keys, counts = coordinate_counts(*valid_cells(bins, sizes, starts), maximum_size)
         return {f"glszm_{k}": value for k, value in sparse_size_statistics(
             keys, counts, maximum_size, "glszm", selected,
         ).items()}
