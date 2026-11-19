@@ -15,14 +15,19 @@ import numpy as np
 import pytest
 from conftest import Conventions, convention_shape_statistics, settings_for
 from numpy.typing import NDArray
-from radiomics_reference.real_images import hcc_resampled
+from radiomics_reference.real_images import hcc_crop, hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.config.settings import SHAPE, SHAPE2D, EllipsoidArea
+from mlxradiomics.features.geometry.diameters import (
+    PRUNED_DIAMETER_MIN_VERTICES,
+    diameter_maxima,
+)
 from mlxradiomics.features.geometry.ellipsoids import (
     ellipsoid_area_ibsi_series,
     ellipsoid_area_normalized,
 )
+from mlxradiomics.features.geometry.mesh import mesh_geometry
 
 MESH_FEATURES = (
     "MeshVolume", "VoxelVolume", "SurfaceArea", "SurfaceVolumeRatio", "Sphericity",
@@ -54,6 +59,24 @@ def test_cuboid_mesh_diameters_match_face_center_extrema(shape: tuple[int, int, 
     for plane, name in enumerate(names[1:]):
         axes = tuple(axis for axis in range(3) if axis != plane)
         assert values[name] == pytest.approx(diameter(axes), rel=2e-6)
+
+
+def test_large_mesh_diameters_equal_the_exhaustive_pair_search() -> None:
+    # Meshes this large search only vertices whose farthest hull vertex reaches the hull
+    # diameter. The result must equal the all-pairs search bit for bit; the crop's cut
+    # faces put many tied vertices on the hull.
+    _, liver, _ = hcc_crop((slice(100, 300), slice(150, 350), slice(25, 55)))
+    mask = liver.astype(np.bool_)
+    spacing = (0.859375, 0.859375, 2.5)
+    vertices = mesh_geometry(mask, spacing, 64).vertices
+    assert vertices.shape[0] >= PRUNED_DIAMETER_MIN_VERTICES
+    exhaustive = np.asarray(diameter_maxima(vertices, spacing, 64, 3), dtype=np.float32)
+    names = ("Maximum2DDiameterSlice", "Maximum2DDiameterColumn", "Maximum2DDiameterRow",
+             "Maximum3DDiameter")
+    computed = convention_shape_statistics("ibsi", mask, spacing, names)
+    pruned = np.concatenate([np.asarray(computed[f"shape_{name}"], dtype=np.float32)
+                             for name in names])
+    assert np.array_equal(pruned.view(np.uint32), exhaustive.view(np.uint32))
 
 
 @pytest.mark.parametrize("separation", [128, 512, 1024])

@@ -15,7 +15,10 @@ from mlxradiomics.features.geometry.arithmetic import (
     spacing_parts,
 )
 from mlxradiomics.features.geometry.boxes import ombb_measures
-from mlxradiomics.features.geometry.diameters import diameter_maxima
+from mlxradiomics.features.geometry.diameters import (
+    PRUNED_DIAMETER_MIN_VERTICES,
+    diameter_maxima,
+)
 from mlxradiomics.features.geometry.ellipsoids import (
     aee_densities,
     ellipsoid_area_normalized,
@@ -140,7 +143,10 @@ def shape_statistics(
       Maximum2DDiameterSlice, Column and Row restrict to vertex pairs sharing their axis-0,
       axis-1 and axis-2 coordinate respectively. Every unordered pair is evaluated with
       the same scale-safe component norm; larger meshes only split the pair range into
-      bounded Metal tiles whose maxima are then reduced.
+      bounded Metal tiles whose maxima are then reduced. 3-D meshes with at least
+      ``PRUNED_DIAMETER_MIN_VERTICES`` vertices skip the pairs that cannot reach a
+      maximum (``diameter_maxima`` with hull vertices) and return the same float32
+      values.
     * Axis lengths: ``4 * sqrt(eigenvalue)`` of the ROI voxel-center covariance
       (spacing applied). ``covariance_divisor="n-1"`` (default, IBSI) uses the sample
       divisor N-1 and ``"n"`` the population divisor N. A singleton has zero axes.
@@ -208,6 +214,16 @@ def shape_statistics(
     geometry = (context.get(
         include_vertices=needs_diameter or bool(requested & _HULL_GEOMETRY_FEATURES),
     ) if needs_mesh or needs_diameter else None)
+    # Large 3-D meshes find their diameters from the convex hull of the mesh vertices
+    # (see diameter_maxima); the hull densities use the same hull.
+    prune_diameters = (
+        geometry is not None and needs_diameter and ndim == 3
+        and geometry.vertices.shape[0] >= PRUNED_DIAMETER_MIN_VERTICES
+    )
+    grid_hull = None
+    if geometry is not None and (prune_diameters or requested & _HULL_FEATURES):
+        evaluate(geometry.vertices)
+        grid_hull = scipy_hull(np.asarray(geometry.vertices, dtype=np.float64))
     values: dict[str, mx.array] = {}
     if "VoxelVolume" in requested or "PixelSurface" in requested:
         count = mx.sum(array_from_bool(mask).astype(mx.int32))
@@ -287,10 +303,9 @@ def shape_statistics(
             if requested & _HULL_GEOMETRY_FEATURES:
                 evaluate(geometry.vertices)
                 grid = np.asarray(geometry.vertices, dtype=np.float64)
-                if requested & _HULL_FEATURES:
-                    hull = scipy_hull(grid)
+                if grid_hull is not None and requested & _HULL_FEATURES:
                     hull_area, hull_volume = hull_measures(
-                        hull, geometry.vertices, parts,
+                        grid_hull, geometry.vertices, parts,
                     )
                     mesh_values["VolumeDensityConvexHull"] = (
                         geometry.grid_enclosed / (6 * hull_volume)
@@ -387,7 +402,11 @@ def shape_statistics(
     if needs_diameter:
         if geometry is None:
             raise RuntimeError("diameter features require mesh boundary vertices")
-        maximum = diameter_maxima(geometry.vertices, spacing, scratch_mib, ndim)
+        maximum = diameter_maxima(
+            geometry.vertices, spacing, scratch_mib, ndim,
+            np.asarray(grid_hull.vertices, dtype=np.int32)
+            if prune_diameters and grid_hull is not None else None,
+        )
         evaluate(maximum)
         maximum_host = np.asarray(maximum, dtype=np.float32)
         if not np.all(np.isfinite(maximum_host)):

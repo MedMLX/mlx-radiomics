@@ -3,8 +3,11 @@
 from functools import lru_cache
 from typing import cast
 
+import numpy as np
+from numpy.typing import NDArray
+
 from mlxradiomics.numerics.protocols import MetalKernel
-from mlxradiomics.numerics.runtime import mx
+from mlxradiomics.numerics.runtime import evaluate, mx
 
 
 @lru_cache(maxsize=4)
@@ -158,6 +161,7 @@ def diameter_maxima(
     spacing: tuple[float, ...],
     scratch_mib: int,
     ndim: int,
+    hull_vertices: NDArray[np.int32] | None = None,
 ) -> mx.array:
     """Return the overall and per-axis maximum boundary-vertex distances on Metal.
 
@@ -165,7 +169,13 @@ def diameter_maxima(
     float32 component norm. A large mesh splits the ``q < t`` range into bounded
     tiles (``_diameter_tiling``) and reduces the per-tile maxima with a Metal max;
     the maximum of maxima selects the same float32 distance values as one pass.
+
+    With ``hull_vertices`` (3-D only, the convex-hull vertex indices of ``vertices``)
+    the same maxima are found without visiting every pair; see
+    ``_pruned_diameter_maxima``.
     """
+    if hull_vertices is not None:
+        return _pruned_diameter_maxima(vertices, spacing, scratch_mib, hull_vertices)
     vertex_count = vertices.shape[0]
     spacing_array = mx.array(spacing, dtype=mx.float32)
     tiling = _diameter_tiling(vertex_count, scratch_mib)
@@ -187,3 +197,164 @@ def diameter_maxima(
         output_dtypes=[mx.float32],
     )[0]
     return mx.max(mx.reshape(diameters, (-1, _DIAMETER_MAXIMA)), axis=0)
+
+
+# Below this vertex count one exhaustive pass is cheaper than the hull, the grouped plane
+# pass and the pruning bound together, so shape features keep the exhaustive kernel.
+PRUNED_DIAMETER_MIN_VERTICES = 32768
+
+
+# Relative slack of the pruning bound. The float32 component norm is within about ten
+# ulps (fast-math division and square root included) of the exact distance between the
+# same float32 grid points, far below 2**-20; the slack is wider still.
+_PRUNE_SLACK = 2.0**-16
+
+
+def _distance_source(first: str, second: str) -> str:
+    """Metal statements setting ``distance`` from ``first`` and ``second`` 3-vectors.
+
+    The statements are those of ``_diameter_kernel``: the same scale-safe norm, so a
+    pair evaluated here rounds exactly as it does in the exhaustive kernels.
+    """
+    return f"""
+            float component[3];
+            float scale = 0;
+            for (int d = 0; d < 3; d++) {{
+                component[d] = ({first}[d] - {second}[d])
+                               * spacing[d];
+                scale = max(scale, fabs(component[d]));
+            }}
+            float distance;
+            if (isinf(scale)) {{
+                distance = INFINITY;
+            }} else if (scale == 0.0f) {{
+                distance = 0.0f;
+            }} else {{
+                float squares = 0;
+                for (int d = 0; d < 3; d++) {{
+                    float normalized = component[d] / scale;
+                    squares += normalized * normalized;
+                }}
+                distance = scale * sqrt(squares);
+            }}"""
+
+
+@lru_cache(maxsize=1)
+def _grouped_diameter_kernel() -> MetalKernel:
+    """Compile the kernel for the largest distance within coordinate groups.
+
+    ``points`` are sorted so that each group of equal coordinates is contiguous, and
+    ``starts[t]`` is the first row of row ``t``'s group. Row ``t`` scans the earlier rows
+    of its own group, so every unordered pair sharing the grouped coordinate is visited
+    exactly once and no other pair is.
+    """
+    distance = _distance_source("(points + t * 3)", "(points + q * 3)")
+    return cast(
+        MetalKernel,
+        mx.fast.metal_kernel(
+            name="mlxradiomics_grouped_diameters",
+            input_names=["points", "spacing", "starts"],
+            output_names=["diameters"],
+            source=f"""
+        uint t = thread_position_in_grid.x;
+        if (t >= points_shape[0]) return;
+        float maximum = 0;
+        for (uint q = uint(starts[t]); q < t; q++) {{
+            {distance}
+            maximum = max(maximum, distance);
+        }}
+        diameters[t] = maximum;
+        """,
+        ),
+    )
+
+
+@lru_cache(maxsize=1)
+def _farthest_kernel() -> MetalKernel:
+    """Compile the kernel for each point's largest distance to a set of hull vertices."""
+    distance = _distance_source("(points + t * 3)", "(hull + h * 3)")
+    return cast(
+        MetalKernel,
+        mx.fast.metal_kernel(
+            name="mlxradiomics_farthest_hull_vertex",
+            input_names=["points", "hull", "spacing"],
+            output_names=["farthest"],
+            source=f"""
+        uint t = thread_position_in_grid.x;
+        if (t >= points_shape[0]) return;
+        float maximum = 0;
+        for (uint h = 0; h < hull_shape[0]; h++) {{
+            {distance}
+            maximum = max(maximum, distance);
+        }}
+        farthest[t] = maximum;
+        """,
+        ),
+    )
+
+
+def _plane_maxima(vertices: mx.array, spacing_array: mx.array) -> mx.array:
+    """Return the three per-plane maxima over pairs sharing an axis-0, 1 or 2 coordinate.
+
+    Each axis sorts the vertices by that coordinate on Metal and marks every row with the
+    first row of its run of equal float32 values; ``_grouped_diameter_kernel`` then visits
+    exactly the pairs that the exhaustive kernel counts for that plane.
+    """
+    count = vertices.shape[0]
+    index = mx.arange(count, dtype=mx.int32)
+    blocks: list[mx.array] = []
+    starts: list[mx.array] = []
+    for axis in range(3):
+        ordered = mx.take(vertices, mx.argsort(vertices[:, axis]), axis=0)
+        values = ordered[:, axis]
+        first = mx.concatenate([mx.array([True]), values[1:] != values[:-1]])
+        blocks.append(ordered)
+        starts.append(mx.cummax(mx.where(first, index, 0)) + axis * count)
+    grouped = _grouped_diameter_kernel()(
+        inputs=[mx.concatenate(blocks), spacing_array, mx.concatenate(starts)],
+        grid=(3 * count, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(3 * count,)],
+        output_dtypes=[mx.float32],
+    )[0]
+    return mx.max(mx.reshape(grouped, (3, count)), axis=1)
+
+
+def _pruned_diameter_maxima(
+    vertices: mx.array,
+    spacing: tuple[float, ...],
+    scratch_mib: int,
+    hull_vertices: NDArray[np.int32],
+) -> mx.array:
+    """Return the ``diameter_maxima`` values of a 3-D mesh without the all-pairs pass.
+
+    Plane maxima visit only the pairs that share the plane coordinate
+    (``_plane_maxima``), which is exactly the pair set the exhaustive kernel counts.
+
+    The overall maximum ``F`` is the largest float32 distance over all vertex pairs. Its
+    exact value is attained between convex-hull vertices, but the rounded maximum need
+    not be, so the hull pairs only give a lower bound ``L <= F``. For each vertex the
+    largest distance to any vertex is its largest distance to a hull vertex (distance to
+    a fixed point is convex). A vertex whose farthest hull vertex is closer than
+    ``L * (1 - 2**-16)`` therefore belongs to no pair whose float32 distance can reach
+    ``F``; the remaining vertices contain the pair attaining ``F``, and the exhaustive
+    kernel over them returns ``F`` itself. Only vertices nearly as eccentric as the
+    diameter endpoints survive, so this pass is short.
+    """
+    spacing_array = mx.array(spacing, dtype=mx.float32)
+    hull = mx.take(vertices, mx.array(hull_vertices, dtype=mx.int32), axis=0)
+    lower = diameter_maxima(hull, spacing, scratch_mib, 3)[3]
+    farthest = _farthest_kernel()(
+        inputs=[vertices, hull, spacing_array],
+        grid=(vertices.shape[0], 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(vertices.shape[0],)],
+        output_dtypes=[mx.float32],
+    )[0]
+    keep = farthest >= lower * (1 - _PRUNE_SLACK)
+    planes = _plane_maxima(vertices, spacing_array)
+    evaluate(keep, planes)
+    kept = np.flatnonzero(np.asarray(keep, dtype=np.bool_)).astype(np.int32)
+    candidates = mx.take(vertices, mx.array(kept), axis=0)
+    overall = diameter_maxima(candidates, spacing, scratch_mib, 3)[3]
+    return mx.concatenate([planes, overall[None]])
