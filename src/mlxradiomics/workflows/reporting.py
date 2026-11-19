@@ -105,6 +105,9 @@ def _prepare_map_writer(
         if temporary_dir is not None
         else Path(tempfile.gettempdir())
     )
+    if not scratch.is_dir():
+        # Name the option; the stat and temporary-file errors below would not.
+        raise InvalidInputError(f"scratch_dir is not an existing directory: {scratch}")
     # Cover uncompressed maps, compression overhead and report headroom.
     estimate = len(paths) * (2 * prod(reference.array.shape) * 4 + 65536)
     limit = max_temporary_mib * 1024**2 if max_temporary_mib is not None else None
