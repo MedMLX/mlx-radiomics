@@ -152,21 +152,36 @@ def normalize_values(image: HostArray, settings: Settings) -> NDArray[np.float64
     # exact power of two to unit magnitude (the subtraction cannot overflow near 1e308),
     # and the offsets again (their squares cannot overflow or flush to zero; 1e-162
     # offsets squared otherwise underflow into a wrong but finite deviation).
-    values = _unit_scaled(values)
-    offsets = _unit_scaled(values - values.flat[0])
-    deviation = float(np.std(offsets, ddof=1))
+    # ``values`` is a private float64 copy, so each step runs in place: the results are
+    # those of the out-of-place expressions, with one whole-image buffer instead of one
+    # per step (np.std still allocates one centered temporary).
+    np.ldexp(values, _unit_exponent(values), out=values)
+    np.subtract(values, values.flat[0], out=values)
+    np.ldexp(values, _unit_exponent(values), out=values)
+    deviation = float(np.std(values, ddof=1))
     if deviation == 0 or not np.isfinite(deviation):
         raise ValueError("normalization requires nonzero finite whole-image variance")
-    values = (offsets - np.mean(offsets)) / deviation
+    np.subtract(values, np.mean(values), out=values)
+    np.divide(values, deviation, out=values)
     if settings.remove_outliers is not None:
-        values = np.clip(values, -settings.remove_outliers, settings.remove_outliers)
-    return values * settings.normalize_scale
+        np.clip(values, -settings.remove_outliers, settings.remove_outliers, out=values)
+    np.multiply(values, settings.normalize_scale, out=values)
+    return values
+
+
+def _unit_exponent(values: NDArray[np.float64]) -> int:
+    """Return the power of two that brings the finite peak magnitude into [0.5, 1).
+
+    The peak ``max(|max|, |min|)`` equals ``max(|values|)`` without a full-size
+    absolute-value temporary.
+    """
+    peak = max(abs(float(np.max(values))), abs(float(np.min(values))))
+    return -frexp(peak)[1] if peak > 0 else 0
 
 
 def _unit_scaled(values: NDArray[np.float64]) -> NDArray[np.float64]:
     """Scale ``values`` by the exact power of two that brings their peak into [0.5, 1)."""
-    peak = float(np.max(np.abs(values)))
-    return np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0)
+    return np.ldexp(values, _unit_exponent(values))
 
 
 def _resegment_samples(
