@@ -82,16 +82,21 @@ class VoxelMapStore:
             if (block.min(axis=0) < 0).any() or (block.max(axis=0) >= limits).any():
                 raise ValueError("voxel centers must lie inside the map shape")
         self.spool.seek(0, os.SEEK_END)
+        # Write through the Python file: ``ndarray.tofile`` ignores the result of its
+        # stdio flush, so a full disk could drop a block's tail without raising and
+        # advance the file position past the end of the data.
         for start in range(0, count, 65536):
             stop = min(start + 65536, count)
             block = centers[start:stop]
-            np.array([stop - start], dtype=np.int64).tofile(self.spool)
+            self.spool.write(np.int64(stop - start).tobytes())
             indices = np.ravel_multi_index(
                 tuple(block[:, axis] for axis in range(len(self.shape))), self.shape,
             ).astype(np.int64, copy=False)
-            indices.tofile(self.spool)
+            self.spool.write(indices.tobytes())
             for name in self.names:
-                features[name][start:stop].tofile(self.spool)
+                self.spool.write(features[name][start:stop].tobytes())
+        # Raise any buffered write failure before these rows count as stored.
+        self.spool.flush()
         self.count += count
         self.spooled_bytes += additional
 

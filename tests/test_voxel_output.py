@@ -118,6 +118,37 @@ with voxel_map_store((3, 3), names) as store:
     assert result.returncode == 0, result.stderr
 
 
+def test_failed_spool_write_raises_before_rows_count(tmp_path: Path) -> None:
+    """A real file-size limit makes a spool write fail; append must raise, not truncate."""
+    script = """
+import errno
+import resource
+import signal
+import numpy as np
+from mlxradiomics.voxel.storage import voxel_map_store
+# With SIGXFSZ ignored, write(2) past RLIMIT_FSIZE fails with EFBIG, as on a full disk.
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+centers = np.array([[0, 0], [1, 1]], dtype=np.int32)
+with voxel_map_store((3, 3), ('mean',), temporary_dir='.') as store:
+    # The 32-byte block (header, two int64 indices, two float32 values) stops at byte 20.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (20, hard))
+    try:
+        store.append(centers, {'mean': np.array([1, 2], dtype=np.float32)})
+    except OSError as error:
+        assert error.errno == errno.EFBIG, error
+    else:
+        raise AssertionError('a short spool write was not reported')
+    assert store.count == 0
+    resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(mlxradiomics.__file__).resolve().parents[1])
+    result = subprocess.run([sys.executable, "-c", script], env=environment,
+                            capture_output=True, text=True, cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("interruption", [ValueError, KeyboardInterrupt])
 def test_scratch_cleanup_after_export_interruption(
     tmp_path: Path, interruption: type[BaseException],
