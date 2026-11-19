@@ -62,6 +62,11 @@ extraction ran, and writing the run report then failed with `cannot serialize va
 of type float32`. They now raise `ValueError` naming the field; Python numbers and
 `np.float64` work as before.
 
+**The IVH error for a non-integer range bound says what is required.** IVH on
+integer intensities with a non-integer absolute resegmentation bound and no
+`ivh_bin_width` or `ivh_bin_count` called the intensities continuous. The message
+now asks for integer intensities and integer range bounds.
+
 ### Lower memory
 
 Figures are from an M1 Max and a 512×512×99 CT with a 715,158-voxel liver mask.

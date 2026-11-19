@@ -95,7 +95,10 @@ def prepare_ivh(
     count = settings.ivh_bin_count
     if count is None and width is None:
         if low != floor(low) or high != floor(high) or not np.all(selected == np.rint(selected)):
-            raise ValueError("continuous IVH intensities require ivh_bin_width or ivh_bin_count")
+            raise ValueError(
+                "without ivh_bin_width or ivh_bin_count, IVH requires integer intensities and "
+                "integer intensity range bounds"
+            )
         levels = int(high - low) + 1
         if not 1 <= levels < 2**31:
             raise ValueError("IVH lattice exceeds the supported int32 index range")
