@@ -109,6 +109,10 @@ def _compact(points: mx.array, valid: mx.array, ndim: int) -> mx.array:
 # Largest padded cropped extent per axis whose half-grid vertices are exact in float32.
 _MAX_MESH_EXTENT = 2**22
 
+# Smallest chunk whose active cells are gathered before triangulation (a 32 MiB scratch
+# budget). On the liver mask, 1,024-cell chunks ran 20% slower with the gather.
+_GATHER_MIN_CELLS = 32768
+
 
 def _mesh_chunk(
     padded: mx.array,
@@ -122,19 +126,38 @@ def _mesh_chunk(
     Returns the summed boundary measure normalized by ``2**boundary_exponent``, the
     summed signed enclosed measure in grid units, and the boundary vertices in grid
     coordinates.
+
+    Only cells whose corners disagree have facets or vertices, typically a few percent
+    of the cropped box. In chunks of at least ``_GATHER_MIN_CELLS`` cells only those
+    cells are triangulated. Their per-facet measures are scattered back into the dense
+    ``(cells, facets)`` layout of the whole chunk, where every other entry is zero, so
+    each sum reduces exactly the array it would reduce if every cell were triangulated.
+    Vertices keep cell order. Smaller chunks triangulate every cell: finding the active
+    rows waits for the host once per chunk, which costs more than it saves there.
     """
     ndim = len(parts.mantissa)
     tables = _tables(ndim)
     corners, facets, vertex = tables.corners, tables.facets, tables.vertices
+    slots = 5 if ndim == 3 else 2
     strides = mx.array([prod(padded.shape[i + 1 :]) for i in range(ndim)], dtype=mx.int32)
     indexes = mx.sum((coords[:, None, :] + corners[None, :, :]) * strides, axis=2)
     occupancy = mx.take(mx.reshape(padded, (-1,)), indexes)
     code = mx.sum(occupancy.astype(mx.int32) * mx.array([1 << i for i in range(2**ndim)]), 1)
+    cells = coords.shape[0]
+    rows: mx.array | None = None
+    if cells >= _GATHER_MIN_CELLS:
+        active = (code > 0) & (code < (1 << 2**ndim) - 1)
+        evaluate(active)
+        rows = mx.array(np.flatnonzero(np.asarray(active, dtype=np.bool_)).astype(np.int32))
+        if rows.size == 0:
+            empty = mx.sum(mx.zeros((cells, slots), dtype=mx.float32))
+            return empty, empty, mx.zeros((0, ndim), dtype=mx.float32)
+        coords, code = mx.take(coords, rows, axis=0), mx.take(code, rows)
     selected = mx.take(facets, code, axis=0)
     selected = selected[:, : 15 if ndim == 3 else 4]
     valid = selected[:, ::ndim] >= 0
     points = coords[:, None, :] + mx.take(vertex, mx.maximum(selected, 0), axis=0)
-    points = mx.reshape(points.astype(mx.float32), (-1, 5 if ndim == 3 else 2, ndim, ndim))
+    points = mx.reshape(points.astype(mx.float32), (-1, slots, ndim, ndim))
     mantissa = mx.array(parts.mantissa, dtype=mx.float32)
     e0, e1, e2 = (parts.exponent + (0, 0, 0))[:3]
     if ndim == 3:
@@ -176,19 +199,23 @@ def _mesh_chunk(
         boundary = safe * mx.sqrt((n0 / safe) * (n0 / safe) + (n1 / safe) * (n1 / safe))
         boundary = mx.where(valid, boundary, 0)
         edge_ends, edges = ((3, 0), (3, 2)), (3, 2)
+    dense_boundary = mx.where(valid, boundary, 0)
+    dense_measure = mx.where(valid, measure, 0)
+    if rows is not None:
+        gathered_boundary, gathered_measure = dense_boundary, dense_measure
+        dense_boundary = mx.zeros((cells, slots), dtype=mx.float32)
+        dense_boundary[rows] = gathered_boundary
+        dense_measure = mx.zeros((cells, slots), dtype=mx.float32)
+        dense_measure[rows] = gathered_measure
     if not include_vertices:
-        return (
-            mx.sum(mx.where(valid, boundary, 0)),
-            mx.sum(mx.where(valid, measure, 0)),
-            mx.zeros((0, ndim), dtype=mx.float32),
-        )
+        return mx.sum(dense_boundary), mx.sum(dense_measure), mx.zeros((0, ndim), dtype=mx.float32)
     starts = mx.array([start for start, _ in edge_ends], dtype=mx.int32)
     ends = mx.array([end for _, end in edge_ends], dtype=mx.int32)
     vertex_valid = ((code[:, None] >> starts) & 1) != ((code[:, None] >> ends) & 1)
     edge_points = coords[:, None, :] + mx.take(vertex, mx.array(edges), axis=0)[None]
     return (
-        mx.sum(mx.where(valid, boundary, 0)),
-        mx.sum(mx.where(valid, measure, 0)),
+        mx.sum(dense_boundary),
+        mx.sum(dense_measure),
         _compact(edge_points.astype(mx.float32), vertex_valid, ndim),
     )
 
