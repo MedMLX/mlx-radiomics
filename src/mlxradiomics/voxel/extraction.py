@@ -248,6 +248,29 @@ def _voxel_first_group(
     return {name: np.asarray(value, dtype=np.float32) for name, value in selected.items()}
 
 
+def _roi_centers(roi: NDArray[np.bool_]) -> NDArray[np.int32]:
+    """Return ROI voxel coordinates ``(N, ndim)`` as ``np.argwhere`` orders them.
+
+    ``np.argwhere`` over a whole CT grid spends about 0.1 s scanning background. The
+    ROI's bounding box, found from axis projections, holds every ROI voxel, and
+    translating its row-major coordinates preserves their order, so this returns the
+    same int32 array from a scan of the box only.
+    """
+    lower: list[int] = []
+    box = roi
+    for axis in range(roi.ndim):
+        occupied = np.flatnonzero(
+            np.any(box, axis=tuple(other for other in range(roi.ndim) if other != axis))
+        )
+        if not occupied.size:
+            return np.argwhere(roi).astype(np.int32)
+        lower.append(int(occupied[0]))
+        box = box[(slice(None),) * axis + (slice(lower[-1], int(occupied[-1]) + 1),)]
+    centers = np.argwhere(box).astype(np.int32)
+    centers += np.asarray(lower, dtype=np.int32)
+    return centers
+
+
 def _sparse_glcm_bytes(
     ng: int,
     names: tuple[str, ...],
@@ -375,7 +398,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     # direction's indexes at a time, already covered by the per-center working set.
     cache_indexes = index_bytes <= budget - per_center
     retained_bytes = index_bytes if cache_indexes else 0
-    centers = np.argwhere(data.roi).astype(np.int32)
+    centers = _roi_centers(data.roi)
     memory = _voxel_schedule(
         rows=len(centers),
         per_center=per_center,
