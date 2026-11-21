@@ -44,13 +44,14 @@ from mlxradiomics.numerics.runtime import mx
 def _production(
     image: NDArray[np.generic], options: TransformSettings,
     spacing: tuple[float, ...] | None = None,
+    *, window: tuple[slice, ...] | None = None,
 ) -> list[tuple[str, NDArray[np.float64]]]:
     values = np.asarray(image, dtype=np.float32)
     spacing = spacing or (1.0,) * values.ndim
     with mx.stream(mx.gpu):
         return [
             (item.name, np.asarray(item.image, dtype=np.float64))
-            for item in feature_images(mx.array(values), spacing, options)
+            for item in feature_images(mx.array(values), spacing, options, window=window)
         ]
 
 
@@ -335,6 +336,9 @@ def test_sampled_log_matches_independent_kernel_convolution(
     padding_tag = "constant0p5" if padding is FilterPadding.CONSTANT else "mirror"
     assert name == f"log-sampled-s2mm-c3-{padding_tag}-{'2D' if planar else '3D'}"
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+    window = (slice(0, 2), slice(4, 5), slice(2, 8))
+    [(_, window_values)] = _production(image, options, spacing, window=window)
+    np.testing.assert_allclose(window_values, expected[window], rtol=1e-4, atol=1e-6)
 
 
 def test_mean_filter_preserves_a_large_finite_constant() -> None:
@@ -778,6 +782,31 @@ def test_gabor_three_dimensional_plane_selection_and_averaging() -> None:
     )
     assert planes_name == "gabor-s2mm-l3mm-g1-t0p4-modulus-constant0-planes"
     np.testing.assert_allclose(planes_values, expected_planes, rtol=2e-4, atol=2e-5)
+    window = (slice(2, 6), slice(1, 4), slice(0, 2))
+    [(_, window_values)] = _production(image, average_options, spacing, window=window)
+    np.testing.assert_allclose(window_values, expected_planes[window], rtol=2e-4, atol=2e-5)
+
+
+@pytest.mark.parametrize("padding", list(FilterPadding))
+def test_gabor_roi_window_keeps_full_image_support(padding: FilterPadding) -> None:
+    shape = (10, 9)
+    image = np.random.default_rng(34).normal(size=shape)
+    spacing = (1.0, 0.8)
+    window = (slice(0, 4), slice(3, 7))
+    thetas = (0.4, 0.8)
+    options = TransformSettings(
+        image_types=(ImageType.GABOR,),
+        gabor=GaborSettings(
+            sigma=(3.0,), wavelength=(4.0,), theta=thetas, padding=padding,
+            constant=5.0, pooling=OrientationPooling.AVERAGE,
+        ),
+    )
+    [(_, actual)] = _production(image, options, spacing, window=window)
+    responses = [
+        np.abs(_convolve(image, _gabor_kernel(shape, spacing, 3.0, 4.0, 1.0, theta), padding, 5.0))
+        for theta in thetas
+    ]
+    np.testing.assert_allclose(actual, np.mean(responses, axis=0)[window], rtol=2e-4, atol=2e-5)
 
 
 def test_gabor_sinusoid_response_follows_frequency_and_orientation() -> None:

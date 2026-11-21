@@ -142,15 +142,46 @@ def pad_image(
     raise ValueError(f"unsupported filter padding: {padding}")
 
 
+def _convolution_source(
+    image: mx.array,
+    widths: list[tuple[int, int]],
+    padding: FilterPadding,
+    constant: float,
+    window: tuple[slice, ...] | None,
+) -> mx.array:
+    """Keep every input sample contributing to the window's valid convolution."""
+    if window is None:
+        return pad_image(image, widths, padding, constant)
+
+    source: list[slice] = []
+    extension: list[tuple[int, int]] = []
+    output: list[slice] = []
+    for size, part, (before, after) in zip(image.shape, window, widths, strict=True):
+        start, stop, _ = part.indices(size)
+        if start >= before and stop + after <= size:
+            source.append(slice(start - before, stop + after))
+            extension.append((0, 0))
+            output.append(slice(None))
+        else:
+            # Mirror and wrap can depend on samples outside the local halo. Extend
+            # the original axis, then keep the span needed by the requested outputs.
+            source.append(slice(None))
+            extension.append((before, after))
+            output.append(slice(start, stop + before + after))
+    return pad_image(image[tuple(source)], extension, padding, constant)[tuple(output)]
+
+
 def convolve_nd(
     image: mx.array,
     kernel: NDArray[np.float64],
     padding: FilterPadding,
     constant: float,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> mx.array:
-    """True convolution of one 2-D or 3-D image with a small kernel."""
+    """True convolution, optionally limited to a nonempty output window."""
     widths = [(size // 2, size // 2) for size in kernel.shape]
-    padded = pad_image(image, widths, padding, constant)
+    padded = _convolution_source(image, widths, padding, constant, window)
     # MLX convolution is cross-correlation; flip the kernel for Eq. 2.2.
     weight = mx.array(np.flip(kernel).astype(np.float32))
     if image.ndim == 2:
@@ -167,11 +198,13 @@ def convolve_planes(
     kernel: NDArray[np.float64],
     padding: FilterPadding,
     constant: float,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> mx.array:
     """True 2-D convolution applied independently to a batch of planes."""
     widths = [(0, 0), (kernel.shape[0] // 2, kernel.shape[0] // 2),
               (kernel.shape[1] // 2, kernel.shape[1] // 2)]
-    padded = pad_image(planes, widths, padding, constant)
+    padded = _convolution_source(planes, widths, padding, constant, window)
     weight = mx.array(np.flip(kernel).astype(np.float32))
     return mx.conv2d(padded[..., None], weight[None, :, :, None])[..., 0]
 
@@ -624,20 +657,15 @@ def gabor_kernel(
 
 
 def _gabor_convolution(
-    planes: mx.array,
+    padded: mx.array,
     kernel: NDArray[np.complex64],
-    padding: FilterPadding,
-    constant: float,
     response: GaborResponse,
 ) -> mx.array:
-    """Convolve real/imaginary Gabor taps as two native output channels.
+    """Convolve real/imaginary Gabor taps over the boundary-extended input.
 
     Spatial convolution preserves small impulse responses that FFT roundoff can
     obscure. Flip both spatial axes because MLX conv2d is cross-correlation.
     """
-    widths = [(0, 0), (kernel.shape[0] // 2, kernel.shape[0] // 2),
-              (kernel.shape[1] // 2, kernel.shape[1] // 2)]
-    padded = pad_image(planes, widths, padding, constant)
     taps = np.stack((kernel.real[::-1, ::-1], kernel.imag[::-1, ::-1]))
     weights = mx.array(taps[..., None].copy())
     convolution = mx.conv2d(padded[..., None], weights)
@@ -677,6 +705,8 @@ def gabor_responses(
     padding: FilterPadding,
     constant: float,
     pooling: OrientationPooling,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> list[mx.array]:
     """Gabor response maps for one scale and a set of orientations.
 
@@ -702,6 +732,8 @@ def gabor_responses(
         padding: Boundary-extension method for the plane convolution.
         constant: Extension value used by :attr:`FilterPadding.CONSTANT`.
         pooling: Pooling over orientations.
+        window: Optional nonempty ``start:stop`` slices in source-axis order.
+            Kernel support and boundary extension follow the full image grid.
 
     Returns:
         One float32 response map per orientation when ``pooling`` is ``NONE``,
@@ -722,20 +754,27 @@ def gabor_responses(
     for axis in axes:
         plane_shape: tuple[int, int]
         plane_spacing: tuple[float, float]
+        plane_window = None
         if image.ndim == 2:
             planes = image[None]
             plane_shape = (image.shape[0], image.shape[1])
             plane_spacing = (spacing[0], spacing[1])
             restore = False
+            if window is not None:
+                plane_window = (slice(None), *window)
         else:
             planes, plane_shape, plane_spacing = _gabor_family(image, spacing, axis)
             restore = True
+            if window is not None:
+                plane_window = (window[axis], *(part for i, part in enumerate(window) if i != axis))
+        widths = [(0, 0), *((size // 2, size // 2) for size in plane_shape)]
+        padded = _convolution_source(planes, widths, padding, constant, plane_window)
         components: list[mx.array] = []
         for theta in thetas:
             kernel = gabor_kernel(
                 plane_shape, plane_spacing, sigma, wavelength, gamma, theta,
             )
-            values = _gabor_convolution(planes, kernel, padding, constant, response)
+            values = _gabor_convolution(padded, kernel, response)
             components.append(
                 mx.moveaxis(values, 0, axis) if restore else values[0]
             )

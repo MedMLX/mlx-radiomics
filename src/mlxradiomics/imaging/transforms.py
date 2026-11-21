@@ -558,9 +558,9 @@ def feature_images(
             distinguish constant source fields and by LBP2D to compare
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
-            is cropped to it. Wavelets then filter only the window plus their tap reach
-            where that stays inside the image, with bit-identical window values; other
-            transforms still run on the whole image before cropping.
+            is cropped to it. Wavelets limit the input where their tap reach allows.
+            Gabor and sampled LoG evaluate the requested output using the full image's
+            filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
 
@@ -580,9 +580,7 @@ def feature_images(
         source_dtype=source_dtype, source_residual=source_residual,
         source_tail=source_tail, window=window, _finite_input=_finite_input,
     ):
-        # Wavelets arrive cropped; full-grid images are cut to the window here. A cropped
-        # wavelet shares the full shape only when the window spans the whole image, where
-        # these slices are the identity.
+        # Window-aware filters can arrive cropped. A full-size window is the identity.
         if window is not None and feature.image.shape == image.shape:
             feature = FeatureImage(feature.name, feature.image[window])
         yield feature
@@ -650,7 +648,7 @@ def _feature_images(
                 for sigma in options.log.sigma:
                     values = log_response(
                         image, spacing, sigma, options.log.cutoff, options.log.planar,
-                        options.log.padding, options.log.constant,
+                        options.log.padding, options.log.constant, window=window,
                     )
                     evaluate(values)
                     yield FeatureImage(_log_name(sigma, options), values)
@@ -689,7 +687,7 @@ def _feature_images(
                     image, spacing, sigma, wavelength, options.gabor.gamma,
                     options.gabor.theta, options.gabor.response,
                     options.gabor.slice_axis, options.gabor.padding,
-                    options.gabor.constant, options.gabor.pooling,
+                    options.gabor.constant, options.gabor.pooling, window=window,
                 )
                 plane = _gabor_plane_tag(options, image.ndim)
                 for index, values in enumerate(responses):
