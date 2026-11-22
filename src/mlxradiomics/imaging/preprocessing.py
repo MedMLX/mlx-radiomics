@@ -22,10 +22,11 @@ from mlxradiomics.contracts.types import HostArray
 
 @dataclass(frozen=True)
 class PreparedInput:
-    """Validated float64 image and the masks derived from the label.
+    """Validated image and the masks derived from the label.
 
     Attributes:
-        image: Float64 copy of the input, normalized if requested; same shape as the input.
+        image: Input in its source dtype, or float64 after normalization or when the
+            source floating-point dtype is wider than float64.
         roi: Voxels of the selected label that remain after every resegmentation filter
             (the absolute or derived range intersected with any outlier-sigma window).
         shape_roi: Mask used for shape features: the original label mask, or the fully
@@ -34,7 +35,7 @@ class PreparedInput:
             or the whole image in voxel mode with ``masked_kernel=False``.
     """
 
-    image: NDArray[np.float64]
+    image: HostArray
     roi: NDArray[np.bool_]
     shape_roi: NDArray[np.bool_]
     sampling_mask: NDArray[np.bool_]
@@ -128,6 +129,13 @@ def exact_float64(image: HostArray) -> NDArray[np.float64]:
     return values.astype(np.float64)
 
 
+def _admit_source(image: HostArray) -> HostArray:
+    """Keep the source grid compact after validating its float64 conversion."""
+    validate_exact_float64(image)
+    # For wider types, round to binary64 before any filter conversion.
+    return image.astype(np.float64) if image.dtype.itemsize > 8 else image
+
+
 def normalize_values(image: HostArray, settings: Settings) -> NDArray[np.float64]:
     """Return a float64 copy of ``image``, normalized over the whole image if requested.
 
@@ -170,7 +178,7 @@ def _unit_scaled(values: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def _resegment_samples(
-    values: NDArray[np.float64], roi: NDArray[np.bool_], settings: Settings,
+    values: HostArray, roi: NDArray[np.bool_], settings: Settings,
     *, keep_samples: bool,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64] | None]:
     """Apply the same thresholds in ROI sample order and optionally retain samples.
@@ -182,7 +190,7 @@ def _resegment_samples(
     """
     if settings.resegment_range is None:
         return roi, None
-    selected = values[roi]
+    selected = np.asarray(values[roi], dtype=np.float64)
     if not np.all(np.isfinite(selected)):
         raise ValueError("resegmentation requires finite selected intensities")
     thresholds = np.asarray(settings.resegment_range, dtype=np.float64)
@@ -418,7 +426,7 @@ def prepare_sampled_input(
     if image.dtype.kind not in "iuf" or mask.dtype.kind not in "biu":
         raise ValueError("image must be real numeric and mask must contain integer labels")
     settings.validate(image.ndim)
-    values = normalize_values(image, settings)
+    values = normalize_values(image, settings) if settings.normalize else _admit_source(image)
     roi = mask == settings.label
     if not np.any(roi):
         raise ValueError("selected label is absent from mask")
@@ -430,7 +438,10 @@ def prepare_sampled_input(
     if voxel and np.count_nonzero(roi) < 2:
         raise ValueError("voxel extraction requires at least two selected voxels")
     sampling = np.ones_like(roi) if voxel and not settings.masked_kernel else roi
-    selected = values[sampling] if retained_samples is None else retained_samples
+    selected = (
+        np.asarray(values[sampling], dtype=np.float64)
+        if retained_samples is None else retained_samples
+    )
     if retained_samples is None and not np.all(np.isfinite(selected)):
         raise ValueError("sampled image intensities must be finite")
     return PreparedInput(values, roi, shape_roi, sampling), selected
@@ -443,16 +454,16 @@ def prepare_derived_input(
 
     The pipeline disables normalization and resegmentation for derived images. Its
     original preparation therefore supplies the intensity/sampling/morphology masks,
-    but each derived image still needs its own exact conversion and sampled-value
-    finite check before its independent discretization.
+    but each derived image still needs its own source admission and finite check
+    before its independent float64 discretization.
     """
     image = np.asarray(image)
     if image.shape != original.image.shape:
         raise ValueError("image and mask must share a nonempty 2D or 3D array shape")
     if image.dtype.kind not in "iuf":
         raise ValueError("image must be real numeric and mask must contain integer labels")
-    values = exact_float64(image)
-    selected = values[original.sampling_mask]
+    values = _admit_source(image)
+    selected = np.asarray(values[original.sampling_mask], dtype=np.float64)
     if not np.all(np.isfinite(selected)):
         raise ValueError("sampled image intensities must be finite")
     return (
@@ -496,19 +507,20 @@ def discretize_prepared(
     shape, local intensity and IVH leave ``bins`` zero with the unused-lattice
     sentinel ``gray_levels=1``; IVH constructs its separate lattice later.
     """
-    bins = np.zeros(data.image.shape, dtype=np.int32)
+    image = data.image
+    bins = np.zeros(image.shape, dtype=np.int32)
     assign = any(
         not name.startswith(("shape", "localintensity_", "ivh_", "firstorder_"))
         or name in {"firstorder_Entropy", "firstorder_Uniformity"}
         for name in settings.features
     )
     if not assign:
-        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, bins, 1)
+        return Prepared(image, data.roi, data.shape_roi, data.sampling_mask, bins, 1)
     if settings.bin_count is not None and selected.min() == selected.max():
         level = 1 if settings.constant_roi_bin == "first" else settings.bin_count // 2 + 1
         _check_gray_levels(level, settings)
         bins[data.sampling_mask] = level
-        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, bins, level)
+        return Prepared(image, data.roi, data.shape_roi, data.sampling_mask, bins, level)
     integer = _integer_fixed_width_bins(selected, settings)
     if integer is not None:
         # Exact integer classification also supplies the source bounds that admit
@@ -523,7 +535,7 @@ def discretize_prepared(
     _check_gray_levels(ng, settings)
     bins[data.sampling_mask] = digitized
     return Prepared(
-        data.image, data.roi, data.shape_roi, data.sampling_mask, bins, ng, integer_bounds,
+        image, data.roi, data.shape_roi, data.sampling_mask, bins, ng, integer_bounds,
     )
 
 

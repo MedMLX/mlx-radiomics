@@ -456,7 +456,8 @@ def extract_voxels(
         else None
     )
     resident = _VoxelResidents(
-        mx.reshape(mx.array(data.image, dtype=dtype), (-1,)) if schedule.has_source_first else None,
+        mx.reshape(mx.array(data.image.astype(np.float32, copy=False), dtype=dtype), (-1,))
+        if schedule.has_source_first else None,
         mx.reshape(array_from_bool(data.sampling_mask), (-1,)),
         mx.reshape(mx.array(data.bins), (-1,)),
     )
@@ -471,7 +472,7 @@ def extract_voxels(
         else None
     )
     if schedule.has_source_first:
-        samples = data.image[data.sampling_mask]
+        samples = np.asarray(data.image[data.sampling_mask], dtype=np.float64)
         source = prepare_first_order_source(
             samples.reshape(1, -1),
             np.ones((1, samples.size), dtype=np.bool_),
@@ -496,7 +497,9 @@ def extract_voxels(
         source_resident = _FirstOrderResidents(
             low_resident,
             (
-                mx.reshape(mx.array(data.image.view(np.uint64)), (-1,))
+                mx.reshape(
+                    mx.array(np.asarray(data.image, dtype=np.float64).view(np.uint64)), (-1,),
+                )
                 if inputs.source_bits
                 else None
             ),

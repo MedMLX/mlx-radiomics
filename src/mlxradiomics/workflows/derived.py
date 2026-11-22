@@ -99,7 +99,7 @@ def feature_arrays(
         # is non-finite there too. Check before the LBP source-precision split, whose
         # residual arithmetic would otherwise warn or misreport the cause.
         with np.errstate(over="ignore"):
-            source32 = data.image.astype(np.float32)
+            source32 = data.image.astype(np.float32, copy=False)
         finite = bool(np.all(np.isfinite(source32)))
         if not finite:
             raise ValueError("feature image intensities must be finite")
@@ -117,7 +117,7 @@ def feature_arrays(
         # Their omitted residual/tail are the LBP primitives' implicit zeros.
         if not exact_source:
             low, tail = filter_source_words(
-                data.image,
+                np.asarray(data.image, dtype=np.float64),
                 source32,
                 tail=ImageType.LBP2D in transforms.image_types,
             )

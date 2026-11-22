@@ -160,7 +160,7 @@ def _roi_local_intensity(
     from mlxradiomics.features.local_intensity import local_intensity_statistics
 
     return local_intensity_statistics(
-        data.image,
+        np.asarray(data.image, dtype=np.float64),
         data.roi,
         spacing,
         settings.scratch_mib,

@@ -71,7 +71,7 @@ def _oracle(image: NDArray[np.float64], mask: NDArray[np.uint8], settings: Setti
             [(g >= 0) & (g < s) for g, s in zip(grid, image.shape, strict=True)])
         clipped = tuple(np.clip(g, 0, s - 1) for g, s in zip(grid, image.shape, strict=True))
         local = catalogue.intensity_features(
-            data.image[clipped], data.bins[clipped].astype(np.int32),
+            np.asarray(data.image[clipped], dtype=np.float64), data.bins[clipped].astype(np.int32),
             data.sampling_mask[clipped] & inside, settings, (1.0,) * image.ndim,
             data.gray_levels,
         )
