@@ -68,14 +68,16 @@ def prepare_source_pair(
     tiny = float(np.finfo(np.float32).tiny)
     with np.errstate(invalid="ignore", over="ignore"):
         high = source.astype(np.float32)
+        # Common float32 and integer sources round exactly to normal high words.
+        # Prove this before allocating the double-width residual and error workspaces.
+        if np.array_equal(high, source) and np.all(np.isfinite(high)) and not np.any(
+            (high != 0) & (np.abs(high) < tiny)
+        ):
+            return high, np.zeros_like(high), np.zeros_like(high)
         high64 = high.astype(np.float64)
         low64 = np.empty_like(high64, dtype=np.float64)
         np.subtract(source, high64, out=low64)
         low = low64.astype(np.float32)
-        # Exactly represented normal values have neither a residual nor a Metal
-        # flushing error. This includes ordinary float32 and integer CT sources.
-        if not np.any(low64) and not np.any((high != 0) & (np.abs(high) < tiny)):
-            return high, low, np.zeros_like(high, dtype=np.float32)
         # Reuse the two float64 scratch arrays for the Metal-visible parts and gap.
         # The returned raw parts stay untouched, including their subnormal values.
         high64[np.abs(high) < tiny] = np.float64(0)
