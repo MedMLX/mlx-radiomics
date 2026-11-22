@@ -1,5 +1,17 @@
 # Release notes
 
+## Unreleased
+
+### Changed
+
+**`glcm_MCC` can differ from 1.1.0 in its last float32 digits.** ROI MCC now finds its eigenvalue on Metal by Householder reduction and bisection. On the tested ROIs it agrees with 1.1.0 to within 1.3e-6 relative. Every other feature value is unchanged.
+
+### Faster
+
+**ROI texture extraction waits on the GPU far less often.** GLCM and GLRLM count every direction of a ROI in one Metal dispatch. Directions share statistic batches within `scratch_mib`, and each family averages its directions in one kernel. On a 54,639-voxel lung CT ROI on an M5 Max, the 93 default features take 11.5 ms instead of 177.2 ms warm. The 26 GLCM features take 5.0 ms instead of 153.1 ms (paired medians). Peak memory for these workloads rises by about 15 to 25 MB.
+
+**Shape features take 81.8 ms instead of 108.4 ms on the same ROI.** Oriented minimum bounding box candidates are enumerated in array operations, and the MVEE ascent runs on its own GPU stream beside the other shape work.
+
 ## 1.1.0
 
 ### Breaking changes
