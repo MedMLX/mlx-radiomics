@@ -2,7 +2,6 @@
 
 from collections.abc import Mapping
 from dataclasses import asdict, replace
-from importlib.metadata import version
 from math import floor, isfinite, isnan, prod
 from os import environ
 from platform import platform, python_version
@@ -13,6 +12,7 @@ from numpy.typing import NDArray
 
 from mlxradiomics import __version__
 from mlxradiomics.config.settings import Settings
+from mlxradiomics.contracts.metadata import dependency_version
 from mlxradiomics.contracts.results import Result
 from mlxradiomics.contracts.types import (
     ExecutionMetadata,
@@ -303,7 +303,8 @@ def extract_with_shape_mask(
         "gray_levels": data.gray_levels,
         "runtime": {
             "versions": {"mlxradiomics": __version__, "numpy": np.__version__,
-                         "mlx": version("mlx"), "medmlx-core": version("medmlx-core")},
+                         "mlx": dependency_version("mlx"),
+                         "medmlx-core": dependency_version("medmlx-core")},
             "python": python_version(), "platform": platform(),
             "device_name": str(mx.device_info(mx.gpu)["device_name"]),
             "mlx_enable_tf32": environ.get("MLX_ENABLE_TF32"),

@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from functools import partial
-from importlib.metadata import version
 from pathlib import Path
 from typing import Literal, cast, overload
 
@@ -17,7 +16,7 @@ from numpy.typing import NDArray
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.config.spatial import ImageSettings
 from mlxradiomics.config.transforms import ImageType, TransformSettings
-from mlxradiomics.contracts.metadata import file_metadata, transform_payload
+from mlxradiomics.contracts.metadata import dependency_version, file_metadata, transform_payload
 from mlxradiomics.contracts.results import Result
 from mlxradiomics.contracts.types import (
     ExecutionMetadata,
@@ -326,7 +325,7 @@ def extract(
     metadata["transforms"] = transform_payload(transforms)
     if ImageType.LBP3D in transforms.image_types:
         metadata["runtime"]["versions"].update(
-            {name: version(name) for name in ("scipy", "trimesh")}
+            {name: dependency_version(name) for name in ("scipy", "trimesh")}
         )
     metadata["array_dtype"] = str(image.dtype)
     # A cropped derived-image result reports its window; the call's array is the input.
