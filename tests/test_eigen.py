@@ -45,6 +45,5 @@ def test_largest_eigenvalue_of_trivial_batches() -> None:
         np.array([3.5, -2.0], dtype=np.float32),
     )
     diagonal = np.diag(np.array([1.0, 4.0, -9.0, 2.5], dtype=np.float32))[None]
-    assert float(np.asarray(largest_symmetric_eigenvalue(mx.array(diagonal))).item()) == (
-        pytest.approx(4.0, rel=4e-7)
-    )
+    largest = np.asarray(largest_symmetric_eigenvalue(mx.array(diagonal)), dtype=np.float32)
+    assert float(largest[0]) == pytest.approx(4.0, rel=4e-7)

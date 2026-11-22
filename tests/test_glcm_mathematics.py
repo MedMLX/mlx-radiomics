@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
 from mlxradiomics import FEATURES, Settings, extract
+from mlxradiomics.config.settings import DirectionalAggregation
 from mlxradiomics.voxel.storage import voxel_map_store
 from mlxradiomics.workflows.engine import Result
 
@@ -165,7 +166,9 @@ def test_grouped_mcc_matches_separate_calls_bit_for_bit(ng: int) -> None:
 
 
 @pytest.mark.parametrize("aggregation", ["native", "2d_average", "2.5d_direction_merge"])
-def test_glcm_direction_batches_do_not_change_values(aggregation: str) -> None:
+def test_glcm_direction_batches_do_not_change_values(
+    aggregation: DirectionalAggregation,
+) -> None:
     # A 1 MiB budget runs every 150-level matrix alone; the default budget stacks them.
     rng = np.random.default_rng(5)
     image = rng.integers(0, 150, (6, 20, 22)).astype(np.float64)
