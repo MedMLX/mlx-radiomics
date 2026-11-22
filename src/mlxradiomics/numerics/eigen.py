@@ -6,6 +6,9 @@ from typing import cast
 from mlxradiomics.numerics.protocols import MetalKernel
 from mlxradiomics.numerics.runtime import evaluate, mx
 
+# A 64-square float32 matrix uses 16 KiB, half the Apple silicon threadgroup budget.
+_LOCAL_MATRIX_SIZE = 64
+
 
 def _lanes(size: int) -> int:
     """Threads cooperating on one matrix: the next power of two of ``size``, capped at 128.
@@ -27,26 +30,36 @@ def _jacobi_kernel(size: int, lanes: int) -> MetalKernel:
     # same pivot values and therefore take the same skip and convergence branches, which
     # keeps the barriers uniform. The first barrier stops lane 0 overwriting the pivots
     # before another lane has read them; the second publishes the rotation.
+    elements = size * size
+    local = size <= _LOCAL_MATRIX_SIZE
+    storage = (
+        f"threadgroup float work[{elements}];" if local
+        else "device float* work = workspace + base;"
+    )
+    memory = "mem_threadgroup" if local else "mem_device"
     return cast(
         MetalKernel,
         mx.fast.metal_kernel(
             name="mlxradiomics_jacobi",
             input_names=["matrix"],
-            output_names=["work", "eigenvalues", "converged"],
+            output_names=["eigenvalues", "converged"] if local else [
+                "workspace", "eigenvalues", "converged"
+            ],
             source=f"""
         uint row = threadgroup_position_in_grid.x;
         uint lane = thread_position_in_threadgroup.x;
-        uint base = row * {size * size};
-        for (uint k = lane; k < {size * size}; k += {lanes}) work[base + k] = matrix[base + k];
-        threadgroup_barrier(mem_flags::mem_device);
+        uint base = row * {elements};
+        {storage}
+        for (uint k = lane; k < {elements}; k += {lanes}) work[k] = matrix[base + k];
+        threadgroup_barrier(mem_flags::{memory});
         bool done = false;
         for (int sweep = 0; sweep < 100; sweep++) {{
             done = true;
             for (int p = 0; p < {size}; p++) {{
                 for (int q = p + 1; q < {size}; q++) {{
-                    float apq = work[base + p * {size} + q];
-                    float app = work[base + p * {size} + p];
-                    float aqq = work[base + q * {size} + q];
+                    float apq = work[p * {size} + q];
+                    float app = work[p * {size} + p];
+                    float aqq = work[q * {size} + q];
                     // A large unrelated diagonal must not hide a small correlated block.
                     float threshold = (1e-7f * sqrt(abs(app))) * sqrt(abs(aqq));
                     if (abs(apq) <= threshold) continue;
@@ -57,28 +70,26 @@ def _jacobi_kernel(size: int, lanes: int) -> MetalKernel:
                     float t = copysign(1.0f, delta) * off /
                               (abs(d) + sqrt(d * d + off * off));
                     float c = rsqrt(1 + t * t), s = t * c;
-                    threadgroup_barrier(mem_flags::mem_device);
+                    threadgroup_barrier(mem_flags::{memory});
                     for (uint k = lane; k < {size}; k += {lanes}) {{
                         if (k == uint(p) || k == uint(q)) continue;
-                        float akp = work[base + k * {size} + p];
-                        float akq = work[base + k * {size} + q];
-                        work[base + k * {size} + p] =
-                            work[base + p * {size} + k] = c * akp - s * akq;
-                        work[base + k * {size} + q] =
-                            work[base + q * {size} + k] = s * akp + c * akq;
+                        float akp = work[k * {size} + p];
+                        float akq = work[k * {size} + q];
+                        work[k * {size} + p] = work[p * {size} + k] = c * akp - s * akq;
+                        work[k * {size} + q] = work[q * {size} + k] = s * akp + c * akq;
                     }}
                     if (lane == 0) {{
-                        work[base + p * {size} + p] = app - t * apq;
-                        work[base + q * {size} + q] = aqq + t * apq;
-                        work[base + p * {size} + q] = work[base + q * {size} + p] = 0;
+                        work[p * {size} + p] = app - t * apq;
+                        work[q * {size} + q] = aqq + t * apq;
+                        work[p * {size} + q] = work[q * {size} + p] = 0;
                     }}
-                    threadgroup_barrier(mem_flags::mem_device);
+                    threadgroup_barrier(mem_flags::{memory});
                 }}
             }}
             if (done) break;
         }}
         for (uint p = lane; p < {size}; p += {lanes})
-            eigenvalues[row * {size} + p] = work[base + p * {size} + p];
+            eigenvalues[row * {size} + p] = work[p * {size} + p];
         if (lane == 0) converged[row] = done;
         """,
         ),
@@ -89,6 +100,7 @@ def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
     """Return the eigenvalues of a batch of symmetric matrices in ascending order.
 
     The kernel runs one threadgroup per matrix in float32 and does not check symmetry.
+    Small matrices fit in threadgroup memory; larger matrices use a device buffer.
     A sweep converges when every off-diagonal magnitude is at most ``1e-7`` times
     the geometric mean of its two diagonal magnitudes. This pair-local criterion
     resolves small correlated blocks independently of other axes' scales. Rotation
@@ -117,12 +129,17 @@ def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
         # sole value is already sorted. Retain the original float32 words directly.
         return matrix[:, 0, :]
     lanes = _lanes(size)
-    _, values, converged = _jacobi_kernel(size, lanes)(
+    shapes: list[tuple[int, ...]] = [(matrix.shape[0], size), (matrix.shape[0],)]
+    dtypes = [mx.float32, mx.bool_]
+    if size > _LOCAL_MATRIX_SIZE:
+        shapes.insert(0, matrix.shape)
+        dtypes.insert(0, mx.float32)
+    *_, values, converged = _jacobi_kernel(size, lanes)(
         inputs=[matrix],
         grid=(matrix.shape[0] * lanes, 1, 1),
         threadgroup=(lanes, 1, 1),
-        output_shapes=[matrix.shape, (matrix.shape[0], size), (matrix.shape[0],)],
-        output_dtypes=[mx.float32, mx.float32, mx.bool_],
+        output_shapes=shapes,
+        output_dtypes=dtypes,
     )
     evaluate(values, converged)
     if not bool(mx.all(converged).item()):
