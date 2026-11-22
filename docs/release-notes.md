@@ -1,148 +1,46 @@
 # Release notes
 
 ## Unreleased
+"
+## 1.2.0
 
 ### Fixes
 
-**Incomplete and damaged NIfTI files are refused.** A NIfTI image or mask that ends
-before the voxel data its header declares, or whose gzip stream is cut off or fails its
-checksum, now raises `ValueError`. Such files were read without an error: a mask cut off
-half-way loaded with the missing part empty, so features described a smaller ROI.
-Uncompressed NIfTI and raw NRRD carry no checksum, so a changed byte that keeps the
-file length is still not detectable there.
+**Incomplete NIfTI images and masks raise `ValueError`.** This covers files shorter than their header declares and compressed files with a damaged gzip stream.
 
-**An empty `featureClass` list is refused.** `firstorder: []` in a parameter file
-dropped the whole class without an error, while PyRadiomics reads it as every feature
-of the class. It now raises like a missing list: name the features explicitly.
+**Invalid parameters fail before extraction.** Empty `featureClass` lists, repeated YAML keys, and unsupported NumPy scalar types now produce errors that name the offending field or key. IVH errors specify the integer intensity and range-bound requirements.
 
-**Repeated keys in a parameter file are refused.** A second `setting:` section or a
-repeated `binWidth` silently replaced the first. The error names the key and its line.
+**Export and study errors preserve completed work.** A failed scratch write raises `OSError`. If a case exceeds the ROI working-memory budget, `run_study` records the failure and continues. Scratch errors name `scratch_dir` or `max_scratch_mib`.
 
-**NumPy numbers in `Settings` get an accurate error.** `bin_width=np.float64(25)` or
-`label=np.int64(1)` reported a range error such as "must be finite and positive". The
-error now names the field and asks for a Python number.
+**Undefined shape features return NaN.** This covers `shape_CentreOfMassShift` when the intensity sum is zero and approximate enclosing ellipsoid densities for rank-deficient ROIs.
 
-**Scratch errors name the 1.1.0 options.** A `scratch_dir` that is not a directory and a
-voxel export over the `max_scratch_mib` cap now report `scratch_dir` and
-`max_scratch_mib` instead of the retired `temporary_dir` and "temporary budget". A
-`scratch_dir` that does not exist raises `InvalidInputError` naming the option.
+**Texture arithmetic handles large gray-level counts.** NGTDM contrast avoids integer overflow at 46,342 or more occupied levels. Texture variances square by multiplication, and ROI GLCM MCC uses a new Metal eigensolver. The two arithmetic changes can affect the last digits of previously computed features.
 
-**NGTDM `Contrast` no longer overflows from 46,342 occupied gray levels.** The
-level-pair count `Ng (Ng - 1)` wrapped in int32, and the feature came out about two
-billion times too large (3.58e8 for 0.1667). Only very fine binning reaches that
-many levels.
-
-**Texture variances square exactly.** `GrayLevelVariance`, `RunVariance`,
-`ZoneVariance`, `DependenceVariance`, `ZoneDistanceVariance` and the fine-binned
-GLCM `DifferenceVariance` squared deviations with a float32 power that some Apple
-GPUs do not round correctly; they now multiply. On an M1 Max these features change
-by at most 3.3e-7 relative in ROI values and voxel maps. No other feature changes.
-
-**A voxel-map export raises when a scratch write fails.** A write that failed
-part-way, as on a full disk, was not reported. If space returned during the run,
-the exported maps held values at wrong voxels; otherwise the export failed at the
-end with an unrelated shape error. The failed write now raises `OSError`.
-
-**`run_study` continues past an ROI over the working-memory budget.** An ROI count
-buffer above `scratch_mib` raised `MemoryError` out of `run_study`, which ended the
-study and lost the outcomes of the cases already finished. The case is now recorded
-as failed, and `run` raises `ModelExecutionError`.
-
-**Undefined `CentreOfMassShift` and enclosing-ellipsoid densities are NaN.**
-`shape_CentreOfMassShift` raised, ending the whole extraction, when the ROI
-intensities summed to exactly zero. The approximate enclosing ellipsoid volume and
-area densities returned `+inf` for single-slice and other rank-deficient ROIs. Both
-are undefined values: they are now NaN, counted as `nan` in `feature_validity`, and
-the other features of the extraction are computed as before.
-
-**LBP3D accepts ordinary integer CT and MR ROIs.** It raised "rounding threshold is
-ambiguous" on most CT ROIs above about a thousand voxels. Interpolated samples
-within float32 uncertainty of a rounding threshold, bounded from the spline
-coefficients in each sample's support, are now evaluated in float64 on the CPU with
-SciPy and rounded as PyRadiomics does: about 2% of samples on a CT liver and tumor.
-Codes, band norms and kurtosis match PyRadiomics' arithmetic on the liver, the
-tumor and 28 cubes from liver CT, lung CT and hippocampus MR. On ROIs that were
-accepted before, kurtosis moves by up to 2e-3 at a few voxels, toward the
-reference. The 715,158-voxel liver takes under 1 s on an M1 Max with 61 MB of host
-memory for the float64 coefficients. An exact tie in float64 still raises
-`ValueError`, and floating-point images keep their previous check.
-
-**NumPy scalars in spacing and mask threshold are refused before extraction.**
-`ImageSettings.resampled_spacing`, `IbsiInterpolation.spacing` and `mask_threshold`,
-and the `spacing` argument of `extract`, accepted values such as `np.float32`. The
-extraction ran, and writing the run report then failed with `cannot serialize value
-of type float32`. They now raise `ValueError` naming the field; Python numbers and
-`np.float64` work as before.
-
-**The IVH error for a non-integer range bound says what is required.** IVH on
-integer intensities with a non-integer absolute resegmentation bound and no
-`ivh_bin_width` or `ivh_bin_count` called the intensities continuous. The message
-now asks for integer intensities and integer range bounds.
-
-### Lower memory
-
-Figures are from an M1 Max and a 512×512×99 CT with a 715,158-voxel liver mask.
-Feature values are unchanged apart from the variances above.
-
-**Texture matrices of a large ROI.** GLSZM, GLDZM and fine-binned GLCM sorted every
-voxel of the ROI window instead of the cells that are counted. The default features
-of the liver peak at 153 MiB of MLX memory instead of 416 MiB.
-
-**Recursive LoG.** Each pass writes two image-sized buffers instead of five and
-filters along its axis without a transposed copy. LoG at 3 mm peaks at 693 MB of MLX
-memory instead of 2,079 MB and takes 146 ms instead of 517 ms.
-
-**Laws with orientation pooling.** Rotated responses are pooled as they are computed
-instead of all 24 being held. 3D `E5L5S5` with `max` pooling peaks at 5.8 GB of MLX
-memory instead of 20.4 GB.
-
-**Separable wavelets.** Each 1-D pass convolves slabs of 4,194,304 output voxels
-instead of the whole volume, passes are evaluated one at a time, and results shared
-between bands are released after the last band that uses them. One `coif1` level-1
-band peaks at 2,770 MB of MLX memory instead of 11,170 MB, and all eight bands at
-3,497 MB instead of 28,475 MB (5,120 MB instead of 26,714 MB with 24-rotation
-average pooling).
-
-**Shape.** The mesh triangulates only cells on the boundary, and oriented bounding
-box projections are evaluated in bounded groups. The geometric shape features of the
-liver add 459 MB to the process footprint instead of 724 MB.
-
-**Whole-image normalization holds one working copy.** Loading a 512×512×99 CT with
-`normalize=True` peaked at 840 MiB and now peaks at 638 MiB on an M1 Max, with
-identical values.
-
-**Reading compressible NIfTI images no longer accumulates memory.** Each read of a
-gzip-compressed float image with a zero background left about 20 MiB behind: eight
-reads of a liver-only float32 CT raised the process peak from 309 to 456 MiB. The
-validation pass now reads 1 MiB blocks and the peak stays at 264 MiB.
+**LBP3D resolves near-threshold samples in integer CT and MR ROIs.** Samples close to a rounding boundary are evaluated in float64 with SciPy. An exact tie still raises `ValueError`.
 
 ### Faster
 
-**ROI texture extraction uses fewer Metal dispatches.** GLCM and GLRLM count
-directions together and batch statistics within `scratch_mib`.
+Voxel texture maps use fused Metal kernels and share zone labels when their
+domains match. ROI extraction batches texture directions and limits filter
+output to the required window.
 
-**Enclosing shape features share geometry.** The oriented box uses blocked
-array operations, and MVEE ascent overlaps other shape work on Metal.
+| Workload | 1.1.0 warm | 1.2.0 warm | Speedup |
+| --- | ---: | ---: | ---: |
+| HCC tumor, two unmasked voxel maps | 2,059.1 ms | 12.2 ms | 168.6× |
+| HCC tumor crop, Laws energy and two ROI statistics | 600.7 ms | 26.0 ms | 23.1× |
+| HCC liver crop, six radius-one texture maps | 334.1 ms | 48.1 ms | 6.94× |
+| LUNG1 tumor, 107 ROI features | 130.4 ms | 19.5 ms | 6.67× |
+| HCC tumor, 107 ROI features | 44.1 ms | 12.7 ms | 3.46× |
+| HCC liver, 107 ROI features | 229.9 ms | 115.0 ms | 2.00× |
+| HCC tumor crop, three radius-two texture maps | 29.0 ms | 25.2 ms | 1.15× |
 
-**Voxel maps of GLCM, GLRLM and GLSZM under the IBSI conventions.** These three
-families took the slower matrix pipeline under the default conventions because of
-settings that only GLDM and NGTDM read. They now run on the fused kernels, with the
-same definitions. Values differ from the previous maps by float32 evaluation order,
-within 2e-5 relative plus 2e-6 absolute on the liver, and map validity is identical.
-The 80 texture maps of the liver take 3.3 s instead of 25.8 s on an M1 Max, at
-118 MiB of MLX memory instead of 122 MiB. GLDM, NGTDM and GLDZM maps are unchanged.
+Warm medians from six paired rounds on an Apple M5 Max.
 
-**Diameters of large meshes.** A mesh of 32,768 or more vertices searches only the
-vertices that can reach a maximum, and returns the same four diameters bit for bit.
-The liver mesh (491,776 vertices) takes 168 ms instead of 367 ms on an M1 Max.
+### Lower memory
 
-**Voxel-map planning scans the ROI bounding box instead of the whole grid.**
-First-order maps of an 18,114-voxel tumor in the same CT take 196 ms instead of
-311 ms.
-### Changed
+**Large derived images use smaller intermediate buffers.** Recursive LoG filters along native axes, Laws pools rotations as they are evaluated, and separable wavelets run in slabs. Three wavelet bands on a full HCC CT added 4.63 GiB to peak process memory, down from 21.11 GiB on an M5 Max.
 
-**`glcm_MCC` can differ from 1.1.0 in its last float32 digits.** ROI MCC now finds its eigenvalue on Metal by Householder reduction and bisection. On the tested ROIs it agrees with 1.1.0 to within 1.3e-6 relative.
-
+[Benchmark inputs and measurements](https://github.com/MedMLX/mlx-radiomics/blob/v1.2.0/docs/technical.md#120-extraction-timings)
 
 ## 1.1.0
 

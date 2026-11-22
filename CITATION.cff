@@ -3,8 +3,8 @@ message: If you use this software, please cite it as below.
 title: mlx-radiomics
 abstract: Radiomics features and voxel maps on the Apple Silicon GPU with native MLX.
 type: software
-version: 1.1.0
-date-released: 2026-11-14
+version: 1.2.0
+date-released: 2026-11-22
 license: Apache-2.0
 repository-code: https://github.com/MedMLX/mlx-radiomics
 url: https://medmlx.org
