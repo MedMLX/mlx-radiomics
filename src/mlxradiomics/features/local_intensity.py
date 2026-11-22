@@ -19,6 +19,7 @@ from typing import Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from mlxradiomics.contracts.types import HostArray
 from mlxradiomics.numerics.protocols import MetalKernel
 from mlxradiomics.numerics.runtime import array_from_bool, evaluate, mx
 
@@ -169,8 +170,12 @@ def _sphere_means(
     )[0]
 
 
-def _kernel_admits(values: NDArray[np.float64], sphere_voxels: int) -> bool:
+def _kernel_admits(values: HostArray, sphere_voxels: int) -> bool:
     """Whether float-float sphere sums over ``values`` are finite and unflushed."""
+    if values.dtype.kind in "iu":
+        # Admitted grids hold fewer than 2**30 voxels. Integer samples therefore
+        # give sphere sums below 2**94, with no underflowing source residuals.
+        return True
     if not np.all(np.isfinite(values)):
         return False
     magnitude = np.abs(values)
@@ -181,32 +186,36 @@ def _kernel_admits(values: NDArray[np.float64], sphere_voxels: int) -> bool:
     return nonzero.size == 0 or float(nonzero.min()) >= 2.0**_MIN_EXPONENT
 
 
-def _integer_sums_exact(values: NDArray[np.float64], sphere_voxels: int) -> bool:
+def _integer_sums_exact(values: HostArray, sphere_voxels: int) -> bool:
     """Every sphere partial sum and row prefix must be an exactly bounded integer.
 
     The float32 sum remains exact through 2**24, independent of signs/order. Row
     prefixes use signed int32, and the row-width bound prevents their overflow.
     """
-    largest = max(abs(float(values.min())), abs(float(values.max())))
+    real = cast(NDArray[np.integer | np.floating], values)
+    largest = max(abs(float(real.min())), abs(float(real.max())))
     if largest * sphere_voxels > 2**24 or largest * values.shape[-1] > 2**31 - 1:
         return False
-    return bool(np.all(values == np.trunc(values)))
+    return values.dtype.kind in "iu" or bool(np.all(values == np.trunc(values)))
 
 
 def local_intensity_statistics(
-    image: NDArray[np.float64],
+    image: HostArray,
     mask: NDArray[np.bool_],
     spacing: tuple[float, ...],
     scratch_mib: int,
     selected: Collection[str],
+    *,
+    sampled: NDArray[np.float64],
 ) -> dict[str, mx.array]:
     """Return ROI peaks using all available image voxels inside each physical sphere.
 
     Spacing is in millimetres. Image boundaries truncate the sphere and its denominator;
-    ROI boundaries do not. Maximum-intensity candidate ties use the source float64 values,
-    with signed zeros equal. Sphere means are evaluated only at candidate centres by
+    ROI boundaries do not. Maximum-intensity ties use the validated ``sampled`` values
+    in mask order, with signed zeros equal. Sphere means are evaluated at candidate centres by
     :func:`_sphere_means` when :func:`_kernel_admits` the ROI box plus sphere reach;
-    otherwise by :func:`_convolution_peaks`.
+    otherwise by :func:`_convolution_peaks`. Exact integer and float32 sources
+    stay compact until the selected kernel's resident buffer is built.
     """
     if image.ndim != 3:
         raise ValueError("local intensity features require a 3D image")
@@ -216,7 +225,9 @@ def local_intensity_statistics(
         raise ValueError("scratch_mib cannot hold the physical local-intensity sphere")
     occupied = np.argwhere(mask)
     if occupied.size == 0:
-        return _convolution_peaks(image, mask, spacing, scratch_mib, selected)
+        return _convolution_peaks(
+            np.asarray(image, dtype=np.float64), mask, spacing, scratch_mib, selected,
+        )
     lower = np.maximum(occupied.min(axis=0) - np.asarray(half), 0)
     upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
     box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
@@ -224,11 +235,12 @@ def local_intensity_statistics(
     # copy of a support that a local-only selection may immediately narrow.
     values = image[box]
     if not _kernel_admits(values, sphere_voxels):
-        return _convolution_peaks(image, mask, spacing, scratch_mib, selected)
+        return _convolution_peaks(
+            np.asarray(image, dtype=np.float64), mask, spacing, scratch_mib, selected,
+        )
     is_maximum: NDArray[np.bool_] | None = None
     if "LocalIntensityPeak" in selected:
-        roi_values = image[mask]
-        is_maximum = roi_values == np.max(roi_values)
+        is_maximum = sampled == sampled.max()
         if "GlobalIntensityPeak" not in selected and not np.all(is_maximum):
             # Admission above deliberately uses the original ROI support: moving a
             # remote exceptional value must not change which arithmetic path runs.
@@ -238,21 +250,26 @@ def local_intensity_statistics(
             upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
             box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
             values = image[box]
-    values = np.ascontiguousarray(values, dtype=np.float64)
     mode: _SphereSum
     low: mx.array | None = None
     if _integer_sums_exact(values, sphere_voxels):
         if "GlobalIntensityPeak" in selected:
             mode = "prefix"
             high = mx.reshape(mx.cumsum(
-                mx.array(values, dtype=mx.int32), axis=2, dtype=mx.int32,
+                mx.array(np.ascontiguousarray(values, dtype=np.int32)), axis=2, dtype=mx.int32,
             ), (-1,))
         else:
             mode = "integer"
-            high = mx.array(values.reshape(-1), dtype=mx.float32)
+            high = mx.array(np.ascontiguousarray(values, dtype=np.float32).reshape(-1))
+    elif (values.dtype.kind == "f" and values.dtype.itemsize <= 4) or (
+        values.dtype.kind in "iu" and values.dtype.itemsize <= 2
+    ):
+        mode = "float32"
+        high = mx.array(np.ascontiguousarray(values, dtype=np.float32).reshape(-1))
     else:
-        high32 = values.astype(np.float32)
-        low32 = (values - high32.astype(np.float64)).astype(np.float32)
+        values64 = np.asarray(values, dtype=np.float64)
+        high32 = values64.astype(np.float32)
+        low32 = (values64 - high32.astype(np.float64)).astype(np.float32)
         high = mx.array(high32.reshape(-1), dtype=mx.float32)
         mode = "float32"
         if np.any(low32):

@@ -127,6 +127,7 @@ def _roi_local_intensity(
     data: Prepared,
     settings: Settings,
     spacing: tuple[float, ...],
+    sampled: NDArray[np.float64],
 ) -> dict[str, mx.array]:
     """Evaluate the physical sphere directly from its source and center mask."""
     names = tuple(
@@ -139,11 +140,12 @@ def _roi_local_intensity(
     from mlxradiomics.features.local_intensity import local_intensity_statistics
 
     return local_intensity_statistics(
-        np.asarray(data.image, dtype=np.float64),
+        data.image,
         data.roi,
         spacing,
         settings.scratch_mib,
         names,
+        sampled=sampled,
     )
 
 
@@ -166,7 +168,7 @@ def _roi_intensity(
     physical sphere reads non-ROI voxels, and host-side shape families retain the
     input window with the complete morphology support and physical sphere halo.
     """
-    values = _roi_local_intensity(data, settings, spacing)
+    values = _roi_local_intensity(data, settings, spacing, sampled)
     first_names = tuple(
         name.removeprefix("firstorder_")
         for name in settings.features
