@@ -225,6 +225,7 @@ def shape_statistics(
     values: dict[str, mx.array] = {}
     pending_mvee: PendingMvee | None = None
     mvee_scale = 1.0
+    grid_hull_indices: NDArray[np.int32] | None = None
     if "VoxelVolume" in requested or "PixelSurface" in requested:
         count = mx.sum(array_from_bool(mask).astype(mx.int32))
         physical = scale_pow2(
@@ -303,10 +304,11 @@ def shape_statistics(
             if requested & _HULL_GEOMETRY_FEATURES:
                 evaluate(geometry.vertices)
                 grid = np.asarray(geometry.vertices, dtype=np.float64)
-                if requested & _HULL_FEATURES:
-                    hull = scipy_hull(grid)
+                grid_hull = scipy_hull(grid) if requested & _HULL_FEATURES else None
+                if grid_hull is not None:
+                    grid_hull_indices = grid_hull.vertices
                     hull_area, hull_volume = hull_measures(
-                        hull, geometry.vertices, parts,
+                        grid_hull, geometry.vertices, parts,
                     )
                     mesh_values["VolumeDensityConvexHull"] = (
                         geometry.grid_enclosed / (6 * hull_volume)
@@ -319,12 +321,14 @@ def shape_statistics(
                     # by the largest spacing, which keeps float32 projections near unit
                     # scale; the exact binary scale is restored in the density ratio.
                     physical_scale = max(spacing)
-                    normalized = grid * (
-                        np.asarray(spacing, dtype=np.float64) / physical_scale
-                    )
-                    hull = scipy_hull(normalized)
+                    if min(spacing) == physical_scale:
+                        # The normalized physical coordinates equal the grid exactly.
+                        normalized = grid
+                        hull = grid_hull if grid_hull is not None else scipy_hull(grid)
+                    else:
+                        normalized = grid * (np.asarray(spacing, dtype=np.float64) / physical_scale)
+                        hull = scipy_hull(normalized)
                     hull_points = normalized[hull.vertices]
-                    centered = hull_points - hull_points.mean(axis=0)
                     if requested & _MVEE_FEATURES:
                         # Khachiyan ascent occupies one GPU core on its own stream while
                         # the box, axis and diameter work below proceeds; it is waited
@@ -334,6 +338,7 @@ def shape_statistics(
                         mesh_values["VolumeDensityMinimumVolumeEnclosingEllipsoid"] = _PENDING
                         mesh_values["AreaDensityMinimumVolumeEnclosingEllipsoid"] = _PENDING
                     if requested & _OMBB_FEATURES:
+                        centered = hull_points - hull_points.mean(axis=0)
                         volume, area = ombb_measures(centered, hull)
                         volume_density, area_density = enclosing_densities(
                             geometry, volume, area, physical_scale,
@@ -346,7 +351,7 @@ def shape_statistics(
     try:
         _axis_and_diameter_values(
             values, requested, context, geometry, spacing, scratch_mib, ndim,
-            covariance_divisor, ellipsoid_area, needs_axes, needs_diameter,
+            covariance_divisor, ellipsoid_area, needs_axes, needs_diameter, grid_hull_indices,
         )
     except Exception:
         if pending_mvee is not None:
@@ -381,6 +386,7 @@ def _axis_and_diameter_values(
     ellipsoid_area: EllipsoidArea,
     needs_axes: bool,
     needs_diameter: bool,
+    grid_hull_indices: NDArray[np.int32] | None,
 ) -> None:
     """Add the covariance-axis, AEE and diameter features of shape_statistics."""
     if needs_axes:
@@ -434,7 +440,9 @@ def _axis_and_diameter_values(
     if needs_diameter:
         if geometry is None:
             raise RuntimeError("diameter features require mesh boundary vertices")
-        maximum = diameter_maxima(geometry.vertices, spacing, scratch_mib, ndim)
+        maximum = diameter_maxima(
+            geometry.vertices, spacing, scratch_mib, ndim, hull_indices=grid_hull_indices,
+        )
         evaluate(maximum)
         maximum_host = np.asarray(maximum, dtype=np.float32)
         if not np.all(np.isfinite(maximum_host)):

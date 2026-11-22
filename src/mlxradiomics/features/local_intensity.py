@@ -135,7 +135,8 @@ def _sphere_kernel(mode: _SphereSum = "compensated") -> MetalKernel:
             if (t >= count) return;
             uint row_count = params[1];
             int depth = int(params[2]), height = int(params[3]), width = int(params[4]);
-            int z = centers[3 * t], y = centers[3 * t + 1], x = centers[3 * t + 2];
+            int center = centers[t];
+            int z = center / (height * width), y = center / width % height, x = center % width;
             float sum = 0, carry = 0, residual = 0;
             uint used = 0;
             for (uint r = 0; r < row_count; ++r) {
@@ -158,13 +159,13 @@ def _sphere_means(
     high: mx.array, low: mx.array | None, shape: tuple[int, ...], centers: NDArray[np.int64],
     rows: NDArray[np.int32], mode: _SphereSum = "compensated",
 ) -> mx.array:
-    """Float32 sphere means at ``centers`` (box coordinates) over a box of ``shape``."""
+    """Float32 sphere means at C-order flat voxel indices within the cropped box."""
     count = int(centers.shape[0])
     params = mx.array([count, rows.size // 3, *shape], dtype=mx.uint32)
     threads = ((count + _THREADS - 1) // _THREADS) * _THREADS
     return _sphere_kernel(mode)(
         inputs=[high, *([low] if low is not None else []),
-                mx.array(centers.astype(np.int32).reshape(-1), dtype=mx.int32),
+                mx.array(centers, dtype=mx.int32),
                 mx.array(rows, dtype=mx.int32), params],
         grid=(threads, 1, 1), threadgroup=(_THREADS, 1, 1), output_shapes=[(count,)],
         output_dtypes=[mx.float32],
@@ -241,8 +242,9 @@ def local_intensity_statistics(
         lower = np.maximum(occupied.min(axis=0) - np.asarray(half), 0)
         upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
         box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
+        centers = np.asarray(np.ravel_multi_index(tuple((occupied - lower).T), image[box].shape))
     else:
-        occupied = np.argwhere(mask)
+        centers = np.flatnonzero(mask[box])
     values = image[box]
     mode: _SphereSum
     low: mx.array | None = None
@@ -270,10 +272,9 @@ def local_intensity_statistics(
             mode = "compensated"
             low = mx.array(low32.reshape(-1), dtype=mx.float32)
     shape = tuple(int(size) for size in values.shape)
-    relative = occupied - np.asarray([part.start for part in box], dtype=np.int64)
     peaks: dict[str, mx.array] = {}
     if global_peak:
-        means = _sphere_means(high, low, shape, relative, rows, mode)
+        means = _sphere_means(high, low, shape, centers, rows, mode)
         peaks["GlobalIntensityPeak"] = mx.max(means)
         if is_maximum is not None:
             peaks["LocalIntensityPeak"] = mx.max(
@@ -281,7 +282,7 @@ def local_intensity_statistics(
             )
     elif "LocalIntensityPeak" in selected:
         peaks["LocalIntensityPeak"] = mx.max(
-            _sphere_means(high, low, shape, relative, rows, mode),
+            _sphere_means(high, low, shape, centers, rows, mode),
         )
     evaluate(*peaks.values())
     return {f"localintensity_{name}": mx.reshape(peaks[name], (1,)) for name in selected}

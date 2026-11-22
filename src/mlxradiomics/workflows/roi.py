@@ -35,7 +35,8 @@ def _roi_window(data: Prepared, settings: Settings) -> tuple[slice, ...]:
     because each window axis is either the whole image axis or longer than the reach.
     It also leaves a non-ROI shell for GLDZM border distances.
     """
-    occupied = data.sampling_mask | data.shape_roi
+    occupied = (data.sampling_mask if data.sampling_mask is data.shape_roi
+                else data.sampling_mask | data.shape_roi)
     reach = max(*settings.distances, settings.neighborhood_radius)
     window = occupied_window(occupied, [reach] * occupied.ndim)
     assert window is not None
@@ -274,21 +275,25 @@ def _roi_intensity(
                 ).items()
             }
         )
-    if explicit_texture(settings):
+    explicit = explicit_texture(settings)
+    if explicit:
+        flat_mask = mx.reshape(mask, (1, -1))
+        morphology = (flat_mask if data.sampling_mask is data.shape_roi
+                      else mx.reshape(array_from_bool(data.shape_roi[window]), (1, -1)))
         values.update(
             aggregated_texture_statistics(
                 mx.reshape(bins, (1, -1)),
-                mx.reshape(mask, (1, -1)),
+                flat_mask,
                 image.shape,
                 data.gray_levels,
                 settings,
-                morphology=mx.reshape(array_from_bool(data.shape_roi[window]), (1, -1)),
+                morphology=morphology,
                 histogram_method=method,
             )
         )
     elif any(name.startswith("glcm_") for name in settings.features):
         values.update(aggregate_roi_glcm(bins, mask, data.gray_levels, settings, dtype, method))
-    if not explicit_texture(settings):
+    if not explicit:
         values.update(
             texture_statistics(
                 mx.reshape(bins, (1, -1)),

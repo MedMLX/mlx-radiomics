@@ -270,6 +270,9 @@ class _FirstOrderTerms:
     @cached_property
     def centering_scale(self) -> mx.array:
         """Per-row factor 0.5 for near-overflow rows, else 1."""
+        if self.integer_source:
+            # Admission bounds every sample magnitude by 2**24.
+            return mx.ones((self.values.shape[0],), dtype=self.values.dtype)
         # Only extreme rows need a binary half-scale before subtraction. This preserves
         # pair precision while preventing a finite opposite-sign span from overflowing;
         # ordinary and tiny values keep their original exponent range.
@@ -603,6 +606,10 @@ class _FirstOrderTerms:
         # Only rows holding such a value restore the amplitude after the normalized
         # reduction; the others keep the direct sum, exact for small integer squares.
         shifted = self.shifted
+        direct = _sum_rows(mx.where(self.valid, shifted**2, 0))
+        if self.integer_source and self.shift == 0:
+            # Every nonzero integer has a normal square.
+            return direct
         # 0x20000000 is the float32 bit pattern of 2**-63.
         tiny_square = mx.any(_per_sample(
             "valid[t] && shifted[t] != 0.0f && fabs(shifted[t]) < as_type<float>(0x20000000u)",
@@ -611,7 +618,7 @@ class _FirstOrderTerms:
         return mx.where(
             tiny_square,
             (self.scaled_energy * self.rms_scale) * self.rms_scale,
-            _sum_rows(mx.where(self.valid, shifted**2, 0)),
+            direct,
         )
 
     @cached_property
@@ -864,6 +871,11 @@ def first_order(
     # integer source has an exact pair, so its spread and unshifted energy are resolved
     # and only TotalEnergy's volume scaling can underflow.
     exact_unshifted = terms.integer_source and shift == 0
+    # A nonzero integer row has amplitude and normalized energy at least one.
+    # For a normal voxel volume its half-exponent is at least -63. Both scale
+    # factors and the intermediate mantissa product are normal, and their
+    # product is at least the smallest normal float32 volume.
+    normal_volume = voxel_volume >= 2.0**-126
     rejections: list[tuple[str, mx.array]] = []
     if source is None or not source.source_normal:
         rejections.append(("flushed", terms.flushed_extrema(requested)
@@ -881,7 +893,7 @@ def first_order(
     underflow = [
         (name, condition(terms)) for name, condition in _UNDERFLOW_CONDITIONS.items()
         if (requested is None or name in requested)
-        and (not exact_unshifted or name == "TotalEnergy")
+        and (not exact_unshifted or (name == "TotalEnergy" and not normal_volume))
     ]
     if not rejections and not underflow:
         return features

@@ -17,6 +17,17 @@ def _pair(maximum: float = 1.0) -> NDArray[np.float64]:
     return (ct - ct.min()) / np.ptp(ct) * maximum
 
 
+def test_roi_mcc_is_identical_across_direction_batch_budgets() -> None:
+    # At 150 levels the two budgets process directions singly and together.
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 150, size=(8, 9, 13), dtype=np.int32)
+    mask = rng.random(image.shape) > 0.27
+    settings = Settings(features=("glcm_MCC",), bin_width=1, scratch_mib=1)
+    small = extract(image, mask, spacing=(1, 1, 1), settings=settings)
+    large = extract(image, mask, spacing=(1, 1, 1), settings=replace(settings, scratch_mib=64))
+    assert small.features == large.features
+
+
 @pytest.mark.parametrize("conventions", ["pyradiomics", "ibsi"])
 @pytest.mark.parametrize("feature", [
     "firstorder_Entropy", "intensityhistogram_Mean", "glrlm_ShortRunEmphasis",

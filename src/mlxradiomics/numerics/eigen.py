@@ -96,11 +96,118 @@ def _jacobi_kernel(size: int, lanes: int) -> MetalKernel:
     )
 
 
+# The padded matrix and rotation data fit in 32 KiB of threadgroup storage.
+_PARALLEL_MAX_SIZE = 88
+_PARALLEL_LANES = 256
+
+
+@lru_cache(maxsize=32)
+def _parallel_jacobi_kernel(size: int) -> MetalKernel:
+    """Rotate disjoint pairs of axes together in threadgroup memory."""
+    width = size + size % 2
+    pairs = width // 2
+    return cast(
+        MetalKernel,
+        mx.fast.metal_kernel(
+            name="mlxradiomics_jacobi_parallel",
+            input_names=["matrix"],
+            output_names=["eigenvalues", "converged"],
+            source=f"""
+        constexpr uint n = {size};
+        constexpr uint width = {width};
+        // An odd stride separates column accesses across memory banks.
+        constexpr uint stride = width + 1;
+        constexpr uint anchor = width - 1;
+        constexpr uint pairs = {pairs};
+        uint row = threadgroup_position_in_grid.x;
+        uint lane = thread_position_in_threadgroup.x;
+        threadgroup float work[width * stride];
+        threadgroup uint2 axes[pairs];
+        threadgroup float2 rotation[pairs];
+        threadgroup bool rotated[pairs];
+        threadgroup bool done;
+
+        // An extra zero axis lets an odd-sized matrix use complete pairings.
+        for (uint k = lane; k < width * width; k += {_PARALLEL_LANES}) {{
+            uint i = k / width, j = k % width;
+            work[i * stride + j] = (i < n && j < n) ? matrix[(row * n + i) * n + j] : 0.0f;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint sweep = 0; sweep < 100; ++sweep) {{
+            bool changed = false;
+            // Rotate all disjoint pairs in one round. Holding one axis
+            // fixed and rotating the others visits every pair per sweep.
+            for (uint round = 0; round < anchor; ++round) {{
+                if (lane < pairs) {{
+                    uint p = lane == 0 ? anchor : (round + lane) % anchor;
+                    uint q = (round + anchor - lane) % anchor;
+                    axes[lane] = uint2(p, q);
+                    float apq = work[p * stride + q];
+                    float app = work[p * stride + p];
+                    float aqq = work[q * stride + q];
+                    float threshold = (1e-7f * sqrt(abs(app))) * sqrt(abs(aqq));
+                    float2 cs = float2(1.0f, 0.0f);
+                    if (!(abs(apq) <= threshold)) {{
+                        changed = true;
+                        float delta = 0.5f * aqq - 0.5f * app;
+                        float scale = max(abs(delta), abs(apq));
+                        float d = delta / scale, off = apq / scale;
+                        float t = copysign(1.0f, delta) * off /
+                                  (abs(d) + sqrt(d * d + off * off));
+                        float c = rsqrt(1 + t * t);
+                        cs = float2(c, t * c);
+                        work[p * stride + p] = app - t * apq;
+                        work[q * stride + q] = aqq + t * apq;
+                        work[p * stride + q] = work[q * stride + p] = 0;
+                    }}
+                    rotation[lane] = cs;
+                }}
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                // Each off-diagonal 2x2 block has one writer, so these
+                // two-sided updates can run in place.
+                for (uint block = lane; block < pairs * pairs; block += {_PARALLEL_LANES}) {{
+                    uint i = block / pairs, j = block % pairs;
+                    if (i >= j) continue;
+                    float2 a = rotation[i], b = rotation[j];
+                    if (a.y == 0 && b.y == 0) continue;
+                    uint2 left = axes[i], right = axes[j];
+                    uint p = left.x, q = left.y, r = right.x, s = right.y;
+                    float pr = work[p * stride + r], ps = work[p * stride + s];
+                    float qr = work[q * stride + r], qs = work[q * stride + s];
+                    float x = a.x * pr - a.y * qr, y = a.x * ps - a.y * qs;
+                    float z = a.x * qr + a.y * pr, w = a.x * qs + a.y * ps;
+                    work[p * stride + r] = work[r * stride + p] = b.x * x - b.y * y;
+                    work[p * stride + s] = work[s * stride + p] = b.x * y + b.y * x;
+                    work[q * stride + r] = work[r * stride + q] = b.x * z - b.y * w;
+                    work[q * stride + s] = work[s * stride + q] = b.x * w + b.y * z;
+                }}
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }}
+            if (lane < pairs) rotated[lane] = changed;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane == 0) {{
+                bool any_rotated = false;
+                for (uint k = 0; k < pairs; ++k) any_rotated |= rotated[k];
+                done = !any_rotated;
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (done) break;
+        }}
+        if (lane < n) eigenvalues[row * n + lane] = work[lane * stride + lane];
+        if (lane == 0) converged[row] = done;
+            """,
+        ),
+    )
+
+
 def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
     """Return the eigenvalues of a batch of symmetric matrices in ascending order.
 
     The kernel runs one threadgroup per matrix in float32 and does not check symmetry.
-    Small matrices fit in threadgroup memory; larger matrices use a device buffer.
+    Small matrices use cyclic rotations in threadgroup memory. Medium matrices
+    rotate disjoint axis pairs in parallel there. Larger matrices use a device buffer.
     A sweep converges when every off-diagonal magnitude is at most ``1e-7`` times
     the geometric mean of its two diagonal magnitudes. This pair-local criterion
     resolves small correlated blocks independently of other axes' scales. Rotation
@@ -128,13 +235,15 @@ def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
         # A singleton spectrum has no off-diagonal entries or rotations, and its
         # sole value is already sorted. Retain the original float32 words directly.
         return matrix[:, 0, :]
-    lanes = _lanes(size)
+    parallel = _LOCAL_MATRIX_SIZE < size <= _PARALLEL_MAX_SIZE
+    lanes = _PARALLEL_LANES if parallel else _lanes(size)
     shapes: list[tuple[int, ...]] = [(matrix.shape[0], size), (matrix.shape[0],)]
     dtypes = [mx.float32, mx.bool_]
-    if size > _LOCAL_MATRIX_SIZE:
+    if not parallel and size > _LOCAL_MATRIX_SIZE:
         shapes.insert(0, matrix.shape)
         dtypes.insert(0, mx.float32)
-    *_, values, converged = _jacobi_kernel(size, lanes)(
+    kernel = _parallel_jacobi_kernel(size) if parallel else _jacobi_kernel(size, lanes)
+    *_, values, converged = kernel(
         inputs=[matrix],
         grid=(matrix.shape[0] * lanes, 1, 1),
         threadgroup=(lanes, 1, 1),

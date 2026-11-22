@@ -110,30 +110,17 @@ def _compact(points: mx.array, valid: mx.array, ndim: int) -> mx.array:
 _MAX_MESH_EXTENT = 2**22
 
 
-def _mesh_chunk(
-    padded: mx.array,
-    coords: mx.array,
-    parts: SpacingParts,
-    *,
-    include_vertices: bool = True,
-) -> tuple[mx.array, mx.array, mx.array]:
-    """Process the mesh cells whose origins in the padded mask are ``coords``.
+def _facet_geometry(parts: SpacingParts) -> tuple[mx.array, mx.array, mx.array]:
+    """Tabulate each marching case's physical boundary and grid-space facet planes.
 
-    Returns the summed boundary measure normalized by ``2**boundary_exponent``, the
-    summed signed enclosed measure in grid units, and the boundary vertices in grid
-    coordinates.
+    Edge differences are independent of a cell's origin on the exact half-grid.
+    Only the grid-space anchor needs translation for the volume integral.
     """
     ndim = len(parts.mantissa)
     tables = _tables(ndim)
-    corners, facets, vertex = tables.corners, tables.facets, tables.vertices
-    strides = mx.array([prod(padded.shape[i + 1 :]) for i in range(ndim)], dtype=mx.int32)
-    indexes = mx.sum((coords[:, None, :] + corners[None, :, :]) * strides, axis=2)
-    occupancy = mx.take(mx.reshape(padded, (-1,)), indexes)
-    code = mx.sum(occupancy.astype(mx.int32) * mx.array([1 << i for i in range(2**ndim)]), 1)
-    selected = mx.take(facets, code, axis=0)
-    selected = selected[:, : 15 if ndim == 3 else 4]
+    selected = tables.facets[:, : 15 if ndim == 3 else 4]
     valid = selected[:, ::ndim] >= 0
-    points = coords[:, None, :] + mx.take(vertex, mx.maximum(selected, 0), axis=0)
+    points = mx.take(tables.vertices, mx.maximum(selected, 0), axis=0)
     points = mx.reshape(points.astype(mx.float32), (-1, 5 if ndim == 3 else 2, ndim, ndim))
     mantissa = mx.array(parts.mantissa, dtype=mx.float32)
     e0, e1, e2 = (parts.exponent + (0, 0, 0))[:3]
@@ -144,7 +131,8 @@ def _mesh_chunk(
         # spacing determinant after summation; physical-coordinate products lose
         # precision through cancellation on large or disconnected anisotropic ROIs.
         ia, ib, ic = points[:, :, 0], points[:, :, 1], points[:, :, 2]
-        measure = mx.sum(cross_product(ia - ic, ib - ic) * ic, axis=2)
+        normal = cross_product(ia - ic, ib - ic)
+        anchor = ic
         # Cross components separate into grid factors and one spacing-axis pair:
         # c0 = s1*s2*C0, c1 = s2*s0*C1, c2 = s0*s1*C2. Evaluate each component from its
         # pair exponent so a face whose naturally scaled area is representable does not
@@ -160,26 +148,56 @@ def _mesh_chunk(
         safe = mx.where(largest > 0, largest, 1)
         normalized = mx.stack([n0 / safe, n1 / safe, n2 / safe], axis=-1)
         boundary = 0.5 * safe * mx.sqrt(mx.sum(normalized * normalized, axis=-1))
-        boundary = mx.where(valid, boundary, 0)
-        edge_ends, edges = ((7, 6), (7, 4), (7, 3)), (6, 7, 11)
     else:
         # Difference first on the exact half-index grid: this avoids both subtracting
         # large physical products and losing edge lengths between distant components.
         ia, ib = points[:, :, 0], points[:, :, 1]
         delta = ib - ia
-        measure = ia[:, :, 0] * delta[:, :, 1] - ia[:, :, 1] * delta[:, :, 0]
+        normal = mx.stack([delta[..., 1], -delta[..., 0]], axis=-1)
+        anchor = ia
         edge = delta * mantissa
         n0 = scale_pow2(edge[..., 0], e0 - parts.boundary_exponent)
         n1 = scale_pow2(edge[..., 1], e1 - parts.boundary_exponent)
         largest = mx.maximum(mx.abs(n0), mx.abs(n1))
         safe = mx.where(largest > 0, largest, 1)
         boundary = safe * mx.sqrt((n0 / safe) * (n0 / safe) + (n1 / safe) * (n1 / safe))
-        boundary = mx.where(valid, boundary, 0)
+
+    return mx.where(valid, boundary, 0), mx.where(valid[..., None], normal, 0), anchor
+
+
+def _mesh_chunk(
+    padded: mx.array,
+    coords: mx.array,
+    geometry: tuple[mx.array, mx.array, mx.array],
+    *,
+    include_vertices: bool = True,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Process the mesh cells whose origins in the padded mask are ``coords``.
+
+    Returns the summed boundary measure normalized by ``2**boundary_exponent``, the
+    summed signed enclosed measure in grid units, and the boundary vertices in grid
+    coordinates.
+    """
+    ndim = padded.ndim
+    tables = _tables(ndim)
+    corners, vertex = tables.corners, tables.vertices
+    strides = mx.array([prod(padded.shape[i + 1 :]) for i in range(ndim)], dtype=mx.int32)
+    indexes = mx.sum((coords[:, None, :] + corners[None, :, :]) * strides, axis=2)
+    occupancy = mx.take(mx.reshape(padded, (-1,)), indexes)
+    code = mx.sum(occupancy.astype(mx.int32) * mx.array([1 << i for i in range(2**ndim)]), 1)
+    boundary_by_code, normal_by_code, anchor_by_code = geometry
+    boundary = mx.take(boundary_by_code, code, axis=0)
+    normal = mx.take(normal_by_code, code, axis=0)
+    anchor = coords[:, None, :] + mx.take(anchor_by_code, code, axis=0)
+    measure = mx.sum(normal * anchor, axis=2)
+    if ndim == 3:
+        edge_ends, edges = ((7, 6), (7, 4), (7, 3)), (6, 7, 11)
+    else:
         edge_ends, edges = ((3, 0), (3, 2)), (3, 2)
     if not include_vertices:
         return (
-            mx.sum(mx.where(valid, boundary, 0)),
-            mx.sum(mx.where(valid, measure, 0)),
+            mx.sum(boundary),
+            mx.sum(measure),
             mx.zeros((0, ndim), dtype=mx.float32),
         )
     starts = mx.array([start for start, _ in edge_ends], dtype=mx.int32)
@@ -187,8 +205,8 @@ def _mesh_chunk(
     vertex_valid = ((code[:, None] >> starts) & 1) != ((code[:, None] >> ends) & 1)
     edge_points = coords[:, None, :] + mx.take(vertex, mx.array(edges), axis=0)[None]
     return (
-        mx.sum(mx.where(valid, boundary, 0)),
-        mx.sum(mx.where(valid, measure, 0)),
+        mx.sum(boundary),
+        mx.sum(measure),
         _compact(edge_points.astype(mx.float32), vertex_valid, ndim),
     )
 
@@ -234,6 +252,7 @@ def mesh_geometry(
     batch_size = max(1, scratch_mib * 1024**2 // 1024)
     boundary_norm = mx.array(0, dtype=mx.float32)
     enclosed = mx.array(0, dtype=mx.float32)
+    facet_geometry = _facet_geometry(parts)
     boundary_points: list[mx.array] = []
     for start in range(0, width, batch_size):
         indexes = mx.arange(start, min(width, start + batch_size), dtype=mx.int32)
@@ -244,7 +263,7 @@ def mesh_geometry(
         part_boundary, part_enclosed, vertices = _mesh_chunk(
             padded,
             coords,
-            parts,
+            facet_geometry,
             include_vertices=include_vertices,
         )
         boundary_norm, enclosed = boundary_norm + part_boundary, enclosed + part_enclosed

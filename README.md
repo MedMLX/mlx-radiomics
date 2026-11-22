@@ -10,7 +10,7 @@ Extract radiomics features and voxel maps on the Apple Silicon GPU with native M
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
-[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md)
+[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md) · [Preprint](https://www.medrxiv.org/content/10.64898/2026.11.08.26367560v1)
 
 <img src="https://raw.githubusercontent.com/MedMLX/mlx-radiomics/main/docs/feature-maps.png" alt="CT tumor ROI and six radiomics feature-map overlays" width="100%">
 

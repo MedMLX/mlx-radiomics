@@ -133,6 +133,22 @@ def test_mcc_preserves_perfect_dependence_for_rare_states(exponent: int) -> None
     assert actual == pytest.approx(1, rel=1e-6)
 
 
+@pytest.mark.parametrize("levels", [83, 84])
+def test_mcc_preserves_the_largest_of_two_nearly_tied_modes(levels: int) -> None:
+    from mlxradiomics.numerics.eigen import maximal_correlation
+    from mlxradiomics.numerics.runtime import mx
+
+    # Zero-sum orthogonal modes leave every marginal equal. Each has
+    # squared norm 4, so the larger singular value is 4 * 1024 / (levels * base).
+    base = 180_001
+    u, v = np.zeros((2, levels), dtype=np.int64)
+    states = [0, 1, levels // 2, levels - 1]
+    u[states], v[states] = [1, -1, 1, -1], [1, 1, -1, -1]
+    counts = (base - 1024 * np.outer(u, u) + 1023 * np.outer(v, v)).astype(np.uint32)
+    actual = np.asarray(maximal_correlation(mx.array(counts[None, ...])), dtype=np.float32).item()
+    assert actual == pytest.approx(4 * 1024 / (levels * base), rel=1e-5, abs=1e-12)
+
+
 def test_mcc_of_an_empty_batch_is_empty() -> None:
     # A zero-row batch has no matrices, so there is no MCC to report. Its Gram matrix comes
     # from an empty matmul; dispatching the Jacobi kernel on that buffer crashed the process.

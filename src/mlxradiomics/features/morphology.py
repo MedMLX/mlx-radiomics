@@ -17,7 +17,7 @@ pair once in a tiled Metal kernel without storing a pair matrix. Row outputs are
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from functools import lru_cache
-from math import frexp, isfinite
+from math import frexp, isfinite, prod
 from typing import cast
 
 import numpy as np
@@ -216,7 +216,7 @@ def _integrated_intensity(
 
 
 # Pair tiles staged in threadgroup memory; one thread per row voxel in a threadgroup.
-_PAIR_TILE = 256
+_PAIR_TILE = 64
 # Rows per dispatch keep each command buffer short on large ROIs.
 _PAIR_ROWS = 1 << 16
 
@@ -226,8 +226,27 @@ _PAIR_ROWS = 1 << 16
 _UNSCALED_UNIT_FLOOR = 2.0**-63
 
 
-@lru_cache(maxsize=2)
-def _pair_kernel(scaled: bool) -> MetalKernel:
+@lru_cache(maxsize=1)
+def _weight_table_kernel() -> MetalKernel:
+    """Tabulate weights at absolute or signed lateral displacements about the supplied origin."""
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_distance_weights", input_names=["unit", "shape"],
+        output_names=["weights"],
+        header="\n#pragma clang fp contract(off)\n#pragma clang fp reassociate(off)\n",
+        source="""
+            uint3 d = thread_position_in_grid;
+            int dy = int(d.y) - int(shape[3]), dz = int(d.x) - int(shape[4]);
+            float x = float(d.z) * unit[0], y = float(abs(dy)) * unit[1];
+            float z = float(abs(dz)) * unit[2];
+            uint index = (d.z * shape[1] + d.y) * shape[2] + d.x;
+            float distance = metal::precise::sqrt(x*x + y*y + z*z);
+            weights[index] = d.z || dy || dz ? metal::precise::divide(1.0f, distance) : 0;
+        """,
+    ))
+
+
+@lru_cache(maxsize=4)
+def _pair_kernel(scaled: bool, lookup: bool, linear: bool) -> MetalKernel:
     """Tiled unordered-pair kernel for the inverse-distance weight and both numerators.
 
     Each thread owns row voxel ``i`` and visits only column voxels ``j > i`` through
@@ -257,9 +276,20 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
         if scaled else
         "float distance = metal::precise::sqrt(qx*qx + qy*qy + qz*qz);"
     )
+    weight = (
+        "float w = metric[tx[k] + bias];" if linear else
+        """uint at = (abs(dx) * metric_shape[1] + abs(dy)) * metric_shape[2] + abs(dz);
+           float w = metric[at];"""
+        if lookup else
+        f"""float qx = float(dx) * metric[0], qy = float(dy) * metric[1];
+            float qz = float(dz) * metric[2];
+            {distance}
+            float w = metal::precise::divide(1.0f, distance);"""
+    )
+    mode = "linear" if linear else "lookup" if lookup else "scaled" if scaled else "direct"
     return cast(MetalKernel, mx.fast.metal_kernel(
-        name=f"mlxradiomics_spatial_pairs_{'scaled' if scaled else 'direct'}",
-        input_names=["coords", "values", "unit", "params"],
+        name=f"mlxradiomics_spatial_pairs_{mode}",
+        input_names=["coords", "values", "metric", "params"],
         output_names=["sums"],
         header="""
             #pragma clang fp contract(off)
@@ -268,6 +298,14 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
                 float t = s + x;
                 float v = t - s;
                 c += (s - (t - v)) + (x - v);
+                s = t;
+            }
+            inline void add_weight(thread float &s, thread float &c, float x) {
+                // Lookup weights lie between 1/(sqrt(3)*2^31) and 2^63. A row has
+                // at most 2^20 terms, so neither the sum overflows nor a nonzero
+                // rounding residual flushes. Magnitude-ordered FastTwoSum is exact.
+                float t = s + x;
+                c += min(s,x) - (t - max(s,x));
                 s = t;
             }
         """,
@@ -280,8 +318,12 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
             // First row voxel of this threadgroup; row voxel i is first + lane.
             uint first = start + threadgroup_position_in_grid.x * {_PAIR_TILE};
             int ix = coords[3 * i], iy = coords[3 * i + 1], iz = coords[3 * i + 2];
+            int bias = 0;
+            if constexpr ({str(linear).lower()}) {{
+                int height = metric_shape[1], width = metric_shape[2];
+                bias = (height/2 - ix*height - iy)*width + width/2 - iz;
+            }}
             float vi = values[i];
-            float ux = unit[0], uy = unit[1], uz = unit[2];
             float ws = 0, wc = 0, ms = 0, mc = 0, gs = 0, gc = 0;
             threadgroup int tx[{_PAIR_TILE}];
             threadgroup int ty[{_PAIR_TILE}];
@@ -290,22 +332,27 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
             for (uint base = first; base < n; base += {_PAIR_TILE}) {{
                 uint j = base + lane;
                 if (j < n) {{
-                    tx[lane] = coords[3 * j]; ty[lane] = coords[3 * j + 1];
-                    tz[lane] = coords[3 * j + 2]; tv[lane] = values[j];
+                    if constexpr ({str(linear).lower()}) {{
+                        tx[lane] = (coords[3*j]*int(metric_shape[1]) + coords[3*j+1])
+                                   *int(metric_shape[2]) + coords[3*j+2];
+                    }} else {{
+                        tx[lane] = coords[3 * j]; ty[lane] = coords[3 * j + 1];
+                        tz[lane] = coords[3 * j + 2];
+                    }}
+                    tv[lane] = values[j];
                 }}
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 uint count = min(uint({_PAIR_TILE}), n - base);
                 // In the diagonal tile, column k is voxel first + k; keep only j > i.
                 uint k0 = base == first ? lane + 1 : 0;
                 if (active) {{
+                    {"#pragma clang loop unroll_count(16)" if lookup else ""}
                     for (uint k = k0; k < count; ++k) {{
-                        int dx = tx[k] - ix, dy = ty[k] - iy, dz = tz[k] - iz;
-                        float qx = float(dx) * ux, qy = float(dy) * uy, qz = float(dz) * uz;
-                        {distance}
-                        float w = metal::precise::divide(1.0f, distance);
+                        {"" if linear else "int dx = tx[k] - ix, dy = ty[k] - iy, dz = tz[k] - iz;"}
+                        {weight}
                         float vj = tv[k];
                         float diff = vi - vj;
-                        two_sum_add(ws, wc, w);
+                        {"add_weight" if lookup else "two_sum_add"}(ws, wc, w);
                         two_sum_add(ms, mc, w * vi * vj);
                         two_sum_add(gs, gc, w * diff * diff);
                     }}
@@ -324,17 +371,38 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
 
 def _pair_sums(
     coordinates: mx.array, centered: mx.array, unit: mx.array, count: int, scratch_mib: int,
-    scaled: bool,
+    scaled: bool, shape: tuple[int, ...],
 ) -> tuple[mx.array, mx.array, mx.array]:
     """Sum ordered pairs with bounded row outputs and compensated chunk totals."""
     rows_per_dispatch = min(_PAIR_ROWS, max(1, scratch_mib * 1024**2 // 64))
+    # Keep the original row partitions and their summation order. Reuse a
+    # table only for compact domains with space beyond the row working set.
+    cells = prod(shape)
+    row_bytes = 64 * min(count, rows_per_dispatch)
+    available = scratch_mib * 1024**2 - row_bytes
+    lookup = (not scaled and count >= 4096 and cells <= 8 * count
+              and cells * 4 <= available)
+    # C-order mask coordinates give j >= i on the first axis for every j > i.
+    # Signed lateral displacements can therefore share a linear table address.
+    signed_shape = (shape[0], 2 * shape[1] - 1, 2 * shape[2] - 1)
+    linear = lookup and 4 * prod(signed_shape) <= available
+    metric = unit
+    if lookup:
+        table = signed_shape if linear else shape
+        origin = (shape[1] - 1, shape[2] - 1) if linear else (0, 0)
+        metric = _weight_table_kernel()(
+            inputs=[unit, mx.array((*table, *origin), dtype=mx.uint32)],
+            grid=(table[2], table[1], table[0]),
+            threadgroup=(32, 4, 1),
+            output_shapes=[table], output_dtypes=[mx.float32],
+        )[0]
     accumulator = CompensatedTotal(6)
     for start in range(0, count, rows_per_dispatch):
         rows = min(rows_per_dispatch, count - start)
         params = mx.array([count, start, rows], dtype=mx.uint32)
         threads = ((rows + _PAIR_TILE - 1) // _PAIR_TILE) * _PAIR_TILE
-        partial = _pair_kernel(scaled)(
-            inputs=[coordinates, centered, unit, params], grid=(threads, 1, 1),
+        partial = _pair_kernel(scaled, lookup, linear)(
+            inputs=[coordinates, centered, metric, params], grid=(threads, 1, 1),
             threadgroup=(_PAIR_TILE, 1, 1), output_shapes=[(rows * 6,)],
             output_dtypes=[mx.float32],
         )[0]
@@ -396,6 +464,7 @@ def _spatial_autocorrelation(
                  for axis, used in enumerate(active))
     total_weight, moran_numerator, geary_numerator = _pair_sums(
         mx.reshape(coordinates_mx, (-1,)), centered, unit, count, scratch_mib, scaled,
+        source.mask.shape,
     )
     evaluate(total_weight, moran_numerator, geary_numerator)
     # Every valid weight is positive, so any non-finite weight, including from a distance

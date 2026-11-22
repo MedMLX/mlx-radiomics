@@ -6,8 +6,9 @@ intensity-dependent morphology need 3D input. `shape2D` on 3D input needs
 needs at least two ROI voxels.
 
 **Filters.** The default recursive LoG needs 3D input with at least four samples
-per axis and sigma/spacing at most 200. LBP3D needs 3D input, a masked kernel and
-8- or 16-bit integer images.
+per axis and sigma/spacing at most 200. LBP3D needs 3D input and a masked kernel.
+Integer inputs are limited to 8 or 16 bits; floating-point inputs must pass the
+source-precision checks for unambiguous binary comparisons.
 
 **Simoncelli and Riesz are unavailable.** Both filters need MLX 0.32.5 or later,
 and this release pins MLX 0.32.4, whose batched Metal FFT can write past its

@@ -105,10 +105,7 @@ def _row_statistics(
         ),
         "DifferenceAverage": mean_difference,
         "DifferenceEntropy": entropy(differences),
-        # An eager float32 ``**`` lowers to Metal ``pow``, which is not correctly rounded
-        # on every Apple GPU (0.5**2 gives 0.24999997 on M1); squaring by multiplication
-        # keeps an exact centered offset's square exact.
-        "DifferenceVariance": reduce(p * mx.square(centered_difference)),
+        "DifferenceVariance": reduce(p * centered_difference * centered_difference),
         "Dissimilarity": mean_difference,
         "Id": reduce(p / (1 + delta)),
         "Idm": reduce(p / (1 + delta**2)),

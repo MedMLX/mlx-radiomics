@@ -230,6 +230,18 @@ def test_mvee_matches_float64_khachiyan_on_random_hulls(seed: int) -> None:
     np.testing.assert_allclose(semi, expected, rtol=1e-5)
 
 
+def test_mvee_axes_preserve_tied_vertex_selection() -> None:
+    # Symmetry gives several vertices the same lifted value. Changing the tie
+    # winner changes all three axes when the ascent reaches its stopping tolerance.
+    signs = ((1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1))
+    points = [np.roll(vector, axis) * sign
+              for vector in ((5, 0, 0), (4, 3, 0), (4, 2, 2))
+              for axis in range(3) for sign in signs]
+    hull = np.roll(np.unique(points, axis=0), 1, axis=0).astype(np.float32)
+    expected = np.array([4.999459, 4.993265, 4.9903207], dtype=np.float32)
+    np.testing.assert_array_equal(_mvee_checked(hull), expected)
+
+
 def test_mvee_of_sampled_ellipsoid_surface_recovers_known_axes() -> None:
     axes = np.array([3.0, 2.0, 1.3])
     count = 400
