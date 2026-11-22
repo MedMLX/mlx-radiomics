@@ -40,10 +40,13 @@ from mlxradiomics.filters import (
     separable_wavelet_responses,
     simoncelli_response,
 )
+from mlxradiomics.filters._kernels import scaled_central_difference
 from mlxradiomics.filters.convolution import laws_energy_response
 from mlxradiomics.filters.lbp2d import lbp2d
 from mlxradiomics.filters.riesz_steering import align_riesz, riesz_multi_indices
 from mlxradiomics.numerics.runtime import evaluate, mx
+
+_FLOAT32 = np.finfo(np.float32)
 
 
 @dataclass(frozen=True)
@@ -507,6 +510,9 @@ def _gradient(
         left = mx.take(source, mx.maximum(indexes - 1, 0), axis=axis)
         right = mx.take(source, mx.minimum(indexes + 1, size - 1), axis=axis)
         step = spacing[axis] if use_spacing else 1.0
+        if 0 < step < float(_FLOAT32.tiny) or step > float(_FLOAT32.max):
+            components.append(scaled_central_difference(left, right, step))
+            continue
         difference = right - left
         halved = mx.where(
             mx.isinf(difference) & mx.isfinite(right) & mx.isfinite(left),

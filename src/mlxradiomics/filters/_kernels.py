@@ -7,13 +7,63 @@ original array-expression implementation of the IBSI mean filter.
 """
 
 from functools import lru_cache
-from math import prod
+from math import frexp, prod
 from typing import cast
 
 from mlxradiomics.numerics.protocols import MetalKernel
 from mlxradiomics.numerics.runtime import mx
 
 _THREADS = 256
+
+
+@lru_cache(maxsize=1)
+def _scaled_difference_kernel() -> MetalKernel:
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_scaled_central_difference",
+        input_names=["left", "right", "step_fraction", "step_exponent"],
+        output_names=["difference"],
+        header="""
+            float scaled_sample(uint word, int exponent) {
+                uint magnitude = word & 0x7fffffffu;
+                int biased = int(magnitude >> 23);
+                uint significand = (magnitude & 0x7fffffu) | (biased ? 0x800000u : 0u);
+                float scaled = ldexp(float(significand), max(biased, 1) - 150 - exponent);
+                return (word >> 31) ? -scaled : scaled;
+            }
+        """,
+        source="""
+            uint t = thread_position_in_grid.x;
+            if (t >= uint(left_shape[0])) return;
+            uint a = left[t], b = right[t];
+            uint largest = max(a & 0x7fffffffu, b & 0x7fffffffu);
+            int exponent = max(int(largest >> 23), 1) - 126;
+            float delta = scaled_sample(b, exponent) - scaled_sample(a, exponent);
+            difference[t] = delta == 0.0f ? 0.0f :
+                ldexp(delta / step_fraction, exponent - step_exponent - 1);
+        """,
+    ))
+
+
+def scaled_central_difference(left: mx.array, right: mx.array, step: float) -> mx.array:
+    """Compute ``(right - left) / (2 * step)`` for extreme physical spacing.
+
+    The positive binary64 spacing enters Metal as a float32 significand and an
+    integer exponent. Decode the input words before scaling so even subnormal
+    float32 samples can contribute a normal derivative.
+    """
+    fraction, exponent = frexp(step)
+    count = left.size
+    [difference] = _scaled_difference_kernel()(
+        inputs=[
+            mx.reshape(left.view(mx.uint32), (-1,)), mx.reshape(right.view(mx.uint32), (-1,)),
+            mx.array(fraction, dtype=mx.float32), mx.array(exponent, dtype=mx.int32),
+        ],
+        grid=(count, 1, 1),
+        threadgroup=(_THREADS, 1, 1),
+        output_shapes=[left.shape],
+        output_dtypes=[mx.float32],
+    )
+    return difference
 
 
 @lru_cache(maxsize=128)
