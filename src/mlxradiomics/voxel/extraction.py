@@ -41,6 +41,8 @@ from mlxradiomics.voxel.glcm import local_glcm
 from mlxradiomics.voxel.texture import eligible as fused_texture_eligible
 from mlxradiomics.voxel.texture import local_texture
 
+_OTHER_TEXTURE_PREFIXES = ("gldm_", "ngtdm_", "glrlm_", "glszm_", "gldzm_")
+
 
 class _FirstOrderResidents(NamedTuple):
     """Optional source-precision buffers retained across voxel batches."""
@@ -82,7 +84,7 @@ class _VoxelPlan:
     pair_offsets: tuple[tuple[int, ...], ...]
     texture_offsets: _TextureOffsets
     fused_glcm: bool
-    fused_texture: bool
+    fused_texture: tuple[str, ...]
     cache_indexes: bool
     memory: VoxelMemory
 
@@ -291,9 +293,8 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     has_intensity_histogram = any(
         name.startswith("intensityhistogram_") for name in settings.features
     )
-    has_texture = any(
-        n.startswith(("gldm_", "ngtdm_", "glrlm_", "glszm_", "gldzm_")) for n in settings.features
-    )
+    texture_names = tuple(n for n in settings.features if n.startswith(_OTHER_TEXTURE_PREFIXES))
+    has_texture = bool(texture_names)
     glcm_names = tuple(
         name.removeprefix("glcm_") for name in settings.features if name.startswith("glcm_")
     )
@@ -345,11 +346,20 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     ):
         histogram_bytes = max(histogram_bytes, data.gray_levels * 16)
     # Native GLRLM/GLSZM/GLDM/NGTDM maps likewise evaluate occupied cells per center.
-    fused_texture = (
-        has_texture
-        and not explicit
-        and fused_texture_eligible(kernel_size, data.gray_levels)
-    )
+    fused_texture: tuple[str, ...] = ()
+    if has_texture and fused_texture_eligible(kernel_size, data.gray_levels):
+        if not explicit:
+            fused_texture = texture_names
+        elif settings.force2d_axis is None:
+            # Neighborhood support changes GLDM and NGTDM. Native full-domain
+            # runs and zones use the same connectivity in either pipeline.
+            fused_texture = tuple(
+                name for name in texture_names if (
+                    (name.startswith("glrlm_") and settings.glrlm_aggregation == "native")
+                    or (name.startswith("glszm_") and settings.glszm_aggregation == "native"
+                        and not any(n.startswith("gldzm_") for n in texture_names))
+                )
+            )
     texture_offsets = _TextureOffsets(runs=(), zones=(), dependence=())
     if fused_texture:
         unit = replace(settings, distances=(1,))
@@ -361,7 +371,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
             dependence=dependence + tuple(tuple(-v for v in d) for d in dependence),
         )
         histogram_bytes = max(histogram_bytes, 17 * 4 * (len(texture_offsets.runs) + 2))
-    elif has_texture:
+    if len(fused_texture) < len(texture_names):
         histogram_bytes = max(histogram_bytes, data.gray_levels * kernel_size * 64)
     per_center = kernel_size * (64 + 16 * len(shape)) + histogram_bytes + 4096
     budget = settings.scratch_mib * 1024**2
@@ -429,6 +439,15 @@ def extract_voxels(
     """
     shape = source_shape
     schedule = _plan_voxels(data, settings)
+    explicit_settings = settings
+    if schedule.explicit_texture and schedule.fused_texture:
+        explicit_settings = replace(settings, features=tuple(
+            name for name in settings.features
+            if name not in schedule.fused_texture
+        ))
+    explicit_groups = schedule.explicit_texture and any(
+        name.startswith(("glcm_", *_OTHER_TEXTURE_PREFIXES)) for name in explicit_settings.features
+    )
     centers = schedule.centers
     memory = schedule.memory
     batch_size = memory["batch_size"]
@@ -541,7 +560,7 @@ def extract_voxels(
             (bool(schedule.first_names) and not first_batch_size)
             or schedule.has_intensity_histogram
             or ivh is not None
-            or (schedule.explicit_texture and (bool(schedule.glcm_names) or schedule.has_texture))
+            or explicit_groups
             or (bool(schedule.glcm_names) and not schedule.fused_glcm)
             or (schedule.has_texture and not schedule.fused_texture)
         )
@@ -612,7 +631,7 @@ def extract_voxels(
                     ).items()
                 }
             )
-        if schedule.explicit_texture and (bool(schedule.glcm_names) or schedule.has_texture):
+        if explicit_groups:
             assert index is not None and bins is not None and valid is not None
             morphology = valid
             if morphological_resident is not None and settings.masked_kernel:
@@ -623,13 +642,13 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    settings,
+                    explicit_settings,
                     morphology=morphology,
                     histogram_method=method,
                     fixed_columns=True,
                 )
             )
-        elif schedule.fused_glcm:
+        if schedule.fused_glcm:
             batch.update(
                 local_glcm(
                     resident.bins,
@@ -643,7 +662,7 @@ def extract_voxels(
                     schedule.glcm_names,
                 )
             )
-        elif bool(schedule.glcm_names):
+        elif not schedule.explicit_texture and bool(schedule.glcm_names):
             assert bins is not None and valid is not None
             batch.update(
                 aggregate_glcm(
@@ -673,7 +692,7 @@ def extract_voxels(
                     schedule.texture_offsets.zones,
                     schedule.texture_offsets.dependence,
                     settings.gldm_alpha,
-                    settings.features,
+                    schedule.fused_texture,
                 )
             )
         elif schedule.has_texture and not schedule.explicit_texture:

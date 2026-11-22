@@ -62,12 +62,14 @@ def _size_names(family: str) -> dict[str, int]:
 _SIZE_NAMES = {family: _size_names(family) for family in _SPECS}
 
 _SIZE_HEADER = r"""
-inline void add_size_cell(thread int* li, thread int* lj, thread int* lc, thread int& n,
-                          int i, int j) {
+// A window holds at most 27 voxels, so size and count each fit five bits.
+// The eligible gray-level bound leaves room for the bin above those bits.
+inline void add_size_cell(thread uint* cells, thread int& n, int i, int j) {
+    uint key = (uint(i) << 10) | (uint(j) << 5);
     for (int k = 0; k < n; k++) {
-        if (li[k] == i && lj[k] == j) { lc[k] += 1; return; }
+        if ((cells[k] & ~31u) == key) { cells[k] += 1; return; }
     }
-    li[n] = i; lj[n] = j; lc[n] = 1; n++;
+    cells[n++] = key | 1u;
 }
 
 inline void add_marginal(thread int* keys, thread long* counts, thread int& n, int key, long c) {
@@ -93,10 +95,9 @@ inline float integer_variance(thread const int* keys, thread const long* counts,
 // Size-family features of cells (gray level i, size j, count c); voxels is the
 // denominator of the percentage (sum c*j for runs and zones, N for dependence).
 template <int CAP>
-inline void size_features(thread const int* li, thread const int* lj, thread const int* lc,
-                          int nk, long voxels, thread float* out) {
+inline void size_features(thread const uint* cells, int nk, long voxels, thread float* out) {
     long n = 0;
-    for (int k = 0; k < nk; k++) n += lc[k];
+    for (int k = 0; k < nk; k++) n += cells[k] & 31u;
     float nf = float(n);
     Acc small = {0, 0}, low = {0, 0}, small_low = {0, 0}, small_high = {0, 0};
     Acc large_low = {0, 0}, entropy = {0, 0};
@@ -105,20 +106,22 @@ inline void size_features(thread const int* li, thread const int* lj, thread con
     long gm[CAP], sm[CAP];
     int ng = 0, ns = 0;
     for (int k = 0; k < nk; k++) {
-        long i = li[k], j = lj[k], c = lc[k];
+        int i = int(cells[k] >> 10), j = int((cells[k] >> 5) & 31u);
+        long c = cells[k] & 31u;
+        long i2 = long(i) * i, j2 = long(j) * j;
         float cf = float(c);
-        acc_add(small, cf / float(j * j));
-        large += c * j * j;
-        high += c * i * i;
-        large_high += c * i * i * j * j;
+        acc_add(small, cf / float(j2));
+        large += c * j2;
+        high += c * i2;
+        large_high += c * i2 * j2;
         energy += c * c;
-        acc_add(low, cf / float(i * i));
-        acc_add(small_low, cf / (float(i * i) * float(j * j)));
-        acc_add(small_high, float(c * i * i) / float(j * j));
-        acc_add(large_low, float(c * j * j) / float(i * i));
+        acc_add(low, cf / float(i2));
+        acc_add(small_low, cf / (float(i2) * float(j2)));
+        acc_add(small_high, float(c * i2) / float(j2));
+        acc_add(large_low, float(c * j2) / float(i2));
         acc_add(entropy, entropy_term(c, n));
-        add_marginal(gi, gm, ng, li[k], c);
-        add_marginal(sj, sm, ns, lj[k], c);
+        add_marginal(gi, gm, ng, i, c);
+        add_marginal(sj, sm, ns, j, c);
     }
     long gln = 0, snu = 0;
     for (int k = 0; k < ng; k++) gln += gm[k] * gm[k];
@@ -188,6 +191,23 @@ def _neighbor_slot(ndim: int, table: str, index: str) -> str:
     return f"local_slot({args})"
 
 
+def _run_neighbor_tables(
+    local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...],
+) -> str:
+    """Return predecessor and successor window slots for each run direction."""
+    ndim = len(local_shape)
+    positions = np.indices(local_shape, dtype=np.int32).reshape(ndim, -1).T
+    strides = np.asarray([prod(local_shape[axis + 1:]) for axis in range(ndim)], dtype=np.int32)
+    directions = np.asarray(offsets, dtype=np.int32)[:, None, :]
+    tables: list[str] = []
+    for name, adjacent in (("RUN_BACK", positions - directions),
+                           ("RUN_NEXT", positions + directions)):
+        inside = np.all((adjacent >= 0) & (adjacent < np.asarray(local_shape)), axis=-1)
+        slots = np.where(inside, adjacent @ strides, -1)
+        tables.append(_offsets_table(name, tuple(tuple(map(int, row)) for row in slots)))
+    return "\n".join(tables)
+
+
 @lru_cache(maxsize=64)
 def _run_kernel(
     local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...], slots: tuple[int, ...],
@@ -198,15 +218,8 @@ def _run_kernel(
     directions = len(offsets)
     header = "\n".join((
         KERNEL_HEADER, _SIZE_HEADER, _window_table(local_shape),
-        _local_index_code(ndim, local_shape), _offsets_table("RUN", offsets),
-        _offsets_table("BACK", tuple(tuple(-v for v in o) for o in offsets)),
+        _run_neighbor_tables(local_shape, offsets),
     ))
-    previous = _neighbor_slot(ndim, "BACK", "d")
-    coordinates = ", ".join(f"x{a}" for a in range(ndim))
-    position = "\n".join(
-        f"int x{a} = WINDOW[q * {ndim} + {a}] + LOCAL_HALF[{a}];" for a in range(ndim)
-    )
-    advance = "\n".join(f"x{a} += RUN[d * {ndim} + {a}];" for a in range(ndim))
     source = f"""
         uint t = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
@@ -214,29 +227,27 @@ def _run_kernel(
         uint center = t / {directions};
         int d = int(t % {directions});
         {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        int direction = d * {window};
+        uint cells[{window}];
         int nk = 0;
         long voxels = 0;
         for (int q = 0; q < {window}; q++) {{
             int level = levels[q];
             if (level == 0) continue;
             voxels++;
-            int before = {previous};
+            int before = RUN_BACK[direction + q];
             if (before >= 0 && levels[before] == level) continue;
-            {position}
             int length = 1;
-            while (true) {{
-                {advance}
-                int next = local_slot({coordinates});
-                if (next < 0 || levels[next] != level) break;
+            for (int next = RUN_NEXT[direction + q]; next >= 0 && levels[next] == level;
+                 next = RUN_NEXT[direction + next]) {{
                 length++;
             }}
-            add_size_cell(li, lj, lc, nk, level, length);
+            add_size_cell(cells, nk, level, length);
         }}
         active[t] = nk > 0;
         if (nk == 0) return;
         float out[17];
-        size_features<{window}>(li, lj, lc, nk, voxels, out);
+        size_features<{window}>(cells, nk, voxels, out);
         {_size_stores(slots, "values[ulong(t) * " + str(len(slots)) + " + {column}]")}
     """
     return cast(MetalKernel, mx.fast.metal_kernel(
@@ -294,7 +305,7 @@ def _zone_kernel(
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
         {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        uint cells[{window}];
         int nk = 0;
         long voxels = 0;
         bool seen[{window}];
@@ -318,13 +329,13 @@ def _zone_kernel(
                 }}
             }}
             voxels += size;
-            add_size_cell(li, lj, lc, nk, level, size);
+            add_size_cell(cells, nk, level, size);
         }}
         float out[17];
         if (nk == 0) {{
             for (int f = 0; f < 17; f++) out[f] = NAN;
         }} else {{
-            size_features<{window}>(li, lj, lc, nk, voxels, out);
+            size_features<{window}>(cells, nk, voxels, out);
         }}
         {_size_stores(slots, "values[ulong({column}) * total_centers + center]")}
     """
@@ -511,7 +522,7 @@ def _neighborhood_kernel(
     )
     dependence_features = f"""
         float out[17];
-        size_features<{window}>(li, lj, lc, nk, voxels, out);
+        size_features<{window}>(cells, nk, voxels, out);
         {dependence_stores}
     """
     source = f"""
@@ -519,7 +530,7 @@ def _neighborhood_kernel(
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
         {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        uint cells[{window}];
         int nk = 0;
         long voxels = 0;
         {ngtdm_state if ngtdm else ""}
@@ -537,7 +548,7 @@ def _neighborhood_kernel(
                     dependence += abs(levels[other] - level) <= {alpha};
                 }}
             }}
-            {"add_size_cell(li, lj, lc, nk, level, dependence);" if dependence_slots else ""}
+            {"add_size_cell(cells, nk, level, dependence);" if dependence_slots else ""}
             {_NGTDM_UPDATE if ngtdm else ""}
         }}
         {dependence_features if dependence_slots else ""}
