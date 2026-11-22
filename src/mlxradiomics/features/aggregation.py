@@ -26,7 +26,7 @@ from mlxradiomics.features.matrices import (
 )
 from mlxradiomics.features.sparse_glcm import sparse_glcm_statistics
 from mlxradiomics.features.sparse_size import sparse_size_statistics
-from mlxradiomics.numerics.reduction import CompensatedTotal
+from mlxradiomics.numerics.reduction import CompensatedTotal, directional_mean
 from mlxradiomics.numerics.runtime import evaluate, mx
 
 
@@ -209,6 +209,34 @@ def _run_statistics(
     return features, count > 0
 
 
+def _single_row_means(
+    family: str,
+    names: tuple[str, ...],
+    columns: list[mx.array],
+    active_rows: list[mx.array],
+    mcc_rows: list[mx.array],
+) -> dict[str, mx.array]:
+    """Average one row's per-matrix features over its matrices, as CompensatedTotal does.
+
+    ``columns`` holds one ``(features, 1)`` column per matrix in aggregation order.
+    Ordinary features average the active matrices; MCC averages those where it is also
+    defined. ``directional_mean`` repeats the running two-sum additions, the final
+    non-finite rule and the division by the active count, so values are unchanged.
+    """
+    if not columns:
+        return {f"{family}_{name}": mx.full((1,), float("nan")) for name in names}
+    values = mx.concatenate(columns, axis=1)
+    active = mx.concatenate(active_rows)
+    means = directional_mean(values, active, compensated=True)
+    output = {f"{family}_{name}": means[index : index + 1] for index, name in enumerate(names)}
+    if "MCC" in names:
+        index = names.index("MCC")
+        output[f"{family}_MCC"] = directional_mean(
+            values[index : index + 1], mx.concatenate(mcc_rows), compensated=True,
+        )
+    return output
+
+
 def _batched_results(
     family: str,
     matrices: Iterator[TextureMatrix],
@@ -292,8 +320,9 @@ def _batched_results(
             or (len(pending) + 1) * scratch > budget
         ):
             yield from flush()
-        # Counting reads ROI-window arrays; evaluating here releases them.
-        evaluate(matrix.counts, matrix.voxels)
+        if not matrix.resident:
+            # Counting reads ROI-window arrays; evaluating here releases them.
+            evaluate(matrix.counts, matrix.voxels)
         pending.append(matrix)
     if pending:
         yield from flush()
@@ -364,7 +393,7 @@ def aggregated_texture_statistics(
             if shared_labels is None:
                 shared_labels = prepare_zone_labels(bins, mask, shape, settings)
             labels = shared_labels
-        names = tuple(
+        names: tuple[str, ...] = tuple(
             name.removeprefix(f"{family}_")
             for name in settings.features
             if name.startswith(f"{family}_")
@@ -388,6 +417,13 @@ def aggregated_texture_statistics(
             stream = _batched_results(family, matrices, ng, names, settings, check_glcm_count)
         else:
             stream = ((matrix, None, None, True) for matrix in matrices)
+        # A single spatial row averages its matrices in one directional_mean dispatch
+        # instead of a scalar graph per matrix and feature.
+        single_row = bins.shape[0] == 1
+        columns: list[mx.array] = []
+        active_rows: list[mx.array] = []
+        mcc_rows: list[mx.array] = []
+        pending_columns = 0
         for matrix, batch_features, batch_active, batch_end in stream:
             if batch_features is not None:
                 assert batch_active is not None
@@ -424,11 +460,23 @@ def aggregated_texture_statistics(
                         voxel_count=matrix.voxels, total_count=count,
                     )
                 active = count > 0
-            if ordinary:
-                denominators["ordinary"] = denominators["ordinary"] + active.astype(mx.int32)
             mcc_defined = active
             if "MCC" in names:
                 mcc_defined = active & ~mx.isnan(features["MCC"])
+            if single_row:
+                # One matrix's feature column; directional_mean adds the columns in
+                # matrix order with CompensatedTotal's operations.
+                columns.append(mx.stack([features[name] for name in names]))
+                active_rows.append(active)
+                mcc_rows.append(mcc_defined)
+                if batch_end:
+                    evaluate(*columns[pending_columns:], *active_rows[pending_columns:],
+                             *mcc_rows[pending_columns:])
+                    pending_columns = len(columns)
+                continue
+            if ordinary:
+                denominators["ordinary"] = denominators["ordinary"] + active.astype(mx.int32)
+            if "MCC" in names:
                 denominators["MCC"] = denominators["MCC"] + mcc_defined.astype(mx.int32)
             for name in names:
                 # Ordinary NaN values still count an active matrix. Only
@@ -437,11 +485,14 @@ def aggregated_texture_statistics(
                 totals[name].add(mx.where(defined, features[name], 0))
             if batch_end:
                 evaluate(*(a for t in totals.values() for a in t.arrays()), *denominators.values())
-        for name, total in totals.items():
-            denominator = denominators["MCC" if name == "MCC" else "ordinary"]
-            output[f"{family}_{name}"] = mx.where(
-                denominator > 0, total.value() / denominator, float("nan"),
-            )
+        if single_row:
+            output.update(_single_row_means(family, names, columns, active_rows, mcc_rows))
+        else:
+            for name, total in totals.items():
+                denominator = denominators["MCC" if name == "MCC" else "ordinary"]
+                output[f"{family}_{name}"] = mx.where(
+                    denominator > 0, total.value() / denominator, float("nan"),
+                )
         if neighborhood is not None:
             neighborhood_users += 1
             if neighborhood_users == 2:
