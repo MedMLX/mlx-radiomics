@@ -138,9 +138,10 @@ def shape_statistics(
       semi-axes. All three density pairs use the mesh volume and area.
     * Diameters: the largest distance between boundary vertices. In 3-D,
       Maximum2DDiameterSlice, Column and Row restrict to vertex pairs sharing their axis-0,
-      axis-1 and axis-2 coordinate respectively. Every unordered pair is evaluated with
-      the same scale-safe component norm; larger meshes only split the pair range into
-      bounded Metal tiles whose maxima are then reduced.
+      axis-1 and axis-2 coordinate respectively. Large meshes within the scratch budget
+      use convex-hull vertices for the overall diameter and group vertices by their
+      coordinate for each planar diameter. Distances use float32 spacing and a
+      scale-safe component norm.
     * Axis lengths: ``4 * sqrt(eigenvalue)`` of the ROI voxel-center covariance
       (spacing applied). ``covariance_divisor="n-1"`` (default, IBSI) uses the sample
       divisor N-1 and ``"n"`` the population divisor N. A singleton has zero axes.
@@ -149,9 +150,8 @@ def shape_statistics(
       second-largest eigenvalues (Least uses the smallest, 3-D only); Elongation is
       ``sqrt(minor / major)`` and Flatness ``sqrt(least / major)``.
 
-    Mesh boundary, enclosed measures and diameters are evaluated from binary spacing
-    mantissas and exponents, so a representable result does not overflow through an
-    intermediate squared or cubed spacing.
+    Mesh boundary and enclosed measures use binary spacing mantissas and exponents
+    to avoid overflow from intermediate squared or cubed spacing.
 
     Args:
         mask: Boolean ROI mask, 3-D for ``shape`` or 2-D for ``shape2D``.
