@@ -147,6 +147,232 @@ def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
     return mx.sort(values, axis=1)
 
 
+# Floats of threadgroup storage the largest-eigenvalue kernel may use (32 KiB).
+_THREADGROUP_FLOATS = 8192
+
+
+def _largest_lanes(size: int) -> int:
+    """Threads per matrix: whole SIMD groups, the next power of two of ``size``, at most 256."""
+    lanes = 32
+    while lanes < min(size, 256):
+        lanes *= 2
+    return lanes
+
+
+def _largest_local(size: int, lanes: int) -> bool:
+    """Whether the matrix, two vectors and the lane scratch fit in threadgroup memory."""
+    return size * size + 2 * size + lanes + lanes // 32 + 4 <= _THREADGROUP_FLOATS
+
+
+@lru_cache(maxsize=32)
+def _largest_kernel(size: int, lanes: int) -> MetalKernel:
+    """Compile the largest-eigenvalue kernel for ``size`` x ``size`` symmetric matrices."""
+    # One threadgroup per matrix. The matrix is first scaled by a power of two so its
+    # largest magnitude lies in [0.5, 1), which is exact and keeps squares away from
+    # overflow and underflow. Householder reflections then reduce it to a symmetric
+    # tridiagonal matrix (d, e): reflection k zeroes column k below the subdiagonal and
+    # updates the trailing block as A -= v w^T + w v^T, with p = beta A v and
+    # w = p - (beta v.p / 2) v. Lanes split the reductions, the matrix-vector product
+    # and the rank-two update; every lane derives the same scalars from the same
+    # threadgroup partials in the same order, so branches and barriers stay uniform.
+    # The largest eigenvalue lies between max(d) and the Gershgorin bound. Each round
+    # evaluates the Sturm count at ``lanes`` interior points, one per lane, and keeps
+    # the subinterval where the count first reaches ``size``; rounds stop when the
+    # interval no longer shrinks in float32 or after 16 rounds.
+    elements = size * size
+    simd_groups = lanes // 32
+    local = _largest_local(size, lanes)
+    storage = (
+        f"threadgroup float work[{elements}];" if local
+        else "device float* work = workspace + base;"
+    )
+    memory = "mem_flags::mem_threadgroup" if local else (
+        "mem_flags::mem_threadgroup | mem_flags::mem_device"
+    )
+    return cast(
+        MetalKernel,
+        mx.fast.metal_kernel(
+            name="mlxradiomics_largest_eigenvalue",
+            input_names=["matrix"],
+            output_names=["largest"] if local else ["workspace", "largest"],
+            source=f"""
+        const int N = {size};
+        const uint L = {lanes};
+        uint row = threadgroup_position_in_grid.x;
+        uint lane = thread_position_in_threadgroup.x;
+        uint simd_lane = thread_index_in_simdgroup;
+        uint simd_id = simdgroup_index_in_threadgroup;
+        uint base = row * {elements};
+        {storage}
+        threadgroup float v[N];
+        threadgroup float w[N];
+        threadgroup float partial[{simd_groups}];
+        threadgroup int reached[L];
+
+        float magnitude = 0.0f;
+        for (uint k = lane; k < {elements}; k += L) {{
+            float value = matrix[base + k];
+            work[k] = value;
+            magnitude = max(magnitude, abs(value));
+        }}
+        magnitude = simd_max(magnitude);
+        if (simd_lane == 0) partial[simd_id] = magnitude;
+        threadgroup_barrier({memory});
+        magnitude = partial[0];
+        for (uint g = 1; g < {simd_groups}; g++) magnitude = max(magnitude, partial[g]);
+        if (magnitude == 0.0f) {{
+            // A zero matrix has only zero eigenvalues.
+            if (lane == 0) largest[row] = 0.0f;
+            return;
+        }}
+        int exponent;
+        frexp(magnitude, exponent);
+        float down = ldexp(1.0f, -exponent);
+        threadgroup_barrier({memory});
+        for (uint k = lane; k < {elements}; k += L) work[k] *= down;
+        threadgroup_barrier({memory});
+
+        for (int k = 0; k < N - 2; k++) {{
+            int first = k + 1;
+            int count = N - first;
+            float sigma = 0.0f;
+            for (int i = first + 1 + int(lane); i < N; i += int(L)) {{
+                float x = work[i * N + k];
+                sigma += x * x;
+            }}
+            sigma = simd_sum(sigma);
+            if (simd_lane == 0) partial[simd_id] = sigma;
+            threadgroup_barrier({memory});
+            sigma = 0.0f;
+            for (uint g = 0; g < {simd_groups}; g++) sigma += partial[g];
+            if (sigma == 0.0f) {{
+                // Column k is already tridiagonal; its subdiagonal stays in place.
+                threadgroup_barrier({memory});
+                continue;
+            }}
+            float x0 = work[first * N + k];
+            float alpha = sqrt(x0 * x0 + sigma);
+            if (x0 > 0.0f) alpha = -alpha;
+            float v0 = x0 - alpha;
+            float beta = 2.0f / (sigma + v0 * v0);
+            for (int i = first + int(lane); i < N; i += int(L))
+                v[i] = i == first ? v0 : work[i * N + k];
+            threadgroup_barrier({memory});
+            float dot = 0.0f;
+            for (int i = first + int(lane); i < N; i += int(L)) {{
+                float product = 0.0f;
+                for (int j = first; j < N; j++) product += work[i * N + j] * v[j];
+                product *= beta;
+                w[i] = product;
+                dot += v[i] * product;
+            }}
+            dot = simd_sum(dot);
+            if (simd_lane == 0) partial[simd_id] = dot;
+            threadgroup_barrier({memory});
+            dot = 0.0f;
+            for (uint g = 0; g < {simd_groups}; g++) dot += partial[g];
+            float half_k = 0.5f * beta * dot;
+            for (int i = first + int(lane); i < N; i += int(L)) w[i] -= half_k * v[i];
+            threadgroup_barrier({memory});
+            for (int index = int(lane); index < count * count; index += int(L)) {{
+                int i = first + index / count;
+                int j = first + index % count;
+                work[i * N + j] -= v[i] * w[j] + w[i] * v[j];
+            }}
+            if (lane == 0) work[first * N + k] = alpha;
+            threadgroup_barrier({memory});
+        }}
+
+        // Diagonal in v, |subdiagonal| in w. The largest eigenvalue is at least max(d)
+        // and at most the Gershgorin bound, widened by a few ulps for its rounding.
+        for (int i = int(lane); i < N; i += int(L)) {{
+            v[i] = work[i * N + i];
+            w[i] = i + 1 < N ? abs(work[(i + 1) * N + i]) : 0.0f;
+        }}
+        threadgroup_barrier({memory});
+        float lo = v[0], hi = -INFINITY, previous = 0.0f, largest_e = 0.0f;
+        for (int i = 0; i < N; i++) {{
+            lo = max(lo, v[i]);
+            hi = max(hi, v[i] + previous + w[i]);
+            previous = w[i];
+            largest_e = max(largest_e, w[i]);
+        }}
+        float pivmin = FLT_MIN * max(1.0f, largest_e * largest_e);
+        hi += 4.0f * FLT_EPSILON * max(abs(hi), abs(lo)) + pivmin;
+        for (int round = 0; round < 16 && lo < hi; round++) {{
+            float x = lo + (hi - lo) * (float(lane + 1) / float(L + 1));
+            float q = v[0] - x;
+            if (abs(q) <= pivmin) q = -pivmin;
+            int below = q < 0.0f ? 1 : 0;
+            for (int i = 1; i < N; i++) {{
+                q = (v[i] - x) - (w[i - 1] * w[i - 1]) / q;
+                if (abs(q) <= pivmin) q = -pivmin;
+                below += q < 0.0f ? 1 : 0;
+            }}
+            reached[lane] = below == N ? 1 : 0;
+            threadgroup_barrier({memory});
+            float next_lo = lo, next_hi = hi;
+            for (uint l = 0; l < L; l++) {{
+                float point = lo + (hi - lo) * (float(l + 1) / float(L + 1));
+                if (reached[l]) {{ next_hi = point; break; }}
+                next_lo = point;
+            }}
+            threadgroup_barrier({memory});
+            bool stalled = next_lo == lo && next_hi == hi;
+            lo = next_lo;
+            hi = next_hi;
+            if (stalled) break;
+        }}
+        if (lane == 0) largest[row] = ldexp(0.5f * (lo + hi), exponent);
+        """,
+        ),
+    )
+
+
+def largest_symmetric_eigenvalue(matrix: mx.array) -> mx.array:
+    """Return the largest eigenvalue of each matrix in a batch of symmetric matrices.
+
+    One threadgroup per matrix reduces it to tridiagonal form with Householder
+    reflections in float32 and brackets the largest eigenvalue by parallel Sturm-count
+    bisection. The bracket stops shrinking at float32 resolution, so the result is the
+    midpoint of an interval a few ulps wide around the tridiagonal matrix's largest
+    eigenvalue. No iteration can fail to converge, so the host never waits on a
+    convergence flag. Symmetry is not checked; the full matrix is read.
+
+    Args:
+        matrix: Float32 array ``(batch, n, n)``.
+
+    Returns:
+        Float32 array ``(batch,)``.
+
+    Raises:
+        ValueError: If ``matrix`` is not a batch of float32 square matrices.
+    """
+    if matrix.ndim != 3 or matrix.shape[1] != matrix.shape[2]:
+        raise ValueError("expected batched square symmetric matrices")
+    size = matrix.shape[1]
+    if matrix.shape[0] == 0:
+        return mx.zeros((0,), dtype=mx.float32)
+    if matrix.dtype != mx.float32:
+        raise ValueError("expected float32 matrices")
+    if size == 1:
+        return matrix[:, 0, 0]
+    lanes = _largest_lanes(size)
+    shapes: list[tuple[int, ...]] = [(matrix.shape[0],)]
+    dtypes = [mx.float32]
+    if not _largest_local(size, lanes):
+        shapes.insert(0, matrix.shape)
+        dtypes.insert(0, mx.float32)
+    *_, largest = _largest_kernel(size, lanes)(
+        inputs=[matrix],
+        grid=(matrix.shape[0] * lanes, 1, 1),
+        threadgroup=(lanes, 1, 1),
+        output_shapes=shapes,
+        output_dtypes=dtypes,
+    )
+    return largest
+
+
 def maximal_correlation(counts: mx.array) -> mx.array:
     """Compute the GLCM Maximal Correlation Coefficient for one direction per batch row.
 
@@ -195,5 +421,5 @@ def maximal_correlation(counts: mx.array) -> mx.array:
         valid, numerator.astype(mx.float32) / mx.where(valid, denominator, 1), 0
     )
     gram = normalized @ mx.swapaxes(normalized, 1, 2)
-    mcc = mx.sqrt(mx.maximum(symmetric_eigenvalues(gram)[:, -1], 0))
+    mcc = mx.sqrt(mx.maximum(largest_symmetric_eigenvalue(gram), 0))
     return mx.where(defined, mcc, float("nan"))
