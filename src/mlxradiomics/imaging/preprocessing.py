@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from itertools import product
 from math import floor, frexp
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -95,7 +96,10 @@ def validate_exact_float64(image: HostArray) -> None:
         ValueError: If a 64-bit integer value is not exactly representable in float64.
     """
     values = np.asarray(image)
-    if values.dtype.kind in "iu" and values.dtype.itemsize == 8:
+    if values.dtype.kind in "iu" and values.dtype.itemsize == 8 and values.size:
+        integers = cast(NDArray[np.int64] | NDArray[np.uint64], values)
+        if int(integers.min()) >= -(2**53) and int(integers.max()) <= 2**53:
+            return
         # Reinterpreting bytes is only meaningful in native order: a big-endian array
         # viewed as native uint64 tests unrelated integers. The byte-order cast stays in
         # the integer domain, so it cannot round.
