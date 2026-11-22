@@ -1,5 +1,6 @@
 """Minimum-volume and covariance ellipsoids, areas and densities."""
 
+from dataclasses import dataclass
 from functools import lru_cache
 from math import frexp, ldexp, pi
 from typing import cast
@@ -12,7 +13,7 @@ from mlxradiomics.features.geometry.hull import scipy_hull
 from mlxradiomics.features.geometry.mesh import MeshGeometry
 from mlxradiomics.features.geometry.moments import spectrum_kernel
 from mlxradiomics.numerics.protocols import MetalKernel
-from mlxradiomics.numerics.runtime import evaluate, mx
+from mlxradiomics.numerics.runtime import evaluate, evaluate_async, mx
 
 _MVEE_TOLERANCE = 1e-3
 
@@ -406,6 +407,75 @@ def _whitened_ds_points(
     return (*_centered_ds_points(rotated / scales), scales)
 
 
+@lru_cache(maxsize=1)
+def _mvee_stream() -> mx.Stream:
+    """Return the GPU stream that runs Khachiyan ascent beside the default stream.
+
+    One threadgroup runs the ascent's dependent steps and leaves the other GPU cores
+    idle; its own stream, which MLX gives its own Metal command queue, lets
+    independent shape work run on those cores meanwhile.
+    """
+    return mx.new_stream(mx.gpu)
+
+
+@dataclass
+class PendingMvee:
+    """Khachiyan ascent launched by start_mvee_semi_axes and not yet waited for."""
+
+    points_hi: mx.array
+    points_lo: mx.array
+    weights_hi: mx.array
+    weights_lo: mx.array
+    state: mx.array
+    steps: int
+    count: int
+    scales: NDArray[np.float64]
+
+
+def _launch_ascent(
+    points_hi: mx.array, points_lo: mx.array, weights_hi: mx.array, weights_lo: mx.array,
+    steps: int,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Encode up to ``steps`` ascent steps on the MVEE stream and start them."""
+    count = points_hi.shape[0]
+    weights_hi, weights_lo, state = _mvee_ascent_kernel()(
+        inputs=[points_hi, points_lo, weights_hi, weights_lo, mx.array([steps], dtype=mx.int32)],
+        grid=(256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(count,), (count,), (2,)],
+        output_dtypes=[mx.float32, mx.float32, mx.int32],
+        stream=_mvee_stream(),
+    )
+    evaluate_async(weights_hi, weights_lo, state)
+    return weights_hi, weights_lo, state
+
+
+def start_mvee_semi_axes(host: NDArray[np.float64]) -> PendingMvee:
+    """Validate hull points and start the first MVEE ascent launch without waiting.
+
+    The launch runs on its own GPU stream; :func:`finish_mvee_semi_axes` waits for it,
+    continues the ascent if needed and returns the semi-axes. Validation errors are
+    raised here, before any GPU work.
+    """
+    if host.ndim != 2 or host.shape[1] != 3:
+        raise ValueError("MVEE requires an (n, 3) point array")
+    count = host.shape[0]
+    if count < 4:
+        raise RuntimeError("MVEE requires at least four hull vertices")
+    points_hi, points_lo, scales = _whitened_ds_points(host)
+    evaluate(points_hi, points_lo)
+    steps = min(_MVEE_STEPS_PER_LAUNCH, _MVEE_MAX_ITERATIONS)
+    weights_hi, weights_lo, state = _launch_ascent(
+        points_hi,
+        points_lo,
+        mx.full((count,), 1.0 / count, dtype=mx.float32),
+        mx.zeros((count,), dtype=mx.float32),
+        steps,
+    )
+    return PendingMvee(points_hi, points_lo, weights_hi, weights_lo, state, steps, count,
+                       scales)
+
+
 def mvee_semi_axes(
     host: NDArray[np.float64],
 ) -> tuple[mx.array, mx.array, mx.array]:
@@ -438,35 +508,22 @@ def mvee_semi_axes(
             does not converge within 100,000 steps, or the compensated spectrum cannot
             resolve the smallest axis above its roundoff bound.
     """
-    if host.ndim != 2 or host.shape[1] != 3:
-        raise ValueError("MVEE requires an (n, 3) point array")
-    count = host.shape[0]
-    if count < 4:
-        raise RuntimeError("MVEE requires at least four hull vertices")
-    points_hi, points_lo, scales = _whitened_ds_points(host)
-    evaluate(points_hi, points_lo)
-    weights_hi = mx.full((count,), 1.0 / count, dtype=mx.float32)
-    weights_lo = mx.zeros((count,), dtype=mx.float32)
+    return finish_mvee_semi_axes(start_mvee_semi_axes(host))
+
+
+def finish_mvee_semi_axes(pending: PendingMvee) -> tuple[mx.array, mx.array, mx.array]:
+    """Wait for a started MVEE ascent, continue it to convergence and return its axes.
+
+    Raises the errors documented by :func:`mvee_semi_axes`.
+    """
+    points_hi, points_lo = pending.points_hi, pending.points_lo
+    weights_hi, weights_lo, state = pending.weights_hi, pending.weights_lo, pending.state
+    count, scales = pending.count, pending.scales
     remaining = _MVEE_MAX_ITERATIONS
     while True:
         # Each launch runs up to _MVEE_STEPS_PER_LAUNCH steps on the GPU and stops at the
         # first converged step, so the host waits once per chunk rather than once per
         # step.
-        steps = min(_MVEE_STEPS_PER_LAUNCH, remaining)
-        weights_hi, weights_lo, state = _mvee_ascent_kernel()(
-            inputs=[
-                points_hi,
-                points_lo,
-                weights_hi,
-                weights_lo,
-                mx.array([steps], dtype=mx.int32),
-            ],
-            grid=(256, 1, 1),
-            threadgroup=(256, 1, 1),
-            output_shapes=[(count,), (count,), (2,)],
-            output_dtypes=[mx.float32, mx.float32, mx.int32],
-        )
-        evaluate(weights_hi, weights_lo, state)
         code, executed = cast(list[int], state.tolist())
         if code == 2:
             raise RuntimeError("MVEE covariance is not positive definite")
@@ -477,6 +534,10 @@ def mvee_semi_axes(
         remaining -= executed
         if remaining <= 0:
             raise RuntimeError(f"MVEE did not converge within {_MVEE_MAX_ITERATIONS} iterations")
+        weights_hi, weights_lo, state = _launch_ascent(
+            points_hi, points_lo, weights_hi, weights_lo,
+            min(_MVEE_STEPS_PER_LAUNCH, remaining),
+        )
     high, low = _mvee_covariance_kernel()(
         inputs=[points_hi, points_lo, weights_hi, weights_lo],
         grid=(256, 1, 1),

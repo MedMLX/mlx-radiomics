@@ -17,10 +17,12 @@ from mlxradiomics.features.geometry.arithmetic import (
 from mlxradiomics.features.geometry.boxes import ombb_measures
 from mlxradiomics.features.geometry.diameters import diameter_maxima
 from mlxradiomics.features.geometry.ellipsoids import (
+    PendingMvee,
     aee_densities,
     ellipsoid_area_normalized,
     enclosing_densities,
-    mvee_semi_axes,
+    finish_mvee_semi_axes,
+    start_mvee_semi_axes,
 )
 from mlxradiomics.features.geometry.hull import hull_measures, scipy_hull
 from mlxradiomics.features.geometry.mesh import MeshGeometry, MeshGeometryContext
@@ -57,6 +59,8 @@ _MVEE_FEATURES = frozenset({
     "AreaDensityMinimumVolumeEnclosingEllipsoid",
 })
 _HULL_GEOMETRY_FEATURES = _HULL_FEATURES | _OMBB_FEATURES | _MVEE_FEATURES
+# Holds the place of an MVEE result until its ascent is waited for.
+_PENDING = mx.array(float("nan"))
 
 
 _AEE_FEATURES = frozenset({
@@ -99,6 +103,16 @@ def _aabb_area_density(
         ))
     aabb_norm = 2 * (terms[0] + terms[1] + terms[2])
     return geometry.boundary_norm / aabb_norm
+
+
+def _mvee_densities(
+    pending: PendingMvee, geometry: MeshGeometry, physical_scale: float, with_area: bool,
+) -> tuple[mx.array, mx.array]:
+    """Wait for a started MVEE ascent and return its volume and area densities."""
+    a, b, c = finish_mvee_semi_axes(pending)
+    volume = (4 * pi / 3) * a * b * c
+    area = ellipsoid_area_normalized(a, b, c) if with_area else mx.array(1.0)
+    return enclosing_densities(geometry, volume, area, physical_scale)
 
 
 def shape_statistics(
@@ -209,6 +223,8 @@ def shape_statistics(
         include_vertices=needs_diameter or bool(requested & _HULL_GEOMETRY_FEATURES),
     ) if needs_mesh or needs_diameter else None)
     values: dict[str, mx.array] = {}
+    pending_mvee: PendingMvee | None = None
+    mvee_scale = 1.0
     if "VoxelVolume" in requested or "PixelSurface" in requested:
         count = mx.sum(array_from_bool(mask).astype(mx.int32))
         physical = scale_pow2(
@@ -309,6 +325,14 @@ def shape_statistics(
                     hull = scipy_hull(normalized)
                     hull_points = normalized[hull.vertices]
                     centered = hull_points - hull_points.mean(axis=0)
+                    if requested & _MVEE_FEATURES:
+                        # Khachiyan ascent occupies one GPU core on its own stream while
+                        # the box, axis and diameter work below proceeds; it is waited
+                        # for after them. Its entries keep their place in the results.
+                        pending_mvee = start_mvee_semi_axes(hull_points)
+                        mvee_scale = physical_scale
+                        mesh_values["VolumeDensityMinimumVolumeEnclosingEllipsoid"] = _PENDING
+                        mesh_values["AreaDensityMinimumVolumeEnclosingEllipsoid"] = _PENDING
                     if requested & _OMBB_FEATURES:
                         volume, area = ombb_measures(centered, hull)
                         volume_density, area_density = enclosing_densities(
@@ -318,24 +342,47 @@ def shape_statistics(
                             volume_density
                         )
                         mesh_values["AreaDensityOrientedMinimumBoundingBox"] = area_density
-                    if requested & _MVEE_FEATURES:
-                        a, b, c = mvee_semi_axes(hull_points)
-                        volume = (4 * pi / 3) * a * b * c
-                        area = (
-                            ellipsoid_area_normalized(a, b, c)
-                            if "AreaDensityMinimumVolumeEnclosingEllipsoid" in requested
-                            else mx.array(1.0)
-                        )
-                        volume_density, area_density = enclosing_densities(
-                            geometry, volume, area, physical_scale,
-                        )
-                        mesh_values["VolumeDensityMinimumVolumeEnclosingEllipsoid"] = (
-                            volume_density
-                        )
-                        mesh_values["AreaDensityMinimumVolumeEnclosingEllipsoid"] = (
-                            area_density
-                        )
         values.update({name: value for name, value in mesh_values.items() if name in requested})
+    try:
+        _axis_and_diameter_values(
+            values, requested, context, geometry, spacing, scratch_mib, ndim,
+            covariance_divisor, ellipsoid_area, needs_axes, needs_diameter,
+        )
+    except Exception:
+        if pending_mvee is not None:
+            # The sequential order evaluated MVEE first, so its failure takes precedence.
+            finish_mvee_semi_axes(pending_mvee)
+        raise
+    if pending_mvee is not None and geometry is not None:
+        volume_density, area_density = _mvee_densities(
+            pending_mvee, geometry, mvee_scale,
+            "AreaDensityMinimumVolumeEnclosingEllipsoid" in requested,
+        )
+        for name, value in (
+            ("VolumeDensityMinimumVolumeEnclosingEllipsoid", volume_density),
+            ("AreaDensityMinimumVolumeEnclosingEllipsoid", area_density),
+        ):
+            if name in values:
+                values[name] = value
+    evaluate(*values.values())
+    family = "shape2D" if ndim == 2 else "shape"
+    return {f"{family}_{name}": value[None] for name, value in values.items()}
+
+
+def _axis_and_diameter_values(
+    values: dict[str, mx.array],
+    requested: frozenset[str],
+    context: MeshGeometryContext,
+    geometry: MeshGeometry | None,
+    spacing: tuple[float, ...],
+    scratch_mib: int,
+    ndim: int,
+    covariance_divisor: CovarianceDivisor,
+    ellipsoid_area: EllipsoidArea,
+    needs_axes: bool,
+    needs_diameter: bool,
+) -> None:
+    """Add the covariance-axis, AEE and diameter features of shape_statistics."""
     if needs_axes:
         voxel_coordinates = context.coordinates()
         # Translate before conversion: covariance is translation invariant, and a large
@@ -407,6 +454,3 @@ def shape_statistics(
         if maximum_host[3] <= 0:
             name = "MaximumDiameter" if ndim == 2 else "Maximum3DDiameter"
             raise RuntimeError(f"{name} underflows the float32 range")
-    evaluate(*values.values())
-    family = "shape2D" if ndim == 2 else "shape"
-    return {f"{family}_{name}": value[None] for name, value in values.items()}
