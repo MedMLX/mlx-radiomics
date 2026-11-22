@@ -20,6 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from mlxradiomics.contracts.types import HostArray
+from mlxradiomics.imaging.preprocessing import occupied_window
 from mlxradiomics.numerics.protocols import MetalKernel
 from mlxradiomics.numerics.runtime import array_from_bool, evaluate, mx
 
@@ -223,37 +224,30 @@ def local_intensity_statistics(
     budget = scratch_mib * 1024**2
     if sphere_size * 4 > budget // 2:
         raise ValueError("scratch_mib cannot hold the physical local-intensity sphere")
-    occupied = np.argwhere(mask)
-    if occupied.size == 0:
+    box = occupied_window(mask, list(half))
+    # Admission uses the entire ROI's sphere support, even for local-only
+    # requests that later restrict the support to tied maximum centers.
+    if box is None or not _kernel_admits(image[box], sphere_voxels):
         return _convolution_peaks(
             np.asarray(image, dtype=np.float64), mask, spacing, scratch_mib, selected,
         )
-    lower = np.maximum(occupied.min(axis=0) - np.asarray(half), 0)
-    upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
-    box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
-    # Admission only inspects magnitudes and finiteness, so it needs no contiguous
-    # copy of a support that a local-only selection may immediately narrow.
+    global_peak = "GlobalIntensityPeak" in selected
+    is_maximum = sampled == sampled.max() if "LocalIntensityPeak" in selected else None
+    if not global_peak and is_maximum is not None and not np.all(is_maximum):
+        # The flat indexes and sampled values have the same C-order traversal.
+        # Materialize coordinates only for the centers whose spheres will be used.
+        candidates = np.flatnonzero(mask)[is_maximum]
+        occupied = np.column_stack(np.unravel_index(candidates, mask.shape))
+        lower = np.maximum(occupied.min(axis=0) - np.asarray(half), 0)
+        upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
+        box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
+    else:
+        occupied = np.argwhere(mask)
     values = image[box]
-    if not _kernel_admits(values, sphere_voxels):
-        return _convolution_peaks(
-            np.asarray(image, dtype=np.float64), mask, spacing, scratch_mib, selected,
-        )
-    is_maximum: NDArray[np.bool_] | None = None
-    if "LocalIntensityPeak" in selected:
-        is_maximum = sampled == sampled.max()
-        if "GlobalIntensityPeak" not in selected and not np.all(is_maximum):
-            # Admission above deliberately uses the original ROI support: moving a
-            # remote exceptional value must not change which arithmetic path runs.
-            # Once admitted, only tied maximum centers can affect the local peak.
-            occupied = occupied[is_maximum]
-            lower = np.maximum(occupied.min(axis=0) - np.asarray(half), 0)
-            upper = np.minimum(occupied.max(axis=0) + 1 + np.asarray(half), image.shape)
-            box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
-            values = image[box]
     mode: _SphereSum
     low: mx.array | None = None
     if _integer_sums_exact(values, sphere_voxels):
-        if "GlobalIntensityPeak" in selected:
+        if global_peak:
             mode = "prefix"
             high = mx.reshape(mx.cumsum(
                 mx.array(np.ascontiguousarray(values, dtype=np.int32)), axis=2, dtype=mx.int32,
@@ -276,9 +270,9 @@ def local_intensity_statistics(
             mode = "compensated"
             low = mx.array(low32.reshape(-1), dtype=mx.float32)
     shape = tuple(int(size) for size in values.shape)
-    relative = occupied - lower
+    relative = occupied - np.asarray([part.start for part in box], dtype=np.int64)
     peaks: dict[str, mx.array] = {}
-    if "GlobalIntensityPeak" in selected:
+    if global_peak:
         means = _sphere_means(high, low, shape, relative, rows, mode)
         peaks["GlobalIntensityPeak"] = mx.max(means)
         if is_maximum is not None:
