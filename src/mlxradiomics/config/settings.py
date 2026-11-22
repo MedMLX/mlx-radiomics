@@ -3,9 +3,12 @@
 Unsupported settings raise ``ValueError``; nothing falls back to another backend.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
+
+import numpy as np
 
 # PyRadiomics feature names form the default selection; IBSI definitions and
 # explicit mathematical aliases extend them.
@@ -176,6 +179,24 @@ CONVENTIONS: dict[str, tuple[str, ...]] = {
 def _is_real(value: object) -> bool:
     """Whether ``value`` is an ``int`` or ``float`` (``bool`` and strings are not)."""
     return type(value) in (int, float)
+
+
+def _reject_numpy_numbers(fields: Mapping[str, object]) -> None:
+    """Refuse NumPy numbers in any field or tuple item, naming the field and type.
+
+    The checks below require exact Python ``int``, ``float`` and ``bool`` types, so a
+    NumPy scalar (a bin width computed with NumPy, a label from ``np.unique``) would
+    otherwise fail with a range message such as "bin_width must be finite and
+    positive" that does not describe the value given.
+    """
+    for name, value in fields.items():
+        items = cast(tuple[object, ...], value) if isinstance(value, tuple) else (value,)
+        for kind in map(type, items):
+            if issubclass(kind, (np.number, np.bool_)):
+                raise ValueError(
+                    f"{name} must use Python numbers, not NumPy {kind.__name__}; "
+                    "convert it with int(), float() or bool()"
+                )
 
 
 @dataclass(frozen=True)
@@ -378,6 +399,7 @@ class Settings:
             ndim: Dimensionality of the image the settings will be applied to; only used
                 to check that ``force2d_axis`` indexes an array axis.
         """
+        _reject_numpy_numbers(vars(self))
         self._validate_preprocessing()
         self._validate_definitions(ndim)
         if type(self.gldm_alpha) is not int or self.gldm_alpha < 0:

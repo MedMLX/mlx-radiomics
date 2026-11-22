@@ -20,6 +20,7 @@ from mlxradiomics.features.texture import (
     ngtdm_level_reductions,
     resident_run_kernel,
     run_kernel,
+    valid_cells,
     zone_labels,
 )
 from mlxradiomics.imaging.preprocessing import directions
@@ -102,9 +103,11 @@ def glcm_matrices(
         valid = mx.reshape(spatial_mask[left] & spatial_mask[right], (bins.shape[0], -1))
         if use_sparse_glcm(ng):
             keys, counts = coordinate_counts(
-                mx.reshape(spatial_bins[left], valid.shape),
-                mx.reshape(spatial_bins[right], valid.shape), valid, ng,
-                symmetric=settings.symmetrical_glcm,
+                *valid_cells(
+                    mx.reshape(spatial_bins[left], valid.shape),
+                    mx.reshape(spatial_bins[right], valid.shape), valid,
+                ),
+                ng, symmetric=settings.symmetrical_glcm,
             )
             yield TextureMatrix(counts, voxels, cell_keys=keys, column_count=ng)
             continue
@@ -255,7 +258,11 @@ def boundary_distances(mask: mx.array, shape: tuple[int, ...], axis: int | None)
     distance = mx.reshape(
         mx.where(mask, bound, 0).astype(mx.int32), (mask.shape[0], *shape),
     )
-    for dimension in axes:
+    for step, dimension in enumerate(axes):
+        if step:
+            # Evaluating between axes keeps only one axis's scan temporaries alive. As
+            # one graph, every axis's window-sized int32 scans were resident together.
+            evaluate(distance)
         size = shape[dimension]
         if bound <= 16:
             stride = prod(shape[dimension + 1:])
@@ -332,7 +339,7 @@ def zone_matrix(
     maximum_values = sizes if morphology is None else mx.where(starts, sizes, 0)
     maximum = width if fixed_columns else max(1, cast(int, mx.max(maximum_values).item()))
     if not fixed_columns and use_sparse_size(ng, maximum):
-        keys, counts = coordinate_counts(bins, sizes, starts, maximum)
+        keys, counts = coordinate_counts(*valid_cells(bins, sizes, starts), maximum)
         return TextureMatrix(
             counts, mx.sum(mask.astype(mx.int64), axis=1),
             cell_keys=keys, column_count=maximum,

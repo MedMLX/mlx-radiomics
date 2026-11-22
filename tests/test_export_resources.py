@@ -44,7 +44,9 @@ def test_runner_rejects_invalid_scratch_before_extraction(
         raise AssertionError("resource admission must precede extraction")
 
     monkeypatch.setattr("mlxradiomics.workflows.engine.extract", forbidden_extraction)
-    with pytest.raises(InvalidInputError):
+    # Each refusal names the runner option the caller has to change.
+    option = "scratch_dir" if problem == "missing_directory" else "max_scratch_mib"
+    with pytest.raises(InvalidInputError, match=option):
         run(image_path=paths[0], mask_path=paths[1], output_dir=tmp_path / "out",
             params=MEAN, voxel=True, scratch_dir=scratch,
             max_scratch_mib=0 if problem == "invalid_budget" else 1)

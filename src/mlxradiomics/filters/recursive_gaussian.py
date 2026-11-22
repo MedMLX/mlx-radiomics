@@ -13,7 +13,7 @@ and pair arithmetic reduces feedback cancellation within the qualified width ran
 
 from dataclasses import dataclass
 from functools import lru_cache
-from math import ceil, cos, exp, fsum, isfinite, sin, sqrt
+from math import ceil, cos, exp, fsum, isfinite, prod, sin, sqrt
 from sys import float_info
 from typing import cast
 
@@ -202,8 +202,8 @@ def _pair_arrays(values: tuple[float, ...]) -> tuple[NDArray[np.float32], NDArra
 
 
 @lru_cache(maxsize=128)
-def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
-    """Compile the pair-precision causal/anticausal recursion for rows of ``length``."""
+def _recursive_kernel(length: int, stride: int, cropped: bool) -> MetalKernel:
+    """Compile the pair-precision causal/anticausal recursion on a native array axis."""
     bounds = "int start = interval[0], stop = interval[1];" if cropped else (
         f"constexpr int start = 0, stop = {length};"
     )
@@ -215,11 +215,13 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
             input_names=["image", "coeff_hi", "coeff_lo"] + (["interval"] if cropped else []),
             output_names=["causal_lo", "output"],
             source=f"""
-        uint row = thread_position_in_grid.x;
-        if (row >= image_shape[0]) return;
-        uint base = row * {length};
+        uint t = thread_position_in_grid.x;
+        uint total = 1;
+        for (int axis = 0; axis < image_ndim; axis++) total *= uint(image_shape[axis]);
+        if (t >= total / {length}u) return;
+        uint base = (t / {stride}u) * {length * stride}u + t % {stride}u;
         {bounds}
-        uint target = row * uint(stop - start);
+        uint target = (t / {stride}u) * uint(stop - start) * {stride}u + t % {stride}u;
         Pair n[4], d[4], m[4];
         for (int k = 0; k < 4; k++) {{
             n[k] = Pair{{coeff_hi[k], coeff_lo[k]}};
@@ -229,7 +231,7 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
         Pair kc = Pair{{coeff_hi[12], coeff_lo[12]}};
         Pair ka = Pair{{coeff_hi[13], coeff_lo[13]}};
         Pair x0 = Pair{{image[base], 0.0f}};
-        Pair xn = Pair{{image[base + {length - 1}], 0.0f}};
+        Pair xn = Pair{{image[base + {(length - 1) * stride}u], 0.0f}};
         Pair zero = Pair{{0.0f, 0.0f}};
         Pair history[4] = {{zero, zero, zero, zero}};
 
@@ -239,7 +241,7 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
             Pair numerator = zero, feedback = zero;
             #pragma unroll
             for (int k = 0; k < 4; k++) {{
-                Pair sample = Pair{{image[base + max(i - k, 0)], 0.0f}};
+                Pair sample = Pair{{image[base + uint(max(i - k, 0)) * {stride}u], 0.0f}};
                 numerator = add(numerator, multiply(subtract(sample, x0), n[k]));
                 if (i > k) {{
                     feedback = add(feedback, multiply(history[k], d[k]));
@@ -251,7 +253,7 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
             history[1] = history[0];
             history[0] = value;
             if (i >= start) {{
-                uint index = target + uint(i - start);
+                uint index = target + uint(i - start) * {stride}u;
                 output[index] = value.hi;
                 causal_lo[index] = value.lo;
             }}
@@ -262,7 +264,8 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
             Pair numerator = zero, feedback = zero;
             #pragma unroll
             for (int k = 0; k < 4; k++) {{
-                Pair sample = Pair{{image[base + min(i + k + 1, {length - 1})], 0.0f}};
+                uint at = base + uint(min(i + k + 1, {length - 1})) * {stride}u;
+                Pair sample = Pair{{image[at], 0.0f}};
                 numerator = add(numerator, multiply(subtract(sample, xn), m[k]));
                 if (i + k + 1 < {length}) {{
                     feedback = add(feedback, multiply(history[k], d[k]));
@@ -274,7 +277,7 @@ def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
             history[1] = history[0];
             history[0] = anticausal;
             if (i < stop) {{
-                uint index = target + uint(i - start);
+                uint index = target + uint(i - start) * {stride}u;
                 Pair causal = Pair{{output[index], causal_lo[index]}};
                 Pair value = add(add(causal, anticausal), offset);
                 output[index] = value.hi + value.lo;
@@ -322,32 +325,31 @@ def recursive_gaussian(
     if type(axis) is not int or not 0 <= axis < image.ndim:
         raise ValueError("axis must index the image's dimensions")
     coefficients = _coefficients(sigma, spacing, order)
-    transposed = mx.moveaxis(image, axis, -1)
-    length = transposed.shape[-1]
+    length = image.shape[axis]
     if length < 4:
         raise ValueError("recursive Gaussian requires at least four samples along the axis")
     start, stop = (0, length) if interval is None else interval
     if not 0 <= start < stop <= length:
         raise ValueError("recursive Gaussian output interval must be inside the filtered axis")
     cropped = start != 0 or stop != length
-    rows = mx.reshape(transposed, (-1, length))
+    # Element step along ``axis`` in the row-major layout the kernel receives.
+    stride = prod(image.shape[axis + 1:])
     high, low = _pair_arrays(
         coefficients.numerator
         + coefficients.denominator
         + coefficients.anticausal
         + (coefficients.causal_dc, coefficients.anticausal_dc)
     )
-    inputs = [rows, mx.array(high), mx.array(low)]
+    inputs = [image, mx.array(high), mx.array(low)]
     if cropped:
         inputs.append(mx.array((start, stop), dtype=mx.int32))
-    output = _recursive_kernel(length, cropped)(
+    return _recursive_kernel(length, stride, cropped)(
         inputs=inputs,
-        grid=(rows.shape[0], 1, 1),
+        grid=(image.size // length, 1, 1),
         threadgroup=(64, 1, 1),
-        output_shapes=[(rows.shape[0], stop - start)] * 2,
+        output_shapes=[(*image.shape[:axis], stop - start, *image.shape[axis + 1:])] * 2,
         output_dtypes=[mx.float32] * 2,
     )[1]
-    return mx.moveaxis(mx.reshape(output, (*transposed.shape[:-1], stop - start)), -1, axis)
 
 
 def validate_log_domain(shape: tuple[int, ...], spacing: tuple[float, ...], sigma: float) -> None:
@@ -409,17 +411,21 @@ def laplacian_gaussian(
     # ITK traverses physical x,y,z axes, opposite the NumPy array-axis order.
     # After a pass, the remaining passes act on different axes and cannot read
     # its discarded output coordinates. Every pass still reads complete input lines.
+    # Each pass is evaluated before the next is built, so its input can be released;
+    # otherwise one command buffer keeps every pass's buffers alive until it completes.
     for derivative_axis in range(2, -1, -1):
         filtered = recursive_gaussian(
             image, sigma, spacing[derivative_axis], derivative_axis, 2,
             interval=intervals[derivative_axis],
         )
+        evaluate(filtered)
         for smooth_axis in range(2, -1, -1):
             if smooth_axis != derivative_axis:
                 filtered = recursive_gaussian(
                     filtered, sigma, spacing[smooth_axis], smooth_axis, 0,
                     interval=intervals[smooth_axis],
                 )
+                evaluate(filtered)
         output = output + filtered / spacing[derivative_axis] ** 2
         evaluate(output)
     return output

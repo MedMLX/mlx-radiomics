@@ -172,7 +172,7 @@ Calculation conventions such as kurtosis, shape covariance divisor, NGTDM
 singular cases and fixed-bin-size origin are independent `Settings` fields with
 IBSI defaults. Select each alternative explicitly; see
 [Conventions](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md#conventions).
-The [feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalogue) lists public names and
+The [feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalog) lists public names and
 their IBSI identifiers.
 
 ## MedMLX and automation

@@ -1,7 +1,9 @@
 """NIfTI/NRRD volume I/O with explicit value and geometry contracts.
 
-Reading and writing use SimpleITK. NiBabel checks NIfTI voxels that could be
-non-finite on disk because SimpleITK replaces those values with zero.
+Reading and writing use SimpleITK. NiBabel also checks NIfTI image values before
+extraction because SimpleITK replaces stored non-finite voxels with zero, and every
+NIfTI file is checked for completeness and gzip integrity because SimpleITK returns
+voxels from a truncated or damaged file without an error.
 """
 
 from __future__ import annotations
@@ -19,7 +21,11 @@ from numpy.typing import NDArray
 from mlxradiomics.contracts.types import HostArray
 
 _VOLUME_SUFFIXES = (".nii", ".nii.gz", ".nrrd", ".nhdr")
-_NIFTI_VALIDATION_BYTES = 16 * 1024 * 1024
+# Block size of the forward-only validation reads. Requests of 16 MiB from a gzip stream
+# that compresses well (a mask, an image with a zero background) were not returned to
+# the system after the file closed on CPython 3.13, about 20 MiB per file read; requests
+# of 8 MiB and below were.
+_NIFTI_VALIDATION_BYTES = 1024 * 1024
 
 
 class _NiftiProxy(Protocol):
@@ -129,7 +135,8 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     """Read a volume with SimpleITK under mask (``integer``) or image rules.
 
     Masks must hold integer labels. Images must be finite; NIfTI images are also
-    checked through NiBabel because SimpleITK zeroes stored non-finite voxels.
+    checked through NiBabel because SimpleITK zeroes stored non-finite voxels. Every
+    NIfTI file, mask or image, must be complete and pass its gzip checksum.
     """
     import SimpleITK as sitk
 
@@ -150,16 +157,22 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     # full buffer before checking the independent NIfTI value representation.
     del image
     if integer and raw.dtype.kind not in "biu":
-        raise ValueError(f"mask must contain integer labels: {source}")
+        # A 0/1 float mask or a NIfTI mask with scl_slope/scl_inter reaches here with
+        # integral values, so name the pixel type rather than the values.
+        raise ValueError(
+            "mask must contain integer labels stored as an integer pixel type without "
+            f"intensity scaling (read as {raw.dtype}): {source}"
+        )
     array = np.asarray(raw)
+    # Integer pixels are finite by type, so only floating-point arrays are scanned.
     if not integer and array.dtype.kind == "f":
         flat = array.reshape(-1)
         count = max(1, _NIFTI_VALIDATION_BYTES // max(array.itemsize, 8))
         for start in range(0, array.size, count):
             if not np.all(np.isfinite(flat[start:start + count])):
                 raise ValueError(f"image contains non-finite voxels: {source}")
-    if not integer and nifti:
-        _validate_nifti_values(source)
+    if nifti:
+        _validate_nifti_storage(source, values=not integer)
     return Volume(
         array=array,
         # SimpleITK orders spacing/origin/direction x-first; this package's arrays
@@ -170,38 +183,79 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     )
 
 
-def _validate_nifti_values(source: Path) -> None:
-    """Reject stored nonfinite values using bounded, forward-only proxy reads.
+def _validate_nifti_storage(source: Path, *, values: bool) -> None:
+    """Reject an incomplete or damaged NIfTI file and, for images, stored nonfinite values.
 
-    SimpleITK zeroes stored NaN/infinity. Preserve NiBabel's native dtype and
-    scaling, but validate a flat storage-order proxy over one owned stream so
-    gzip decompression never restarts between blocks. NiBabel 5.4's ``reshape``
-    loses ``keep_file_open``, so construct its documented proxy from public
-    metadata instead. No pixel values or geometry are taken from this check.
+    SimpleITK returns voxels from a NIfTI file that ends early, or whose gzip stream is
+    damaged, without raising, so a cut-off mask would silently shrink the ROI. One
+    forward-only pass checks that the file holds every voxel byte its header declares
+    and reads a gzip stream to its end, where gzip compares the stored CRC-32 and
+    length. Uncompressed NIfTI carries no checksum, so damage that keeps the file
+    length cannot be detected there.
+
+    With ``values`` the pass also rejects stored NaN/infinity, which SimpleITK zeroes.
+    It preserves NiBabel's native dtype and scaling, but validates a flat storage-order
+    proxy over the same owned stream so gzip decompression never restarts between
+    blocks. NiBabel 5.4's ``reshape`` loses ``keep_file_open``, so construct its
+    documented proxy from public metadata instead. Integer storage with a finite
+    scaled range needs only the integrity check. The returned volume uses SimpleITK
+    pixels and geometry.
+
+    Raises:
+        ValueError: If the file is shorter than its header declares, its gzip stream
+            ends early or fails its checksum, or an image stores nonfinite values.
     """
+    import zlib
+
     import nibabel as nib
     from nibabel.arrayproxy import ArrayProxy
 
-    proxy = cast(_NiftiReader, nib).load(source.as_posix()).dataobj
-    # Integer storage cannot contain NaN or infinity. Skip the second decode
-    # when the largest possible scaled value fits in float64.
-    if proxy.dtype.kind in "iu":
-        info = np.iinfo(proxy.dtype.str)
-        magnitude = max(-int(info.min), int(info.max))
-        if isfinite(magnitude * abs(proxy.slope) + abs(proxy.inter)):
+    compressed = source.name.endswith(".gz")
+    try:
+        proxy = cast(_NiftiReader, nib).load(source.as_posix()).dataobj
+        size = prod(proxy.shape)
+        declared = proxy.offset + size * proxy.dtype.itemsize
+        if not compressed and source.stat().st_size < declared:
+            raise ValueError(
+                f"NIfTI file holds {source.stat().st_size} of the {declared} bytes its "
+                f"header declares: {source}"
+            )
+        scan = values
+        if scan and proxy.dtype.kind in "iu":
+            # A finite bound on the scaled integer range removes the value scan.
+            info = np.iinfo(proxy.dtype.str)
+            magnitude = max(-int(info.min), int(info.max))
+            scan = not isfinite(magnitude * abs(proxy.slope) + abs(proxy.inter))
+        if not compressed and not scan:
             return
-    size = prod(proxy.shape)
-    # Scaling can promote to float64 (complex128 for a complex source, which the
-    # volume contract later rejects). Bound both stored and scaled block payload.
-    count = max(1, _NIFTI_VALIDATION_BYTES // np.result_type(proxy.dtype, np.float64).itemsize)
-    factory = cast(_NiftiProxyFactory, ArrayProxy)
-    with gzip.open(source, "rb") if source.name.endswith(".gz") else source.open("rb") as stream:
-        flat = factory(
-            stream, ((size,), proxy.dtype, proxy.offset, proxy.slope, proxy.inter), mmap=False,
+        # Scaling can promote to float64 (complex128 for a complex source, which the
+        # volume contract later rejects). Bound both stored and scaled block payload.
+        count = max(
+            1, _NIFTI_VALIDATION_BYTES // np.result_type(proxy.dtype, np.float64).itemsize,
         )
-        for start in range(0, size, count):
-            if not np.all(np.isfinite(flat[start:start + count])):
-                raise ValueError(f"image contains non-finite voxels: {source}")
+        factory = cast(_NiftiProxyFactory, ArrayProxy)
+        with gzip.open(source, "rb") if compressed else source.open("rb") as stream:
+            if scan:
+                flat = factory(
+                    stream, ((size,), proxy.dtype, proxy.offset, proxy.slope, proxy.inter),
+                    mmap=False,
+                )
+                for start in range(0, size, count):
+                    if not np.all(np.isfinite(flat[start:start + count])):
+                        raise ValueError(f"image contains non-finite voxels: {source}")
+            if compressed:
+                # gzip checks the CRC-32 and length only on the read after the last byte.
+                discard = bytearray(_NIFTI_VALIDATION_BYTES)
+                while stream.readinto(discard):
+                    pass
+                stored = stream.tell()
+                if stored < declared:
+                    raise ValueError(
+                        f"NIfTI file holds {stored} of the {declared} bytes its header "
+                        f"declares: {source}"
+                    )
+    except (EOFError, gzip.BadGzipFile, zlib.error) as error:
+        raise ValueError(f"damaged gzip stream ({error}): {source}") from error
 
 
 def read_image_dimension(path: str | Path) -> int:
@@ -228,7 +282,8 @@ def read_image(path: str | Path) -> Volume:
 
     Raises:
         ValueError: If the file is missing, has an unsupported suffix or detached NIfTI
-            header, is not a single-channel 2-D or 3-D volume, or contains non-finite values.
+            header, is not a single-channel 2-D or 3-D volume, contains non-finite values,
+            or is a NIfTI file that is incomplete or has a damaged gzip stream.
     """
 
     return _read(path, integer=False)
@@ -237,11 +292,13 @@ def read_image(path: str | Path) -> Volume:
 def read_mask(path: str | Path) -> Volume:
     """Read a 2D/3D integer label mask preserving pixel type and physical geometry.
 
-    SimpleITK read errors propagate, including ``RuntimeError`` for unreadable files.
+    SimpleITK and NiBabel read errors propagate, including ``RuntimeError`` for
+    unreadable files.
 
     Raises:
         ValueError: If the file is missing, has an unsupported suffix or detached NIfTI
-            header, is not a single-channel 2-D or 3-D volume, or has a non-integer pixel type.
+            header, is not a single-channel 2-D or 3-D volume, has a non-integer pixel
+            type, or is a NIfTI file that is incomplete or has a damaged gzip stream.
     """
 
     return _read(path, integer=True)

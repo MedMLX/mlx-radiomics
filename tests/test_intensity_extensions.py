@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from conftest import Conventions, settings_for
 from numpy.typing import NDArray
-from radiomics_reference.real_images import hcc_background, hcc_patch
+from radiomics_reference.real_images import hcc_background, hcc_crop, hcc_patch
 
 from mlxradiomics import Settings
 from mlxradiomics.config.settings import IVH, LOCAL_INTENSITY
@@ -248,6 +248,18 @@ def test_ivh_integer_lattice_calibration_keeps_small_reported_intensities() -> N
     for fraction in (10, 90):
         target = ordered[len(ordered) - floor(fraction * len(ordered) / 100) - 1] + 1
         assert result.features[f"original_ivh_IntensityAtVolumeFraction{fraction}"] == target
+
+
+def test_ivh_unit_lattice_message_names_the_noninteger_range_bound() -> None:
+    # The intensities are integer HU; only the fractional resegmentation bound rules out
+    # the unit lattice, so the message must not call the intensities continuous.
+    image, liver, _ = hcc_crop(np.s_[105:107, 217:219, 62])
+    with pytest.raises(ValueError, match="integer intensity range bounds"):
+        extract_original(
+            image, liver, settings=Settings(
+                features=("ivh_AreaUnderIVHCurve",), resegment_range=(-100.5, 300.0),
+            ),
+        )
 
 
 def test_ivh_absolute_resegmentation_uses_sorted_effective_bounds() -> None:

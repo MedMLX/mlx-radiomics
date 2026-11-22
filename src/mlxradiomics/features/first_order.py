@@ -350,7 +350,7 @@ class _FirstOrderTerms:
 
     @cached_property
     def skewness(self) -> mx.array:
-        """Skewness; 0 (IBSI) or NaN (PyRadiomics) for zero-variance rows."""
+        """Skewness; 0 (default) or NaN for zero-variance rows."""
         second = self.second
         third = _sum_rows(self.centered[1]**3) / self.count
         constant = 0 if self.zero_variance_moments == "zero" else float("nan")
@@ -360,7 +360,7 @@ class _FirstOrderTerms:
     def kurtosis(self) -> mx.array:
         """Kurtosis; IBSI reports excess kurtosis, PyRadiomics the raw moment ratio.
 
-        Zero-variance rows give 0 (IBSI) or NaN (PyRadiomics).
+        Zero-variance rows give 0 (default) or NaN.
         """
         second = self.second
         fourth = _sum_rows(self.centered[1]**4) / self.count
@@ -721,8 +721,10 @@ def first_order(
     Variance, skewness and kurtosis use population (divide by n) moments.  By default
     (``kurtosis="excess"``, ``zero_variance_moments="zero"``) three is subtracted from
     kurtosis and both standardized moments are zero when the variance is zero (IBSI IPH6
-    and its first-order companions).  ``kurtosis="raw"`` keeps the PyRadiomics ratio and
-    ``zero_variance_moments="nan"`` the PyRadiomics NaN for zero-variance rows.
+    and its first-order companions).  ``kurtosis="raw"`` keeps the PyRadiomics ratio.
+    ``zero_variance_moments="nan"`` reports the undefined standardized moments of
+    zero-variance rows as NaN; PyRadiomics 3.0.1 returns 0 for a flat region, as the
+    default does.
     MeanAbsoluteDeviation is the mean
     absolute distance from the mean.  MedianAbsoluteDeviation is the mean absolute
     distance from the median (not the median of the deviations).  CoefficientOfVariation

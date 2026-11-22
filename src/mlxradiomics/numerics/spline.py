@@ -66,8 +66,13 @@ def spline_coefficients(image: mx.array) -> mx.array:
 
 
 @lru_cache(maxsize=32)
-def _sample_kernel(shape: tuple[int, ...]) -> MetalKernel:
-    """Compile the kernel sampling B-spline coefficients of ``shape`` at center offsets."""
+def _sample_kernel(shape: tuple[int, ...], with_scale: bool = False) -> MetalKernel:
+    """Compile the kernel sampling B-spline coefficients of ``shape`` at center offsets.
+
+    With ``with_scale`` a second output holds ``sum(|weight * coefficient|)`` over the 4x4x4
+    support, the magnitude that float32 roundoff of the sample is proportional to. The
+    sample statements are identical either way.
+    """
     size = ",".join(str(v) for v in shape)
     strides = ",".join(str(prod(shape[i + 1 :])) for i in range(3))
     return cast(
@@ -75,7 +80,7 @@ def _sample_kernel(shape: tuple[int, ...]) -> MetalKernel:
         mx.fast.metal_kernel(
             name="mlxradiomics_cubic_samples",
             input_names=["coefficients", "centers", "offsets"],
-            output_names=["samples"],
+            output_names=["samples", "scale"] if with_scale else ["samples"],
             header=f"constant int sizes[] = {{{size}}}; constant int strides[] = {{{strides}}};",
             source="""
         uint t = thread_position_in_grid.x;
@@ -84,7 +89,7 @@ def _sample_kernel(shape: tuple[int, ...]) -> MetalKernel:
         int index[3][4]; float weight[3][4];
         for (int d = 0; d < 3; d++) {
             float coordinate = centers[row * 3 + d] + offsets[point * 3 + d];
-            if (coordinate < 0 || coordinate > sizes[d] - 1) { samples[t] = 0; return; }
+            if (coordinate < 0 || coordinate > sizes[d] - 1) { samples[t] = 0; SCALE_ZERO return; }
             int left = int(floor(coordinate)) - 1;
             float x = coordinate - floor(coordinate), y = 1 - x;
             weight[d][0] = y * y * y / 6;
@@ -98,14 +103,41 @@ def _sample_kernel(shape: tuple[int, ...]) -> MetalKernel:
             }
         }
         float value = 0;
+        float magnitude = 0;
         for (int z = 0; z < 4; z++) for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
             int flat = index[0][z] * strides[0] + index[1][y] * strides[1] + index[2][x];
             value += coefficients[flat] * weight[0][z] * weight[1][y] * weight[2][x];
+            SCALE_ADD
         }
         samples[t] = value;
-        """,
+        SCALE_STORE
+        """.replace("SCALE_ZERO", "scale[t] = 0;" if with_scale else "")
+        .replace(
+            "SCALE_ADD",
+            "magnitude += fabs(coefficients[flat] * weight[0][z] * weight[1][y] * weight[2][x]);"
+            if with_scale
+            else "",
+        )
+        .replace("SCALE_STORE", "scale[t] = magnitude;" if with_scale else ""),
         ),
     )
+
+
+def cubic_samples_with_scale(
+    coefficients: mx.array, centers: mx.array, offsets: mx.array
+) -> tuple[mx.array, mx.array]:
+    """``cubic_samples`` plus the per-sample ``sum(|weight * coefficient|)`` over the support.
+
+    The scale is 0 for positions outside the image, where the sample is exactly 0.
+    """
+    samples, scale = _sample_kernel(coefficients.shape, True)(
+        inputs=[coefficients, centers, offsets],
+        grid=(centers.shape[0] * offsets.shape[0], 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(centers.shape[0], offsets.shape[0])] * 2,
+        output_dtypes=[mx.float32, mx.float32],
+    )
+    return samples, scale
 
 
 def cubic_samples(coefficients: mx.array, centers: mx.array, offsets: mx.array) -> mx.array:

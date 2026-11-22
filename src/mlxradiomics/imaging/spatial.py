@@ -527,7 +527,10 @@ def prepare_image_pair(
         image, mask = _resample(image, mask, spatial, options.label, bounds)
     elif not _same_geometry(image, mask):
         if not spatial.correct_mask:
-            raise ValueError("geometry mismatch; explicitly enable correct_mask or resampling")
+            raise ValueError(
+                "geometry mismatch; explicitly enable mask correction (correct_mask; "
+                "correctMask in a parameter file) or resampling"
+            )
         mask = _correct_mask(image, mask)
     else:
         mask.CopyInformation(image)

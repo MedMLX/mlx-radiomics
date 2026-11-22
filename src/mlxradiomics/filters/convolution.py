@@ -178,8 +178,13 @@ def convolve_nd(
     constant: float,
     *,
     window: tuple[slice, ...] | None = None,
+    slab_voxels: int | None = None,
 ) -> mx.array:
-    """True convolution, optionally limited to a nonempty output window."""
+    """Convolve on the requested output grid, optionally in 3-D slabs.
+
+    ``slab_voxels`` controls temporary MLX unfold storage by evaluating the
+    output in axis-0 slabs, with at least one output plane per call.
+    """
     widths = [(size // 2, size // 2) for size in kernel.shape]
     padded = _convolution_source(image, widths, padding, constant, window)
     # MLX convolution is cross-correlation; flip the kernel for Eq. 2.2.
@@ -188,8 +193,22 @@ def convolve_nd(
         result = mx.conv2d(padded[None, :, :, None], weight[None, :, :, None])
         return result[0, :, :, 0]
     if image.ndim == 3:
-        result = mx.conv3d(padded[None, :, :, :, None], weight[None, :, :, :, None])
-        return result[0, :, :, :, 0]
+        volume = padded[None, :, :, :, None]
+        weight = weight[None, :, :, :, None]
+        depth, height, width = (
+            length - taps + 1 for length, taps in zip(padded.shape, kernel.shape, strict=True)
+        )
+        plane = height * width
+        if slab_voxels is None or depth * plane <= slab_voxels:
+            return mx.conv3d(volume, weight)[0, :, :, :, 0]
+        rows = max(1, slab_voxels // plane)
+        slabs: list[mx.array] = []
+        for start in range(0, depth, rows):
+            stop = min(start + rows, depth)
+            slab = mx.conv3d(volume[:, start:stop + kernel.shape[0] - 1], weight)
+            evaluate(slab)
+            slabs.append(slab[0, :, :, :, 0])
+        return mx.concatenate(slabs, axis=0)
     raise ValueError("filters require a 2-D or 3-D image")
 
 
@@ -288,6 +307,9 @@ def _atrous_taps(taps: tuple[float, ...], level: int) -> NDArray[np.float64]:
     return dilated
 
 
+# Output voxels per ``mx.conv3d`` call of a separable pass: about 0.5 GB of unfolded input.
+_SLAB_VOXELS = 2**22
+
 type _SeparablePrefixes = dict[tuple[bytes, ...], tuple[mx.array, float]]
 
 
@@ -311,6 +333,10 @@ def _convolve_axes(
     separable kernel. Reusing ``constant`` at every axis would not: a Haar
     high-pass would respond to a constant image extended by its own value.
 
+    Every pass is evaluated before the next, so one 1-D convolution's working set
+    is live at a time instead of the whole chain's. The caller owns ``prefixes`` and
+    pops entries after their last use, because a cached array stays resident.
+
     A ``prefixes`` cache may be shared by bands of the same input, padding and
     extension value. Only byte-identical tap prefixes are reused, preserving the
     axis order and every floating-point operation on that path. The cache is
@@ -328,8 +354,11 @@ def _convolve_axes(
         shape = [1] * image.ndim
         # IBSI axis k_(index+1) is native array axis ndim - 1 - index.
         shape[image.ndim - 1 - index] = vector.size
-        result = convolve_nd(result, vector.reshape(shape), padding, constant)
+        result = convolve_nd(
+            result, vector.reshape(shape), padding, constant, slab_voxels=_SLAB_VOXELS,
+        )
         constant *= float(vector.sum())
+        evaluate(result)
         if prefixes is not None:
             prefixes[prefix] = (result, constant)
     return result, constant
@@ -412,10 +441,14 @@ def separable_wavelet_responses(
         # Every requested band starts from the same approximation. Share exact
         # prefixes: all 3-D bands need 2 + 4 + 8 = 14 axis passes instead of 24.
         prefixes: _SeparablePrefixes = {}
-        for position, band in enumerate(bands):
-            values, _ = _convolve_axes(
-                approximation, rotated(band, level, rotation), padding, extension, prefixes,
-            )
+        band_vectors = [rotated(band, level, rotation) for band in bands]
+        # A cached prefix stays resident until the last band that starts with it.
+        last_use: dict[tuple[bytes, ...], int] = {}
+        for position, vectors in enumerate(band_vectors):
+            for length in range(1, len(vectors) + 1):
+                last_use[tuple(vector.tobytes() for vector in vectors[:length])] = position
+        for position, vectors in enumerate(band_vectors):
+            values, _ = _convolve_axes(approximation, vectors, padding, extension, prefixes)
             # Running pools keep one resident map per band across the rotations.
             if pooling is OrientationPooling.AVERAGE:
                 if rotation == 0:
@@ -430,10 +463,13 @@ def separable_wavelet_responses(
                 combined[position] = mx.minimum(combined[position], values)
             else:
                 raise ValueError(f"unsupported orientation pooling: {pooling}")
-        # Output graphs retain every shared dependency. Drop the cache's extra
-        # roots before evaluation so intermediates can die after their last use.
-        prefixes.clear()
-        evaluate(*combined, *(part for state in means for part in state))
+            # Evaluate the pool so it holds a map, not the band's response and graph.
+            if pooling is OrientationPooling.AVERAGE:
+                evaluate(*means[position])
+            else:
+                evaluate(combined[position])
+            for key in [key for key, last in last_use.items() if last == position]:
+                del prefixes[key]
     if pooling is OrientationPooling.AVERAGE:
         return [_mean_finish(state, rotations, mean_scale) for state in means]
     return combined
@@ -566,16 +602,40 @@ def laws_response(
         [vectors] if pooling is OrientationPooling.NONE else _laws_orientations(codes)
     )
     convolve = convolve_planes if image.ndim == 3 and len(vectors) == 2 else convolve_nd
+    kernels = [_kernel_from_vectors(orientation) for orientation in orientations]
+    keys = [(kernel.shape, kernel.tobytes()) for kernel in kernels]
+    last_use = {key: index for index, key in enumerate(keys)}
     distinct: dict[tuple[tuple[int, ...], bytes], mx.array] = {}
-    responses: list[mx.array] = []
-    for orientation in orientations:
-        kernel = _kernel_from_vectors(orientation)
-        key = (kernel.shape, kernel.tobytes())
-        if key not in distinct:
-            distinct[key] = convolve(image, kernel, padding, constant, window=window)
-        # Average pooling depends on both the multiplicity and order of the rotations.
-        responses.append(distinct[key])
-    return _pool(responses, pooling)
+    count = len(kernels)
+    mean_scale = _mean_scale(count)
+    state: _MeanState | None = None
+    pooled: mx.array | None = None
+    for index, (kernel, key) in enumerate(zip(kernels, keys, strict=True)):
+        response = distinct.get(key)
+        if response is None:
+            response = convolve(image, kernel, padding, constant, window=window)
+        if index < last_use[key]:
+            distinct[key] = response
+        else:
+            distinct.pop(key, None)
+        # Reuse duplicate kernels while retaining every rotation in pooling order.
+        if pooling is OrientationPooling.AVERAGE:
+            state = _mean_add(state, response, mean_scale)
+            evaluate(*state)
+            continue
+        if pooled is None:
+            pooled = response
+        elif pooling is OrientationPooling.MAX:
+            pooled = mx.maximum(pooled, response)
+        elif pooling is OrientationPooling.MIN:
+            pooled = mx.minimum(pooled, response)
+        else:
+            raise ValueError(f"unsupported orientation pooling: {pooling}")
+        evaluate(pooled)
+    if state is not None:
+        return _mean_finish(state, count, mean_scale)
+    assert pooled is not None
+    return pooled
 
 
 def _laws_energy_extension(vectors: tuple[NDArray[np.float64], ...], constant: float) -> float:

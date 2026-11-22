@@ -14,12 +14,11 @@ from mlxradiomics.numerics.runtime import evaluate, mx
 _DISTANCE = """
 using Distance = float;
 template <int D>
-inline float pair_distance(const device float* points, constant float* spacing,
-                           uint t, uint q) {
+inline float pair_distance(float3 delta, constant float* spacing) {
     float component[D];
     float scale = 0;
     for (int d = 0; d < D; d++) {
-        component[d] = (points[t * D + d] - points[q * D + d]) * spacing[d];
+        component[d] = delta[d] * spacing[d];
         scale = max(scale, fabs(component[d]));
     }
     if (isinf(scale)) return INFINITY;
@@ -39,12 +38,10 @@ _SCALED_DISTANCE = """
 // Metal could flush in a float maximum. Reinterpret after reducing the distances.
 using Distance = uint;
 template <int D>
-inline uint pair_distance(const device float* points, constant float* spacing,
-                          constant int* exponents, uint t, uint q) {
-    float delta[D];
+inline uint pair_distance(float3 delta, constant float* spacing,
+                          constant int* exponents) {
     int exponent = -2048;
     for (int d = 0; d < D; d++) {
-        delta[d] = points[t * D + d] - points[q * D + d];
         if (delta[d] != 0) exponent = max(exponent, exponents[d]);
     }
     if (exponent == -2048) return 0;
@@ -63,14 +60,26 @@ inline uint pair_distance(const device float* points, constant float* spacing,
 """
 
 
+def _distance_deltas(ndim: int, second: str) -> str:
+    """Read pair coordinates at the call site for either Metal address space."""
+    components = [
+        f"points[t * {ndim} + {axis}] - {second}[q * {ndim} + {axis}]"
+        for axis in range(ndim)
+    ]
+    if ndim == 2:
+        components.append("0.0f")
+    return "float3(" + ", ".join(components) + ")"
+
+
 def _distance_source(ndim: int, scaled: bool) -> tuple[str, list[str], str]:
     """Select the norm and output representation for the spacing range."""
     names = ["points", "spacing"]
+    delta = _distance_deltas(ndim, "points")
     if scaled:
         return _SCALED_DISTANCE, [*names, "exponents"], (
-            f"pair_distance<{ndim}>(points, spacing, exponents, t, q)"
+            f"pair_distance<{ndim}>({delta}, spacing, exponents)"
         )
-    return _DISTANCE, names, f"pair_distance<{ndim}>(points, spacing, t, q)"
+    return _DISTANCE, names, f"pair_distance<{ndim}>({delta}, spacing)"
 
 
 @lru_cache(maxsize=8)
@@ -263,6 +272,27 @@ def _plane_maximum(
     return mx.max(maxima)
 
 
+@lru_cache(maxsize=1)
+def _farthest_hull_kernel(ndim: int) -> MetalKernel:
+    """Return each vertex's maximum ordinary-precision distance to the hull."""
+    delta = _distance_deltas(ndim, "hull")
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_farthest_hull_vertex",
+        input_names=["points", "hull", "spacing"],
+        output_names=["farthest"],
+        header=_DISTANCE,
+        source=f"""
+        uint t = thread_position_in_grid.x;
+        if (t >= points_shape[0]) return;
+        float maximum = 0;
+        for (uint q = 0; q < hull_shape[0]; q++) {{
+            maximum = max(maximum, pair_distance<{ndim}>({delta}, spacing));
+        }}
+        farthest[t] = maximum;
+        """,
+    ))
+
+
 def _search_maxima(
     vertices: mx.array, spacing: list[mx.array], scratch_mib: int, ndim: int,
     hull_indices: NDArray[np.int32] | None,
@@ -283,15 +313,28 @@ def _search_maxima(
     if hull_indices is None:
         hull_indices = scipy_hull(coordinates).vertices
     hull_vertices = mx.take(vertices, mx.array(hull_indices), axis=0)
-    overall = _all_pairs(hull_vertices, spacing, scratch_mib, ndim)
+    overall = _all_pairs(hull_vertices, spacing, scratch_mib, ndim)[3]
+    if len(spacing) == 1:
+        # Exact distances are maximized on the hull. Recheck near-maximal vertices
+        # so rounding cannot remove a pair that wins in the exhaustive float32 search.
+        [farthest] = _farthest_hull_kernel(ndim)(
+            inputs=[vertices, hull_vertices, spacing[0]],
+            grid=(count, 1, 1), threadgroup=(256, 1, 1),
+            output_shapes=[(count,)], output_dtypes=[mx.float32],
+        )
+        keep = farthest >= overall * (1.0 - 2.0**-16)
+        evaluate(keep)
+        indices = np.flatnonzero(np.asarray(keep, dtype=np.bool_)).astype(np.int32)
+        candidates = mx.take(vertices, mx.array(indices), axis=0)
+        overall = _all_pairs(candidates, spacing, scratch_mib, ndim)[3]
     if ndim == 2:
-        return overall
+        return mx.stack([mx.zeros_like(overall)] * 3 + [overall])
     planes: list[mx.array] = []
     for axis in range(3):
         maximum = _plane_maximum(vertices, coordinates, spacing, axis)
         evaluate(maximum)
         planes.append(maximum)
-    return mx.stack([*planes, overall[3]])
+    return mx.stack([*planes, overall])
 
 
 def diameter_maxima(

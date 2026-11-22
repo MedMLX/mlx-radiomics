@@ -15,14 +15,16 @@ import numpy as np
 import pytest
 from conftest import Conventions, convention_shape_statistics, settings_for
 from numpy.typing import NDArray
-from radiomics_reference.real_images import hcc_resampled
+from radiomics_reference.real_images import hcc_crop, hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.config.settings import SHAPE, SHAPE2D, EllipsoidArea
+from mlxradiomics.features.geometry.diameters import diameter_maxima
 from mlxradiomics.features.geometry.ellipsoids import (
     ellipsoid_area_ibsi_series,
     ellipsoid_area_normalized,
 )
+from mlxradiomics.features.geometry.mesh import mesh_geometry
 
 MESH_FEATURES = (
     "MeshVolume", "VoxelVolume", "SurfaceArea", "SurfaceVolumeRatio", "Sphericity",
@@ -64,6 +66,24 @@ def test_cuboid_mesh_diameters_match_face_center_extrema(
         assert values[name] == pytest.approx(diameter(axes), rel=2e-6, abs=0)
 
 
+def test_large_mesh_diameters_equal_the_exhaustive_pair_search() -> None:
+    # Meshes this large search only vertices whose farthest hull vertex reaches the hull
+    # diameter. The result must equal the all-pairs search bit for bit; the crop's cut
+    # faces put many tied vertices on the hull.
+    _, liver, _ = hcc_crop((slice(100, 300), slice(150, 350), slice(25, 55)))
+    mask = liver.astype(np.bool_)
+    spacing = (0.859375, 0.859375, 2.5)
+    vertices = mesh_geometry(mask, spacing, 64).vertices
+    # The smaller scratch budget rules out holding the hull-search intermediates.
+    exhaustive = np.asarray(diameter_maxima(vertices, spacing, 1, 3), dtype=np.float32)
+    names = ("Maximum2DDiameterSlice", "Maximum2DDiameterColumn", "Maximum2DDiameterRow",
+             "Maximum3DDiameter")
+    computed = convention_shape_statistics("ibsi", mask, spacing, names)
+    pruned = np.concatenate([np.asarray(computed[f"shape_{name}"], dtype=np.float32)
+                             for name in names])
+    assert np.array_equal(pruned.view(np.uint32), exhaustive.view(np.uint32))
+
+
 @pytest.mark.parametrize("separation", [128, 512, 1024])
 def test_disconnected_2d_mesh_area_is_additive(separation: int) -> None:
     mask = np.zeros((separation + 1,) * 2, np.uint8)
@@ -71,6 +91,22 @@ def test_disconnected_2d_mesh_area_is_additive(separation: int) -> None:
     result = extract(hcc_resampled(mask.shape), mask, spacing=(0.977, 0.977),
                      settings=Settings(features=("shape2D_MeshSurface",)))
     assert result.features["original_shape2D_MeshSurface"] == pytest.approx(0.977**2, rel=1e-6)
+
+
+def test_single_slice_roi_has_undefined_enclosing_ellipsoid_densities() -> None:
+    # A single slice has a zero least covariance eigenvalue, so the approximate
+    # enclosing ellipsoid has zero volume and the density is undefined, not infinite.
+    ct, liver, _ = hcc_crop((slice(100, 300), slice(150, 350), slice(25, 55)))
+    mask = np.zeros(liver.shape, np.uint8)
+    mask[:, :, 10] = liver[:, :, 10]
+    names = ("VolumeDensityApproximateEnclosingEllipsoid", "MeshVolume")
+    settings = settings_for("pyradiomics", features=tuple(f"shape_{name}" for name in names))
+    result = extract(ct.astype(np.float32), mask, settings=settings,
+                     spacing=(0.859375, 0.859375, 2.5))
+    name = "original_shape_VolumeDensityApproximateEnclosingEllipsoid"
+    assert np.isnan(np.asarray(result.features[name], dtype=np.float64)).all()
+    assert result.metadata["feature_validity"][name]["nan"] == 1
+    assert np.isfinite(np.asarray(result.features["original_shape_MeshVolume"])).all()
 
 
 @pytest.mark.parametrize("scale", [0.01, 1.0, 100.0])

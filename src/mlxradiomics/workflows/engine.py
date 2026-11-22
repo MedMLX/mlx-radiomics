@@ -289,6 +289,9 @@ def extract_with_shape_mask(
     spacing = spacing or (1.0,) * data.image.ndim
     if len(spacing) != data.image.ndim or any(not np.isfinite(v) or v <= 0 for v in spacing):
         raise ValueError("spacing must contain one finite positive value per array axis")
+    if not all(isinstance(v, int | float) for v in cast(tuple[object, ...], spacing)):
+        # np.float32 and other NumPy scalars would reach the JSON run report and fail there.
+        raise ValueError("spacing values must be Python or float64 numbers")
     if prod(source_shape) >= 2**30:
         raise ValueError("image exceeds supported integer indexing/count range")
     if (

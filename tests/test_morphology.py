@@ -299,12 +299,30 @@ def test_integrated_intensity_retains_signed_and_zero_totals(sign: int) -> None:
     assert actual["IntegratedIntensity"] == pytest.approx(expected, rel=2e-6, abs=0)
 
 
-def test_zero_signed_mass_does_not_define_a_weighted_centroid() -> None:
+def test_zero_signed_mass_leaves_the_weighted_centroid_undefined() -> None:
+    # Real CT voxels shifted by their mean sum to exactly zero, so the weighted centroid
+    # is undefined (NaN). Quantities that stay defined are still computed and reported.
     image = hcc_patch((2, 1, 1))[0]
     image -= image.mean()
     mask = np.ones(image.shape, dtype=np.bool_)
-    with pytest.raises(RuntimeError, match="total intensity is too ill-conditioned"):
-        _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
+    names = ("CentreOfMassShift", "IntegratedIntensity")
+    actual = _values(image, mask, mask, (1.0, 1.0, 1.0), names)
+    assert np.isnan(actual["CentreOfMassShift"])
+    assert actual["IntegratedIntensity"] == 0
+    result = extract(
+        image.astype(np.float32), mask.astype(np.uint8), spacing=(1.0, 1.0, 1.0),
+        settings=Settings(features=("shape_CentreOfMassShift", "shape_IntegratedIntensity")),
+    )
+    validity = result.metadata["feature_validity"]
+    assert validity["original_shape_CentreOfMassShift"]["nan"] == 1
+    assert validity["original_shape_IntegratedIntensity"]["finite"] == 1
+
+
+def test_all_zero_intensities_leave_the_weighted_centroid_undefined() -> None:
+    image = np.zeros_like(hcc_patch((2, 1, 1))[0])
+    mask = np.ones(image.shape, dtype=np.bool_)
+    actual = _values(image, mask, mask, (1.0, 1.0, 1.0), ("CentreOfMassShift",))
+    assert np.isnan(actual["CentreOfMassShift"])
 
 
 def test_spatial_autocorrelation_preserves_colliding_high_words() -> None:

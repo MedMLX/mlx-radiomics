@@ -10,7 +10,16 @@ def map_coordinates(
     order: int = 3,
     mode: Literal["mirror", "constant", "nearest"] = "constant",
     cval: float = 0.0,
+    prefilter: bool = True,
 ) -> NDArray[np.generic]: ...
+
+def spline_filter(
+    input: NDArray[np.generic],
+    order: int = 3,
+    *,
+    output: type[np.float64],
+    mode: Literal["mirror", "constant", "nearest"] = "mirror",
+) -> NDArray[np.float64]: ...
 
 def maximum_filter(
     input: NDArray[np.bool_],

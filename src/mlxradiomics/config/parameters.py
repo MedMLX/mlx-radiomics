@@ -432,7 +432,7 @@ def settings_from_params(params: Mapping[str, object], *, base: Settings | None 
     ``base`` or in the parameter file. An absent ``force2D``
     retains ``base.force2d_axis``; an explicit ``false`` clears it to ``None``; ``true``
     sets the integer axis from ``force2Ddimension`` (default 0). ``featureClass`` must map
-    each family to an explicit list of feature names, with at least one name overall.
+    each family to an explicit, nonempty list of feature names.
     Image types are handled by :func:`parse_params`.
 
     Args:
@@ -442,8 +442,8 @@ def settings_from_params(params: Mapping[str, object], *, base: Settings | None 
 
     Raises:
         ValueError: On unknown setting keys, values of the wrong type, or an empty or
-            non-list feature selection. Field-level validation of the result happens later, in
-            ``Settings.validate``.
+            non-list feature selection for any family. Field-level validation of the result
+            happens later, in ``Settings.validate``.
     """
 
     params = require_mapping(params, "params")
@@ -522,9 +522,12 @@ def settings_from_params(params: Mapping[str, object], *, base: Settings | None 
     if feature_class is not None:
         names: list[str] = []
         for family, selection in require_mapping(feature_class, "featureClass").items():
-            if not isinstance(selection, list):
+            # PyRadiomics reads a missing or empty list as every feature of the class.
+            # Dropping the family instead would silently remove its features.
+            if not isinstance(selection, list) or not selection:
                 raise ValueError(
-                    f"featureClass '{family}' must list feature names explicitly for this runner"
+                    f"featureClass '{family}' must list feature names explicitly for this "
+                    "runner; an empty or missing list does not select the whole class"
                 )
             for name in cast(list[object], selection):
                 if not isinstance(name, str):
@@ -612,19 +615,46 @@ def load_params(path: str | Path) -> Mapping[str, object]:
 
     Malformed YAML is translated to ``ValueError`` with the parser's location and
     description, so runner and study callers classify it as invalid input rather than an
-    unexpected execution failure.
+    unexpected execution failure. A key repeated within one mapping is refused:
+    ``yaml.safe_load`` would keep only its last value, so a second ``setting`` section
+    or a repeated ``binWidth`` would silently replace the first. PyRadiomics' own
+    reader refuses both.
 
     Raises:
-        ValueError: If the file is missing, is not valid YAML or UTF-8, or does not contain
-            a mapping.
+        ValueError: If the file is missing, is not valid YAML or UTF-8, repeats a key
+            within one mapping, or does not contain a mapping.
     """
     import yaml
 
     source = Path(path)
     if not source.is_file():
         raise ValueError(f"missing params file: {source}")
+    text = source.read_text(encoding="utf-8")
     try:
-        loaded = yaml.safe_load(source.read_text(encoding="utf-8"))
+        root = yaml.SafeLoader(text).get_single_node()
+        pending: list[yaml.Node] = [] if root is None else [root]
+        # Aliases share nodes, so visit each node once.
+        visited: set[int] = set()
+        while pending:
+            node = pending.pop()
+            if id(node) in visited:
+                continue
+            visited.add(id(node))
+            if isinstance(node, yaml.MappingNode):
+                keys: set[str] = set()
+                for key, value in cast(list[tuple[yaml.Node, yaml.Node]], node.value):
+                    if isinstance(key, yaml.ScalarNode):
+                        name = cast(str, key.value)
+                        if name in keys:
+                            raise ValueError(
+                                f"invalid params YAML: {source}: key '{name}' is repeated "
+                                f"(line {key.start_mark.line + 1})"
+                            )
+                        keys.add(name)
+                    pending.extend((key, value))
+            elif isinstance(node, yaml.SequenceNode):
+                pending.extend(cast(list[yaml.Node], node.value))
+        loaded = yaml.safe_load(text)
     except yaml.YAMLError as error:
         raise ValueError(f"invalid params YAML: {source}: {error}") from error
     return require_mapping(loaded, "params")

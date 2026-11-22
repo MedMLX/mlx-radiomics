@@ -292,16 +292,27 @@ def extract(
                             _forward_prefixed, prefix=name, target=consume,
                         )
                     if derived is None:
+                        assert prepared_input is not None
+                        if data.image.size >= 2**30:
+                            # The engine checks the array it receives, which is now the
+                            # window; keep its refusal of an oversized source.
+                            raise ValueError("image exceeds supported integer indexing/count range")
+                        # ROI mode reads only the derived-image window, which holds every
+                        # sampled and morphology voxel padded by the neighbor and peak
+                        # reach. Discretizing only that window gives the same features as
+                        # the whole grid: bins come from the retained samples, which keep
+                        # their traversal order inside the window. Voxel mode keeps the
+                        # whole grid (``crop`` selects everything).
                         result = extract_with_shape_mask(
-                            image,
-                            mask,
+                            image[crop],
+                            mask[crop],
                             settings=replace(settings, features=intensity_names),
                             spacing=spacing,
                             voxel=voxel,
                             histogram_method=histogram_method,
                             voxel_sink=stream_sink,
                             map_dtype=map_dtype,
-                            _prepared_input=prepared_input,
+                            _prepared_input=(window_masks, prepared_input[1]),
                         )
                         prepared_input = None
                     elif name == "lbp-3D-k":

@@ -79,6 +79,8 @@ class _VoxelPlan:
     has_source_first: bool
     has_intensity_histogram: bool
     explicit_texture: bool
+    explicit_settings: Settings | None
+    native_texture_settings: Settings | None
     kernel_axes: tuple[range, ...]
     local_shape: tuple[int, ...]
     pair_offsets: tuple[tuple[int, ...], ...]
@@ -249,6 +251,29 @@ def _voxel_first_group(
     return {name: np.asarray(value, dtype=np.float32) for name, value in selected.items()}
 
 
+def _roi_centers(roi: NDArray[np.bool_]) -> NDArray[np.int32]:
+    """Return ROI voxel coordinates ``(N, ndim)`` as ``np.argwhere`` orders them.
+
+    ``np.argwhere`` over a whole CT grid spends about 0.1 s scanning background. The
+    ROI's bounding box, found from axis projections, holds every ROI voxel, and
+    translating its row-major coordinates preserves their order, so this returns the
+    same int32 array from a scan of the box only.
+    """
+    lower: list[int] = []
+    box = roi
+    for axis in range(roi.ndim):
+        occupied = np.flatnonzero(
+            np.any(box, axis=tuple(other for other in range(roi.ndim) if other != axis))
+        )
+        if not occupied.size:
+            return np.argwhere(roi).astype(np.int32)
+        lower.append(int(occupied[0]))
+        box = box[(slice(None),) * axis + (slice(lower[-1], int(occupied[-1]) + 1),)]
+    centers = np.argwhere(box).astype(np.int32)
+    centers += np.asarray(lower, dtype=np.int32)
+    return centers
+
+
 def _sparse_glcm_bytes(
     ng: int,
     names: tuple[str, ...],
@@ -282,6 +307,29 @@ def _sparse_glcm_bytes(
     return working
 
 
+def _explicit_families(settings: Settings) -> frozenset[str]:
+    """Selected texture families whose conventions the fused and native kernels lack.
+
+    GLCM, GLRLM and GLSZM read none of the neighborhood or NGTDM conventions, so under
+    native aggregation their native routes evaluate the same definition as the explicit
+    pipeline. Only a non-native aggregation of the family itself, which merges matrices
+    before the features, needs the explicit pipeline. GLDM and NGTDM also depend on the
+    neighborhood support, NGTDM on its singular cases, and GLDZM has no native route.
+    """
+    families: set[str] = set()
+    for family in ("glcm", "glrlm", "glszm", "gldzm", "ngtdm", "gldm"):
+        if not any(name.startswith(f"{family}_") for name in settings.features):
+            continue
+        if (
+            getattr(settings, f"{family}_aggregation") != "native"
+            or family == "gldzm"
+            or (family in {"gldm", "ngtdm"} and settings.neighborhood_support == "closed-radius")
+            or (family == "ngtdm" and settings.ngtdm_singular_cases == "ibsi-caps")
+        ):
+            families.add(family)
+    return frozenset(families)
+
+
 def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     """Choose feature paths and batch sizes before allocating device residents."""
     shape = data.image.shape
@@ -295,12 +343,26 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     has_intensity_histogram = any(
         name.startswith("intensityhistogram_") for name in settings.features
     )
-    texture_names = tuple(n for n in settings.features if n.startswith(_OTHER_TEXTURE_PREFIXES))
-    glcm_names = tuple(
-        name.removeprefix("glcm_") for name in settings.features if name.startswith("glcm_")
-    )
-    has_glcm = bool(glcm_names)
     explicit = explicit_texture(settings)
+    explicit_families = _explicit_families(settings)
+    explicit_names = tuple(
+        name for name in settings.features
+        if name.partition("_")[0] in explicit_families
+        or (explicit and settings.force2d_axis is not None
+            and name.startswith(("glcm_", *_OTHER_TEXTURE_PREFIXES)))
+    )
+    explicit_settings = replace(settings, features=explicit_names) if explicit_names else None
+    native_texture_names = tuple(
+        name for name in settings.features
+        if name.startswith(_OTHER_TEXTURE_PREFIXES) and name not in explicit_names
+    )
+    explicit_glcm = any(name.startswith("glcm_") for name in explicit_names)
+    glcm_names = tuple(
+        name.removeprefix("glcm_")
+        for name in settings.features
+        if name.startswith("glcm_") and not explicit_glcm
+    )
+    has_glcm = any(name.startswith("glcm_") for name in settings.features)
     r = settings.kernel_radius
     axes = tuple(
         range(1) if settings.force2d_axis == i else range(-r, r + 1) for i in range(len(shape))
@@ -308,16 +370,8 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     kernel_size = prod(map(len, axes))
     local_shape = tuple(map(len, axes))
     all_pair_offsets = directions(local_shape, settings) if has_glcm else ()
-    # Neighborhood support and NGTDM singular cases do not affect GLCM pair
-    # means. A native full-domain directional average can use their direct sum
-    # even when other families still need explicit matrix processing.
     only_pair_means = pair_means_only(glcm_names)
-    full_domain_pair_means = (
-        settings.glcm_aggregation == "native"
-        and settings.force2d_axis is None
-        and only_pair_means
-    )
-    pair_offsets = all_pair_offsets if not explicit or full_domain_pair_means else ()
+    pair_offsets = all_pair_offsets if not explicit_glcm else ()
     pair_counts = tuple(
         prod(s - abs(v) for s, v in zip(local_shape, delta, strict=True)) for delta in pair_offsets
     )
@@ -332,6 +386,9 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     )
     # Conservative working-set estimate, excluding resident input and final output arrays.
     if has_glcm and not fused_glcm:
+        glcm_selected = tuple(
+            name.removeprefix("glcm_") for name in settings.features if name.startswith("glcm_")
+        )
         if use_sparse_glcm(data.gray_levels):
             # Explicit aggregation can retain and merge directions/slices. Their
             # combined pair population bounds sparse storage even when their gray
@@ -340,10 +397,10 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
                 prod(s - abs(v) for s, v in zip(local_shape, delta, strict=True))
                 for delta in all_pair_offsets
             )
-            population = sum(populations) if explicit else max(populations, default=0)
+            population = sum(populations) if explicit_glcm else max(populations, default=0)
             population *= 2 if settings.symmetrical_glcm else 1
             histogram_bytes = _sparse_glcm_bytes(
-                data.gray_levels, glcm_names, kernel_size, population,
+                data.gray_levels, glcm_selected, kernel_size, population,
             )
         else:
             histogram_bytes = data.gray_levels**2 * 128
@@ -358,24 +415,16 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         or any(n.startswith("ivh_") for n in settings.features)
     ):
         histogram_bytes = max(histogram_bytes, data.gray_levels * 16)
-    # Runs and zones support wider windows than dependence/neighborhood features.
-    # Native domains retain their connectivity when other families need explicit aggregation.
+    # Only run and zone features fit the wide-window texture kernel.
     fused_families: set[str] = set()
-    if texture_names and fused_texture_eligible(kernel_size, data.gray_levels, True):
-        if not explicit and fused_texture_eligible(kernel_size, data.gray_levels):
+    if native_texture_names and fused_texture_eligible(kernel_size, data.gray_levels, True):
+        fused_families.update(("glrlm", "glszm"))
+        if fused_texture_eligible(kernel_size, data.gray_levels):
             fused_families.update(("gldm", "ngtdm"))
-        if not explicit or (
-            settings.force2d_axis is None and settings.glrlm_aggregation == "native"
-        ):
-            fused_families.add("glrlm")
-        if not explicit or (
-            settings.force2d_axis is None and settings.glszm_aggregation == "native"
-            and not any(name.startswith("gldzm_") for name in texture_names)
-        ):
-            fused_families.add("glszm")
     fused_texture = tuple(
-        name for name in texture_names if name.partition("_")[0] in fused_families
+        name for name in native_texture_names if name.partition("_")[0] in fused_families
     )
+    native_fallback = tuple(name for name in native_texture_names if name not in fused_texture)
     texture_offsets = _TextureOffsets(runs=(), zones=(), dependence=())
     if fused_texture:
         unit = replace(settings, distances=(1,))
@@ -387,7 +436,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
             dependence=dependence + tuple(tuple(-v for v in d) for d in dependence),
         )
         histogram_bytes = max(histogram_bytes, 17 * 4 * (len(texture_offsets.runs) + 2))
-    if len(fused_texture) < len(texture_names):
+    if native_fallback or any(not n.startswith("glcm_") for n in explicit_names):
         histogram_bytes = max(histogram_bytes, data.gray_levels * kernel_size * 64)
     per_center = kernel_size * (64 + 16 * len(shape)) + histogram_bytes + 4096
     budget = settings.scratch_mib * 1024**2
@@ -398,7 +447,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     # direction's indexes at a time, already covered by the per-center working set.
     cache_indexes = index_bytes <= budget - per_center
     retained_bytes = index_bytes if cache_indexes else 0
-    centers = np.argwhere(data.roi).astype(np.int32)
+    centers = _roi_centers(data.roi)
     memory = _voxel_schedule(
         rows=len(centers),
         per_center=per_center,
@@ -414,6 +463,10 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         has_source_first=has_source_first,
         has_intensity_histogram=has_intensity_histogram,
         explicit_texture=explicit,
+        explicit_settings=explicit_settings,
+        native_texture_settings=(
+            replace(settings, features=native_fallback) if native_fallback else None
+        ),
         kernel_axes=axes,
         local_shape=local_shape,
         pair_offsets=pair_offsets,
@@ -455,18 +508,7 @@ def extract_voxels(
     """
     shape = source_shape
     schedule = _plan_voxels(data, settings)
-    fallback_features = tuple(
-        name for name in settings.features
-        if name not in schedule.fused_texture
-        and not (schedule.fused_glcm and name.startswith("glcm_"))
-    )
-    fallback_settings = (
-        settings if fallback_features == settings.features
-        else replace(settings, features=fallback_features)
-    )
     fallback_glcm = bool(schedule.glcm_names) and not schedule.fused_glcm
-    fallback_texture = any(name.startswith(_OTHER_TEXTURE_PREFIXES) for name in fallback_features)
-    explicit_groups = schedule.explicit_texture and (fallback_glcm or fallback_texture)
     centers = schedule.centers
     memory = schedule.memory
     batch_size = memory["batch_size"]
@@ -580,8 +622,9 @@ def extract_voxels(
             (bool(schedule.first_names) and not first_batch_size)
             or schedule.has_intensity_histogram
             or ivh is not None
+            or schedule.explicit_settings is not None
             or fallback_glcm
-            or fallback_texture
+            or schedule.native_texture_settings is not None
         )
         index = neighborhood.index(chunk_device, offsets) if needs_gather else None
         bins = (
@@ -654,7 +697,7 @@ def extract_voxels(
                     ).items()
                 }
             )
-        if explicit_groups:
+        if schedule.explicit_settings is not None:
             assert index is not None and bins is not None and valid is not None
             morphology = valid
             if morphological_resident is not None and settings.masked_kernel:
@@ -665,7 +708,7 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    fallback_settings,
+                    schedule.explicit_settings,
                     morphology=morphology,
                     histogram_method=method,
                     fixed_columns=True,
@@ -686,7 +729,7 @@ def extract_voxels(
                     schedule.glcm_names,
                 )
             )
-        elif not schedule.explicit_texture and fallback_glcm:
+        elif fallback_glcm:
             assert bins is not None and valid is not None
             batch.update(
                 aggregate_glcm(
@@ -721,7 +764,7 @@ def extract_voxels(
                     compensated_runs=schedule.explicit_texture,
                 )
             )
-        if fallback_texture and not schedule.explicit_texture:
+        if schedule.native_texture_settings is not None:
             assert bins is not None and valid is not None
             batch.update(
                 texture_statistics(
@@ -729,7 +772,7 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    fallback_settings,
+                    schedule.native_texture_settings,
                     fixed_columns=True,
                 )
             )

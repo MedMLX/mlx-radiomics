@@ -184,15 +184,25 @@ def test_near_float32_limit_field_keeps_the_unit_amplitude_descriptor(amplitude:
         reference["lbp-3D-k"][3, 3, 3], rel=1e-5)
 
 
-def test_integer_ct_spline_rounding_ambiguity_is_refused() -> None:
+def test_integer_ct_samples_near_rounding_thresholds_match_float64_reference() -> None:
+    # On this real CT patch, float32 spline samples fall within roundoff of a half-integer
+    # (the sampler used to refuse it); they are resolved in float64 on the host.
+    from test_transforms import lbp3d_reference
+
     ct, _, _ = hcc_patch((9, 9, 9))
     image = ct.astype(np.int16)
     mask = np.zeros(image.shape, bool)
     mask[3:6, 3:6, 3:6] = True
     options = TransformSettings(
         image_types=(ImageType.LBP3D,),
-        lbp3d=LBP3DSettings(levels=1, subdivision=1, radius=1.0),
+        lbp3d=LBP3DSettings(levels=2, subdivision=1, radius=1.0),
     )
-    with mx.stream(mx.gpu), pytest.raises(ValueError, match="rounding threshold is ambiguous"):
-        list(feature_images(mx.array(image.astype(np.float32)), (1.0, 1.0, 1.0), options,
-                            mask=mx.array(mask), source_dtype=image.dtype))
+    with mx.stream(mx.gpu):
+        actual = list(feature_images(mx.array(image.astype(np.float32)), (1.0, 1.0, 1.0),
+                                     options, mask=mx.array(mask), source_dtype=image.dtype))
+    expected = lbp3d_reference(image, mask, levels=2, radius=1.0, subdivision=1)
+    for output, reference_values in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(output.image, dtype=np.float64)[mask], reference_values,
+            rtol=1e-4, atol=1e-4, err_msg=output.name,
+        )
