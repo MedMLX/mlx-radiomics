@@ -33,6 +33,9 @@ CASES = {
         bin_width=25, distances=(1, 2), gldm_alpha=1)),
     "force2d": (_LEVELS, _HOLES, settings_for("pyradiomics", bin_width=25, force2d_axis=0)),
     "plane-radius2": (_PLANE, _PLANE_MASK, Settings(bin_width=1, kernel_radius=2)),
+    "volume-radius2": (_LEVELS, _HOLES, settings_for(
+        "pyradiomics", bin_width=25, kernel_radius=2,
+    )),
     "flat": (
         np.full((5, 5, 5), 7.0, dtype=np.float64),
         np.ones((5, 5, 5), dtype=np.uint8), settings_for("pyradiomics"),
@@ -130,3 +133,16 @@ def test_selected_glcm_pair_means_match_local_count_definitions(
         actual = np.asarray(result.features[f"original_{name}"])
         _assert_close(actual[tuple(centers.T)], expected[name], name)
 
+
+
+@pytest.mark.parametrize("case", ["levels-holes", "flat"])
+def test_radius_two_run_and_zone_maps_match_local_count_definitions(case: str) -> None:
+    names = tuple(name for name in NAMES if name.startswith(("glrlm_", "glszm_")))
+    image, mask, base = CASES[case]
+    settings = replace(base, features=names, kernel_radius=2)
+    centers = np.argwhere(mask > 0)[::13]
+    expected = _oracle(image, mask, settings, centers, names=names)
+    result = extract(image, mask, spacing=(1.0,) * image.ndim, settings=settings, mode="voxel")
+    for name in names:
+        actual = np.asarray(result.features[f"original_{name}"])
+        _assert_close(actual[tuple(centers.T)], expected[name], name)

@@ -211,10 +211,11 @@ def _tables(
     return source, counts
 
 
-def window_code(ndim: int, window: int) -> str:
+def window_code(ndim: int, window: int, *, levels: str | None = None) -> str:
     """Return Metal source loading a center's neighborhood gray levels into ``levels``.
 
-    Level 0 marks a position outside the image or mask.
+    Level 0 marks a position outside the image or mask. A caller-supplied storage
+    declaration must hold the entire window and its admitted gray-level range.
     """
     coordinate = " && ".join(
         f"(z{a} = center_at[{a}] + WINDOW[q * {ndim} + {a}]) >= 0 && z{a} < dims[{a}]"
@@ -228,7 +229,7 @@ def window_code(ndim: int, window: int) -> str:
     return f"""
         int center_at[{ndim}];
         for (int a = 0; a < {ndim}; a++) center_at[a] = centers[center * {ndim} + a];
-        int levels[{window}];
+        {levels or f"int levels[{window}];"}
         for (int q = 0; q < {window}; q++) {{
             int {declarations};
             bool inside = {coordinate};

@@ -77,7 +77,6 @@ class _VoxelPlan:
     glcm_names: tuple[str, ...]
     has_source_first: bool
     has_intensity_histogram: bool
-    has_texture: bool
     explicit_texture: bool
     kernel_axes: tuple[range, ...]
     local_shape: tuple[int, ...]
@@ -294,7 +293,6 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         name.startswith("intensityhistogram_") for name in settings.features
     )
     texture_names = tuple(n for n in settings.features if n.startswith(_OTHER_TEXTURE_PREFIXES))
-    has_texture = bool(texture_names)
     glcm_names = tuple(
         name.removeprefix("glcm_") for name in settings.features if name.startswith("glcm_")
     )
@@ -357,21 +355,24 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         or any(n.startswith("ivh_") for n in settings.features)
     ):
         histogram_bytes = max(histogram_bytes, data.gray_levels * 16)
-    # Native GLRLM/GLSZM/GLDM/NGTDM maps likewise evaluate occupied cells per center.
-    fused_texture: tuple[str, ...] = ()
-    if has_texture and fused_texture_eligible(kernel_size, data.gray_levels):
-        if not explicit:
-            fused_texture = texture_names
-        elif settings.force2d_axis is None:
-            # Neighborhood support changes GLDM and NGTDM. Native full-domain
-            # runs and zones use the same connectivity in either pipeline.
-            fused_texture = tuple(
-                name for name in texture_names if (
-                    (name.startswith("glrlm_") and settings.glrlm_aggregation == "native")
-                    or (name.startswith("glszm_") and settings.glszm_aggregation == "native"
-                        and not any(n.startswith("gldzm_") for n in texture_names))
-                )
-            )
+    # Runs and zones support wider windows than dependence/neighborhood features.
+    # Native domains retain their connectivity when other families need explicit aggregation.
+    fused_families: set[str] = set()
+    if texture_names and fused_texture_eligible(kernel_size, data.gray_levels, True):
+        if not explicit and fused_texture_eligible(kernel_size, data.gray_levels):
+            fused_families.update(("gldm", "ngtdm"))
+        if not explicit or (
+            settings.force2d_axis is None and settings.glrlm_aggregation == "native"
+        ):
+            fused_families.add("glrlm")
+        if not explicit or (
+            settings.force2d_axis is None and settings.glszm_aggregation == "native"
+            and not any(name.startswith("gldzm_") for name in texture_names)
+        ):
+            fused_families.add("glszm")
+    fused_texture = tuple(
+        name for name in texture_names if name.partition("_")[0] in fused_families
+    )
     texture_offsets = _TextureOffsets(runs=(), zones=(), dependence=())
     if fused_texture:
         unit = replace(settings, distances=(1,))
@@ -409,7 +410,6 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         glcm_names=glcm_names,
         has_source_first=has_source_first,
         has_intensity_histogram=has_intensity_histogram,
-        has_texture=has_texture,
         explicit_texture=explicit,
         kernel_axes=axes,
         local_shape=local_shape,
@@ -451,16 +451,18 @@ def extract_voxels(
     """
     shape = source_shape
     schedule = _plan_voxels(data, settings)
-    explicit_settings = settings
-    if schedule.explicit_texture and (schedule.fused_glcm or schedule.fused_texture):
-        explicit_settings = replace(settings, features=tuple(
-            name for name in settings.features
-            if name not in schedule.fused_texture
-            and not (schedule.fused_glcm and name.startswith("glcm_"))
-        ))
-    explicit_groups = schedule.explicit_texture and any(
-        name.startswith(("glcm_", *_OTHER_TEXTURE_PREFIXES)) for name in explicit_settings.features
+    fallback_features = tuple(
+        name for name in settings.features
+        if name not in schedule.fused_texture
+        and not (schedule.fused_glcm and name.startswith("glcm_"))
     )
+    fallback_settings = (
+        settings if fallback_features == settings.features
+        else replace(settings, features=fallback_features)
+    )
+    fallback_glcm = bool(schedule.glcm_names) and not schedule.fused_glcm
+    fallback_texture = any(name.startswith(_OTHER_TEXTURE_PREFIXES) for name in fallback_features)
+    explicit_groups = schedule.explicit_texture and (fallback_glcm or fallback_texture)
     centers = schedule.centers
     memory = schedule.memory
     batch_size = memory["batch_size"]
@@ -573,9 +575,8 @@ def extract_voxels(
             (bool(schedule.first_names) and not first_batch_size)
             or schedule.has_intensity_histogram
             or ivh is not None
-            or explicit_groups
-            or (bool(schedule.glcm_names) and not schedule.fused_glcm)
-            or (schedule.has_texture and not schedule.fused_texture)
+            or fallback_glcm
+            or fallback_texture
         )
         index = neighborhood.index(chunk_device, offsets) if needs_gather else None
         bins = index.gather(resident.bins) if index is not None else None
@@ -655,7 +656,7 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    explicit_settings,
+                    fallback_settings,
                     morphology=morphology,
                     histogram_method=method,
                     fixed_columns=True,
@@ -675,7 +676,7 @@ def extract_voxels(
                     schedule.glcm_names,
                 )
             )
-        elif not schedule.explicit_texture and bool(schedule.glcm_names):
+        elif not schedule.explicit_texture and fallback_glcm:
             assert bins is not None and valid is not None
             batch.update(
                 aggregate_glcm(
@@ -706,9 +707,10 @@ def extract_voxels(
                     schedule.texture_offsets.dependence,
                     settings.gldm_alpha,
                     schedule.fused_texture,
+                    compensated_runs=schedule.explicit_texture,
                 )
             )
-        elif schedule.has_texture and not schedule.explicit_texture:
+        if fallback_texture and not schedule.explicit_texture:
             assert bins is not None and valid is not None
             batch.update(
                 texture_statistics(
@@ -716,7 +718,7 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    settings,
+                    fallback_settings,
                     fixed_columns=True,
                 )
             )

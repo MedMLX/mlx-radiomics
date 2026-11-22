@@ -6,7 +6,7 @@ neighborhood once and evaluates the requested family from its occupied
 :func:`mlxradiomics.features.texture.texture_statistics` with native settings:
 
 * GLRLM runs follow each unit direction of the neighborhood; directions with a run
-  are averaged with an ordinary sum, as ``run_statistics`` does.
+  contribute to the mean in direction order.
 * GLSZM zones are same-level components under the full unit neighborhood.
 * GLDM dependence counts masked neighbors at the selected distances within
   ``gldm_alpha`` gray levels; NGTDM compares eligible centers with the mean level of
@@ -62,12 +62,13 @@ def _size_names(family: str) -> dict[str, int]:
 _SIZE_NAMES = {family: _size_names(family) for family in _SPECS}
 
 _SIZE_HEADER = r"""
-// A window holds at most 27 voxels, so size and count each fit five bits.
+// A window holds at most 125 voxels, so size and count each fit seven bits.
 // The eligible gray-level bound leaves room for the bin above those bits.
-inline void add_size_cell(thread uint* cells, thread int& n, int i, int j) {
-    uint key = (uint(i) << 10) | (uint(j) << 5);
+template <typename Cells>
+inline void add_size_cell(Cells cells, thread int& n, int i, int j) {
+    uint key = (uint(i) << 14) | (uint(j) << 7);
     for (int k = 0; k < n; k++) {
-        if ((cells[k] & ~31u) == key) { cells[k] += 1; return; }
+        if ((cells[k] & ~127u) == key) { cells[k] += 1; return; }
     }
     cells[n++] = key | 1u;
 }
@@ -94,10 +95,10 @@ inline float integer_variance(thread const int* keys, thread const long* counts,
 
 // Size-family features of cells (gray level i, size j, count c); voxels is the
 // denominator of the percentage (sum c*j for runs and zones, N for dependence).
-template <int CAP>
-inline void size_features(thread const uint* cells, int nk, long voxels, thread float* out) {
+template <int CAP, typename Cells>
+inline void size_features(Cells cells, int nk, long voxels, thread float* out) {
     long n = 0;
-    for (int k = 0; k < nk; k++) n += cells[k] & 31u;
+    for (int k = 0; k < nk; k++) n += cells[k] & 127u;
     float nf = float(n);
     Acc small = {0, 0}, low = {0, 0}, small_low = {0, 0}, small_high = {0, 0};
     Acc large_low = {0, 0}, entropy = {0, 0};
@@ -106,8 +107,8 @@ inline void size_features(thread const uint* cells, int nk, long voxels, thread 
     long gm[CAP], sm[CAP];
     int ng = 0, ns = 0;
     for (int k = 0; k < nk; k++) {
-        int i = int(cells[k] >> 10), j = int((cells[k] >> 5) & 31u);
-        long c = cells[k] & 31u;
+        int i = int(cells[k] >> 14), j = int((cells[k] >> 7) & 127u);
+        long c = cells[k] & 127u;
         long i2 = long(i) * i, j2 = long(j) * j;
         float cf = float(c);
         acc_add(small, cf / float(j2));
@@ -208,6 +209,19 @@ def _run_neighbor_tables(
     return "\n".join(tables)
 
 
+_WIDE_GROUP = 32
+
+
+def _window_words(window: int, name: str, word: str) -> str:
+    """Use disjoint threadgroup slots to keep wide dynamic arrays off the private stack."""
+    if window <= MAX_WINDOW:
+        return f"{word} {name}[{window}];"
+    return f"""
+        threadgroup {word} {name}_shared[{_WIDE_GROUP * window}];
+        threadgroup {word}* {name} = {name}_shared + thread_position_in_threadgroup.x * {window};
+    """
+
+
 @lru_cache(maxsize=64)
 def _run_kernel(
     local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...], slots: tuple[int, ...],
@@ -226,9 +240,9 @@ def _run_kernel(
         if (t >= total_centers * {directions}) return;
         uint center = t / {directions};
         int d = int(t % {directions});
-        {window_code(ndim, window)}
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
         int direction = d * {window};
-        uint cells[{window}];
+        {_window_words(window, "cells", "uint")}
         int nk = 0;
         long voxels = 0;
         for (int q = 0; q < {window}; q++) {{
@@ -260,15 +274,17 @@ def _run_kernel(
 
 
 @lru_cache(maxsize=64)
-def _run_average_kernel(directions: int, features: int) -> MetalKernel:
-    """Average per-direction GLRLM features with ordinary running sums.
-
-    Directions are added in order, as ``run_statistics`` accumulates them.
-    """
+def _run_average_kernel(directions: int, features: int, compensated: bool) -> MetalKernel:
+    """Average GLRLM directions in order and follow the caller's accumulator."""
+    initialize = "Acc total = {0, 0};" if compensated else "float total = 0.0f;"
+    value = f"values[ulong(t) * {features} + f]"
+    accumulate = f"acc_add(total, {value});" if compensated else f"total = total + {value};"
+    numerator = "acc_value(total)" if compensated else "total"
     return cast(MetalKernel, mx.fast.metal_kernel(
         name="mlxradiomics_local_glrlm_average",
         input_names=["values", "active"],
         output_names=["averaged"],
+        header=KERNEL_HEADER if compensated else "",
         source=f"""
         uint center = thread_position_in_grid.x;
         uint total_centers = active_shape[0] / {directions};
@@ -276,13 +292,13 @@ def _run_average_kernel(directions: int, features: int) -> MetalKernel:
         int count = 0;
         for (int d = 0; d < {directions}; d++) count += active[center * {directions} + d];
         for (int f = 0; f < {features}; f++) {{
-            float total = 0.0f;
+            {initialize}
             for (int d = 0; d < {directions}; d++) {{
                 uint t = center * {directions} + d;
-                if (active[t]) total = total + values[ulong(t) * {features} + f];
+                if (active[t]) {{ {accumulate} }}
             }}
             averaged[ulong(f) * total_centers + center] =
-                count > 0 ? total / float(count) : NAN;
+                count > 0 ? {numerator} / float(count) : NAN;
         }}
         """,
     ))
@@ -304,26 +320,25 @@ def _zone_kernel(
         uint center = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
-        {window_code(ndim, window)}
-        uint cells[{window}];
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
+        {_window_words(window, "cells", "uint")}
         int nk = 0;
         long voxels = 0;
-        bool seen[{window}];
-        for (int q = 0; q < {window}; q++) seen[q] = false;
-        int stack[{window}];
+        // Remove visited levels from this thread's private window.
+        {_window_words(window, "stack", "uchar")}
         for (int q = 0; q < {window}; q++) {{
             int level = levels[q];
-            if (level == 0 || seen[q]) continue;
+            if (level == 0) continue;
             int top = 0, size = 0;
             stack[top++] = q;
-            seen[q] = true;
+            levels[q] = 0;
             while (top > 0) {{
                 int slot = stack[--top];
                 size++;
                 for (int m = 0; m < {len(neighbors)}; m++) {{
                     int other = {neighbor};
-                    if (other >= 0 && !seen[other] && levels[other] == level) {{
-                        seen[other] = true;
+                    if (other >= 0 && levels[other] == level) {{
+                        levels[other] = 0;
                         stack[top++] = other;
                     }}
                 }}
@@ -529,7 +544,7 @@ def _neighborhood_kernel(
         uint center = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
-        {window_code(ndim, window)}
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
         uint cells[{window}];
         int nk = 0;
         long voxels = 0;
@@ -565,9 +580,10 @@ def _neighborhood_kernel(
     ))
 
 
-def eligible(window: int, ng: int) -> bool:
-    """Neighborhoods of at most 27 voxels; ``Ng`` bounds the int64 emphasis numerators."""
-    return window <= MAX_WINDOW and window**3 * ng**4 < 2**62
+def eligible(window: int, ng: int, size_only: bool = False) -> bool:
+    """Bound private window storage and int64 size or neighborhood numerators."""
+    limit = 125 if size_only else MAX_WINDOW
+    return window <= limit and window**3 * ng**4 < 2**62
 
 
 def local_texture(
@@ -581,6 +597,8 @@ def local_texture(
     dependence_neighbors: tuple[tuple[int, ...], ...],
     alpha: int,
     names: tuple[str, ...],
+    *,
+    compensated_runs: bool,
 ) -> dict[str, mx.array]:
     """Return the requested GLRLM, GLSZM, GLDM and NGTDM maps for a batch of centers.
 
@@ -596,6 +614,7 @@ def local_texture(
             both signs.
         alpha: GLDM dependence tolerance in gray levels.
         names: Requested feature names with family prefixes.
+        compensated_runs: Whether run aggregation uses compensated directional sums.
 
     Returns:
         Name to float32 ``(batch,)`` array.
@@ -603,6 +622,7 @@ def local_texture(
     batch = centers.shape[0]
     dims = mx.array(image_shape, dtype=mx.int32)
     inputs = [bins, mask, centers, dims]
+    group_size = _WIDE_GROUP if prod(local_shape) > MAX_WINDOW else 64
     result: dict[str, mx.array] = {}
     run_slots, zone_slots, dependence_slots = (
         _slots(family, names) for family in ("glrlm", "glszm", "gldm")
@@ -610,18 +630,18 @@ def local_texture(
     if run_slots:
         directions = len(run_offsets)
         values, active = _run_kernel(local_shape, run_offsets, run_slots)(
-            inputs=inputs, grid=(batch * directions, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch * directions, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(batch * directions, len(run_slots)), (batch * directions,)],
             output_dtypes=[mx.float32, mx.bool_],
         )
-        averaged = _run_average_kernel(directions, len(run_slots))(
+        averaged = _run_average_kernel(directions, len(run_slots), compensated_runs)(
             inputs=[values, active], grid=(batch, 1, 1), threadgroup=(64, 1, 1),
             output_shapes=[(len(run_slots), batch)], output_dtypes=[mx.float32],
         )[0]
         result.update(_select("glrlm", averaged, run_slots, names))
     if zone_slots:
         values = _zone_kernel(local_shape, zone_neighbors, zone_slots)(
-            inputs=inputs, grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(len(zone_slots), batch)], output_dtypes=[mx.float32],
         )[0]
         result.update(_select("glszm", values, zone_slots, names))
@@ -631,7 +651,7 @@ def local_texture(
         outputs = _neighborhood_kernel(
             local_shape, dependence_neighbors, alpha, dependence_slots, ngtdm_slots,
         )(
-            inputs=inputs, grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(len(dependence_slots), batch)] * bool(dependence_slots)
             + [(len(ngtdm_slots), batch)] * ngtdm,
             output_dtypes=[mx.float32] * (bool(dependence_slots) + ngtdm),
