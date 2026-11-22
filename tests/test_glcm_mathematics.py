@@ -17,7 +17,7 @@ import pytest
 from numpy.typing import NDArray
 from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
-from mlxradiomics import Settings, extract
+from mlxradiomics import FEATURES, Settings, extract
 from mlxradiomics.voxel.storage import voxel_map_store
 from mlxradiomics.workflows.engine import Result
 
@@ -142,6 +142,46 @@ def test_mcc_of_an_empty_batch_is_empty() -> None:
         maximal_correlation(mx.zeros((0, 4, 4), dtype=mx.int32)), dtype=np.float32
     )
     assert actual.shape == (0,)
+
+
+@pytest.mark.parametrize("ng", [83, 200])
+def test_grouped_mcc_matches_separate_calls_bit_for_bit(ng: int) -> None:
+    # MLX picks a split-K product for one large Gram matrix but not for a batch, so a
+    # stacked call keeps each direction's Gram product separate.
+    from mlxradiomics.numerics.eigen import maximal_correlation
+    from mlxradiomics.numerics.runtime import mx
+
+    rng = np.random.default_rng(ng)
+    counts = (rng.integers(0, 40, (5, ng, ng)) * (rng.random((5, ng, ng)) < 0.3)).astype(np.uint32)
+    counts = counts + np.swapaxes(counts, 1, 2)
+    separate = np.concatenate([
+        np.asarray(maximal_correlation(mx.array(counts[i:i + 1])), dtype=np.float32)
+        for i in range(len(counts))
+    ])
+    grouped = np.asarray(maximal_correlation(mx.array(counts), group=1), dtype=np.float32)
+    np.testing.assert_array_equal(grouped.view(np.uint32), separate.view(np.uint32))
+    with pytest.raises(ValueError, match="divide"):
+        maximal_correlation(mx.array(counts), group=2)
+
+
+@pytest.mark.parametrize("aggregation", ["native", "2d_average", "2.5d_direction_merge"])
+def test_glcm_direction_batches_do_not_change_values(aggregation: str) -> None:
+    # A 1 MiB budget runs every 150-level matrix alone; the default budget stacks them.
+    rng = np.random.default_rng(5)
+    image = rng.integers(0, 150, (6, 20, 22)).astype(np.float64)
+    mask = np.zeros(image.shape, dtype=np.uint8)
+    mask[1:5, 2:18, 3:20] = 1
+    names = tuple(name for name in FEATURES if name.startswith("glcm_"))
+    settings = Settings(features=names, bin_width=1, glcm_aggregation=aggregation)
+    spacing = (1.0, 1.0, 1.0)
+    batched = extract(image, mask, settings=settings, spacing=spacing).features
+    single = extract(
+        image, mask, settings=replace(settings, scratch_mib=1), spacing=spacing,
+    ).features
+    for name in names:
+        left = np.asarray(batched[f"original_{name}"], dtype=np.float64)
+        right = np.asarray(single[f"original_{name}"], dtype=np.float64)
+        np.testing.assert_array_equal(left.view(np.uint64), right.view(np.uint64))
 
 
 def _map(result: Result, name: str) -> NDArray[np.float64]:

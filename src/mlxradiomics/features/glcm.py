@@ -378,7 +378,7 @@ def _compiled_glcm(
 
 
 def glcm_statistics(
-    counts: mx.array, dtype: mx.Dtype, features: tuple[str, ...],
+    counts: mx.array, dtype: mx.Dtype, features: tuple[str, ...], *, group: int | None = None,
 ) -> tuple[dict[str, mx.array], mx.array]:
     """Compute the requested GLCM features for one direction's counts.
 
@@ -389,6 +389,8 @@ def glcm_statistics(
         counts: GLCM counts ``(batch, Ng, Ng)``, already symmetrized if requested.
         dtype: Arithmetic dtype (float32).
         features: Feature names without the ``glcm_`` prefix.
+        group: Rows per stacked direction when ``counts`` stacks several directions;
+            see ``eigen.maximal_correlation``.
 
     Returns:
         ``(values, active)``: a name-to-``(batch,)`` mapping, and a boolean ``(batch,)``
@@ -398,6 +400,6 @@ def glcm_statistics(
     ordinary = tuple(name for name in features if name != "MCC")
     values, active = _compiled_glcm(dtype, ordinary)(counts)
     if "MCC" in features:
-        values["MCC"] = maximal_correlation(counts)
+        values["MCC"] = maximal_correlation(counts, group=group)
     return values, active
 

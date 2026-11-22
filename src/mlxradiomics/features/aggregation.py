@@ -194,6 +194,80 @@ def _groups(
     yield from by_direction
 
 
+# Bytes of dense GLCM statistic intermediates per count cell, about 32 MiB for one
+# 512-level matrix (see ``sparse_glcm.use_sparse_glcm``).
+_GLCM_CELL_SCRATCH = 128
+
+
+def _glcm_results(
+    matrices: Iterator[TextureMatrix],
+    ng: int,
+    names: tuple[str, ...],
+    settings: Settings,
+    check_count: bool,
+) -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
+    """Compute GLCM statistics for consecutive dense matrices in shared batches.
+
+    Consecutive dense matrices of one shape are stacked while their estimated statistic
+    intermediates, ``_GLCM_CELL_SCRATCH`` bytes per count cell, fit ``scratch_mib``; a
+    single matrix always runs. One batch pays the kernel dispatches of one direction.
+    Every value equals a separate call's: the compiled statistics reduce each row on
+    its own, and MCC forms each direction's Gram matrices in a separate product. Each
+    matrix's counts are evaluated as they arrive, so a batch holds count matrices
+    rather than the ROI-window pair arrays that produced them. Sparse matrices run
+    alone. Results are yielded per matrix in input order with a flag on
+    the last matrix of each batch, after which the caller evaluates its totals.
+    """
+    budget = settings.scratch_mib * 1024**2
+    pending: list[TextureMatrix] = []
+
+    def flush() -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
+        batch = list(pending)
+        pending.clear()
+        if len(batch) == 1:
+            values, active = glcm_statistics(batch[0].counts, mx.float32, names)
+            yield batch[0], values, active, True
+            return
+        rows = batch[0].counts.shape[0]
+        values, active = glcm_statistics(
+            mx.concatenate([matrix.counts for matrix in batch]), mx.float32, names, group=rows,
+        )
+        for index, matrix in enumerate(batch):
+            part = slice(index * rows, (index + 1) * rows)
+            yield (
+                matrix, {name: value[part] for name, value in values.items()}, active[part],
+                index == len(batch) - 1,
+            )
+
+    for matrix in matrices:
+        if check_count:
+            count = mx.sum(
+                matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
+            )
+            if bool(mx.any(count >= 2**31).item()):
+                raise ValueError("merged GLCM count must be below 2**31")
+        if matrix.cell_keys is not None:
+            if pending:
+                yield from flush()
+            values, active = sparse_glcm_statistics(
+                matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
+            )
+            yield matrix, values, active, True
+            continue
+        scratch = _GLCM_CELL_SCRATCH * matrix.counts.size
+        if pending and (
+            pending[0].counts.shape != matrix.counts.shape
+            or pending[0].counts.dtype != matrix.counts.dtype
+            or (len(pending) + 1) * scratch > budget
+        ):
+            yield from flush()
+        # Counting reads ROI-window pair arrays; evaluating here releases them.
+        evaluate(matrix.counts, matrix.voxels)
+        pending.append(matrix)
+    if pending:
+        yield from flush()
+
+
 def _glcm_count_check_needed(shape: tuple[int, ...], settings: Settings, mode: str) -> bool:
     """Whether geometry alone fails to prove the merged GLCM population below 2**31.
 
@@ -274,23 +348,19 @@ def aggregated_texture_statistics(
         if "MCC" in names:
             denominators["MCC"] = mx.zeros((bins.shape[0],), dtype=mx.int32)
         check_glcm_count = family == "glcm" and _glcm_count_check_needed(shape, settings, mode)
-        for matrix in _groups(
+        matrices = _groups(
             family, bins, mask, morphological, shape, ng, settings, mode, histogram_method,
             fixed_columns, neighborhood, labels,
-        ):
+        )
+        stream: Iterator[tuple[TextureMatrix, dict[str, mx.array] | None, mx.array | None, bool]]
+        if family == "glcm":
+            stream = _glcm_results(matrices, ng, names, settings, check_glcm_count)
+        else:
+            stream = ((matrix, None, None, True) for matrix in matrices)
+        for matrix, glcm_features, glcm_active, batch_end in stream:
             if family == "glcm":
-                if check_glcm_count:
-                    count = mx.sum(
-                        matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
-                    )
-                    if bool(mx.any(count >= 2**31).item()):
-                        raise ValueError("merged GLCM count must be below 2**31")
-                if matrix.cell_keys is None:
-                    features, active = glcm_statistics(matrix.counts, mx.float32, names)
-                else:
-                    features, active = sparse_glcm_statistics(
-                        matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
-                    )
+                assert glcm_features is not None and glcm_active is not None
+                features, active = glcm_features, glcm_active
             elif family == "ngtdm":
                 assert matrix.differences is not None
                 features = ngtdm_statistics(
@@ -334,7 +404,8 @@ def aggregated_texture_statistics(
                 # MCC excludes matrices whose second eigenvalue is undefined.
                 defined = mcc_defined if name == "MCC" else active
                 totals[name].add(mx.where(defined, features[name], 0))
-            evaluate(*(a for t in totals.values() for a in t.arrays()), *denominators.values())
+            if batch_end:
+                evaluate(*(a for t in totals.values() for a in t.arrays()), *denominators.values())
         for name, total in totals.items():
             denominator = denominators["MCC" if name == "MCC" else "ordinary"]
             output[f"{family}_{name}"] = mx.where(

@@ -373,7 +373,7 @@ def largest_symmetric_eigenvalue(matrix: mx.array) -> mx.array:
     return largest
 
 
-def maximal_correlation(counts: mx.array) -> mx.array:
+def maximal_correlation(counts: mx.array, *, group: int | None = None) -> mx.array:
     """Compute the GLCM Maximal Correlation Coefficient for one direction per batch row.
 
     For a contingency table with joint probability ``p`` and marginals ``px``, ``py``,
@@ -389,10 +389,18 @@ def maximal_correlation(counts: mx.array) -> mx.array:
     single occupied row or column state is undefined rather than assigned a numerical
     convention.
 
+    MLX selects its matrix-multiplication algorithm from the batch size, so one Gram
+    product over a larger batch can round differently from separate products. A caller
+    that stacks several directions passes ``group``, the row count of each original
+    batch; each group then forms its Gram matrices in its own product, as a separate
+    call would, while the eigenvalue kernel processes every row in one dispatch.
+
     Args:
         counts: GLCM counts ``(batch, Ng, Ng)`` for a single direction. ``Ng`` is the
             global gray-level count; validity uses only the occupied entries of each
             matrix.
+        group: Rows per stacked direction; ``batch`` must be a multiple of it. None
+            forms all Gram matrices in one product.
 
     Returns:
         Float32 array ``(batch,)``. Entries whose matrix has fewer than two occupied row
@@ -420,6 +428,15 @@ def maximal_correlation(counts: mx.array) -> mx.array:
     normalized = mx.where(
         valid, numerator.astype(mx.float32) / mx.where(valid, denominator, 1), 0
     )
-    gram = normalized @ mx.swapaxes(normalized, 1, 2)
+    if group is None or group >= counts.shape[0]:
+        gram = normalized @ mx.swapaxes(normalized, 1, 2)
+    else:
+        if group <= 0 or counts.shape[0] % group:
+            raise ValueError("MCC group must divide the batch")
+        parts = [
+            normalized[start:start + group]
+            for start in range(0, counts.shape[0], group)
+        ]
+        gram = mx.concatenate([part @ mx.swapaxes(part, 1, 2) for part in parts])
     mcc = mx.sqrt(mx.maximum(largest_symmetric_eigenvalue(gram), 0))
     return mx.where(defined, mcc, float("nan"))
