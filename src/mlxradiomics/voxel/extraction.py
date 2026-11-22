@@ -37,7 +37,7 @@ from mlxradiomics.numerics.runtime import (
 )
 from mlxradiomics.voxel.gather import NeighborhoodIndex, NeighborhoodPlan
 from mlxradiomics.voxel.glcm import eligible as fused_glcm_eligible
-from mlxradiomics.voxel.glcm import local_glcm
+from mlxradiomics.voxel.glcm import local_glcm, pair_means_eligible, pair_means_only
 from mlxradiomics.voxel.texture import eligible as fused_texture_eligible
 from mlxradiomics.voxel.texture import local_texture
 
@@ -307,13 +307,23 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     kernel_size = prod(map(len, axes))
     local_shape = tuple(map(len, axes))
     all_pair_offsets = directions(local_shape, settings) if has_glcm else ()
-    pair_offsets = all_pair_offsets if not explicit else ()
+    # Neighborhood support and NGTDM singular cases do not affect GLCM pair
+    # means. A native full-domain directional average can use their direct sum
+    # even when other families still need explicit matrix processing.
+    only_pair_means = pair_means_only(glcm_names)
+    full_domain_pair_means = (
+        settings.glcm_aggregation == "native"
+        and settings.force2d_axis is None
+        and only_pair_means
+    )
+    pair_offsets = all_pair_offsets if not explicit or full_domain_pair_means else ()
     pair_counts = tuple(
         prod(s - abs(v) for s, v in zip(local_shape, delta, strict=True)) for delta in pair_offsets
     )
     # Native GLCM maps of small neighborhoods use one fused pass per center and
     # direction, without dense Ng x Ng matrices (see local_glcm).
-    fused_glcm = bool(pair_offsets) and fused_glcm_eligible(
+    eligible_glcm = pair_means_eligible if only_pair_means else fused_glcm_eligible
+    fused_glcm = bool(pair_offsets) and eligible_glcm(
         kernel_size,
         pair_counts,
         data.gray_levels,
@@ -336,6 +346,8 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
             )
         else:
             histogram_bytes = data.gray_levels**2 * 128
+    elif fused_glcm and only_pair_means:
+        histogram_bytes = 4 * len(glcm_names)
     elif has_glcm:
         histogram_bytes = max(data.gray_levels * 16, len(pair_offsets) * 4 * 32)
     else:
@@ -440,10 +452,11 @@ def extract_voxels(
     shape = source_shape
     schedule = _plan_voxels(data, settings)
     explicit_settings = settings
-    if schedule.explicit_texture and schedule.fused_texture:
+    if schedule.explicit_texture and (schedule.fused_glcm or schedule.fused_texture):
         explicit_settings = replace(settings, features=tuple(
             name for name in settings.features
             if name not in schedule.fused_texture
+            and not (schedule.fused_glcm and name.startswith("glcm_"))
         ))
     explicit_groups = schedule.explicit_texture and any(
         name.startswith(("glcm_", *_OTHER_TEXTURE_PREFIXES)) for name in explicit_settings.features

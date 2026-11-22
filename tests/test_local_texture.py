@@ -55,10 +55,11 @@ def _maps(image: NDArray[np.float64], mask: NDArray[np.uint8], settings: Setting
 
 
 def _oracle(image: NDArray[np.float64], mask: NDArray[np.uint8], settings: Settings,
-            centers: NDArray[np.intp]) -> dict[str, NDArray[np.float64]]:
+            centers: NDArray[np.intp], *,
+            names: tuple[str, ...] = NAMES) -> dict[str, NDArray[np.float64]]:
     """Independent local definitions on each center's clipped neighborhood."""
     data = prepare(image, mask, settings, voxel=True)
-    values: dict[str, list[float]] = {name: [] for name in NAMES}
+    values: dict[str, list[float]] = {name: [] for name in names}
     for center in centers:
         spans = [0 if settings.force2d_axis == a else settings.kernel_radius
                  for a in range(image.ndim)]
@@ -75,7 +76,7 @@ def _oracle(image: NDArray[np.float64], mask: NDArray[np.uint8], settings: Setti
             data.sampling_mask[clipped] & inside, settings, (1.0,) * image.ndim,
             data.gray_levels,
         )
-        for name in NAMES:
+        for name in names:
             values[name].append(local[name])
     return {name: np.array(value) for name, value in values.items()}
 
@@ -109,4 +110,23 @@ def test_fused_maps_match_dense_maps(case: str, monkeypatch: pytest.MonkeyPatch)
     roi = mask > 0
     for name in NAMES:
         _assert_close(fused[name][roi], dense[name][roi], name)
+
+
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("radius", [1, 2])
+def test_selected_glcm_pair_means_match_local_count_definitions(
+    symmetric: bool, radius: int,
+) -> None:
+    names = (
+        "glcm_Autocorrelation", "glcm_Contrast", "glcm_DifferenceAverage",
+        "glcm_Dissimilarity", "glcm_JointAverage", "glcm_SumAverage",
+    )
+    image, mask, base = CASES["levels-holes"]
+    settings = replace(base, features=names, symmetrical_glcm=symmetric, kernel_radius=radius)
+    centers = np.argwhere(mask > 0)[::17]
+    expected = _oracle(image, mask, settings, centers, names=names)
+    result = extract(image, mask, spacing=(1.0,) * image.ndim, settings=settings, mode="voxel")
+    for name in names:
+        actual = np.asarray(result.features[f"original_{name}"])
+        _assert_close(actual[tuple(centers.T)], expected[name], name)
 
