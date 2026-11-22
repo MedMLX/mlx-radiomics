@@ -483,7 +483,10 @@ def _wavelets(
                        approximation[crop])
 
 
-def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) -> mx.array:
+def _gradient(
+    image: mx.array, spacing: tuple[float, ...], use_spacing: bool,
+    window: tuple[slice, ...] | None,
+) -> mx.array:
     """Gradient magnitude from central differences ``(x[i+1] - x[i-1]) / 2`` per axis.
 
     Edge voxels are replicated at the boundary, so edge differences span one step but are
@@ -493,11 +496,16 @@ def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) ->
     it after the square root: squaring ``1e-30`` underflowed and squaring ``1e20``
     overflowed although both magnitudes are normal float32 values.
     """
+    region = window or (slice(None),) * image.ndim
     components: list[mx.array] = []
     for axis, size in enumerate(image.shape):
-        indexes = mx.arange(size, dtype=mx.int32)
-        left = mx.take(image, mx.maximum(indexes - 1, 0), axis=axis)
-        right = mx.take(image, mx.minimum(indexes + 1, size - 1), axis=axis)
+        # Keep the full differentiated axis so neighbors at a window edge still
+        # come from the input image. The other axes only need output coordinates.
+        source = image[(*region[:axis], slice(None), *region[axis + 1:])]
+        start, stop, _ = region[axis].indices(size)
+        indexes = mx.arange(start, stop, dtype=mx.int32)
+        left = mx.take(source, mx.maximum(indexes - 1, 0), axis=axis)
+        right = mx.take(source, mx.minimum(indexes + 1, size - 1), axis=axis)
         step = spacing[axis] if use_spacing else 1.0
         difference = right - left
         halved = mx.where(
@@ -510,7 +518,7 @@ def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) ->
     for component in components[1:]:
         largest = mx.maximum(largest, mx.abs(component))
     divisor = mx.where((largest > 0) & mx.isfinite(largest), largest, 1)
-    squared = mx.zeros_like(image)
+    squared = mx.zeros_like(largest)
     for component in components:
         squared = squared + (component / divisor) ** 2
     return mx.where(mx.isinf(largest), largest, largest * mx.sqrt(squared))
@@ -559,7 +567,7 @@ def feature_images(
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
             is cropped to it. Wavelets limit the input where their tap reach allows.
-            Gabor, LoG, mean and Laws energy evaluate the requested
+            Gabor, LoG, gradient, mean and Laws energy evaluate the requested
             output using the full image's filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
@@ -771,7 +779,9 @@ def _feature_images(
                 mx.sign(image) * mx.log1p(mx.abs(image)) * (maximum / mx.log1p(maximum))
             ),
             ImageType.EXPONENTIAL: lambda: mx.power(maximum, image / maximum),
-            ImageType.GRADIENT: lambda: _gradient(image, spacing, options.gradient.use_spacing),
+            ImageType.GRADIENT: lambda: _gradient(
+                image, spacing, options.gradient.use_spacing, contiguous_window,
+            ),
         }[kind]()
         evaluate(values)
         yield FeatureImage(kind.value, values)
