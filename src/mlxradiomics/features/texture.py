@@ -310,6 +310,71 @@ def run_kernel(shape: tuple[int, ...], offset: tuple[int, ...]) -> MetalKernel:
     ))
 
 
+@lru_cache(maxsize=32)
+def resident_run_kernel(
+    shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...], ng: int,
+) -> MetalKernel:
+    """Compile one kernel counting the runs of every direction from resident bins and mask.
+
+    One thread per voxel of a single grid. For each offset, a masked voxel whose
+    predecessor is outside the grid, unmasked or of another gray level starts a run; the
+    thread walks to the run's end and adds one to ``counts[direction, gray - 1,
+    length - 1]``. These are the starts and lengths of ``run_kernel``, so the uint32
+    counts equal ``count_matrix`` of its outputs, with ``max(shape)`` length columns.
+    """
+    columns = max(shape)
+    strides = tuple(prod(shape[axis + 1:]) for axis in range(len(shape)))
+    coordinates = "\n".join(
+        f"int c{axis} = int(position / {stride}) % {size};"
+        for axis, (stride, size) in enumerate(zip(strides, shape, strict=True))
+    )
+    blocks: list[str] = []
+    for direction, offset in enumerate(offsets):
+        moving = [
+            (axis, delta, size)
+            for axis, (delta, size) in enumerate(zip(offset, shape, strict=True)) if delta
+        ]
+        step = sum(stride * delta for stride, delta in zip(strides, offset, strict=True))
+        before = " && ".join(
+            f"c{axis} - ({delta}) >= 0 && c{axis} - ({delta}) < {size}"
+            for axis, delta, size in moving
+        )
+        declare = " ".join(f"int k{axis} = c{axis} + ({delta});" for axis, delta, _ in moving)
+        inside = " && ".join(f"k{axis} >= 0 && k{axis} < {size}" for axis, _, size in moving)
+        advance = " ".join(f"k{axis} += ({delta});" for axis, delta, _ in moving)
+        blocks.append(f"""
+            {{
+                bool start = true;
+                if ({before or 'false'}) {{
+                    uint p = uint(int(position) - ({step}));
+                    start = !(mask[p] && bins[p] == level);
+                }}
+                if (start) {{
+                    uint length = 1;
+                    {declare}
+                    int q = int(position) + ({step});
+                    while (({inside or 'false'}) && mask[q] && bins[q] == level) {{
+                        ++length; {advance} q += ({step});
+                    }}
+                    uint index = ({direction}u * {ng}u + uint(level - 1)) * {columns}u
+                                 + length - 1u;
+                    atomic_fetch_add_explicit(&counts[index], 1u, memory_order_relaxed);
+                }}
+            }}
+        """)
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_resident_runs", input_names=["bins", "mask"],
+        output_names=["counts"], atomic_outputs=True,
+        source=f"""
+            uint position = thread_position_in_grid.x;
+            if (position >= {prod(shape)}u || !mask[position]) return;
+            int level = bins[position];
+            {coordinates}
+            {''.join(blocks)}
+        """,
+    ))
+
+
 def run_statistics(
     bins: mx.array, mask: mx.array, shape: tuple[int, ...], ng: int, settings: Settings,
     *, batch_directions: bool = False,
