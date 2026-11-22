@@ -559,8 +559,8 @@ def feature_images(
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
             is cropped to it. Wavelets limit the input where their tap reach allows.
-            Gabor, LoG and Laws energy evaluate the requested output using the
-            full image's filter support and boundaries.
+            Gabor, LoG, mean and Laws energy evaluate the requested
+            output using the full image's filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
 
@@ -669,7 +669,7 @@ def _feature_images(
         if kind == ImageType.MEAN:
             values = mean_response(
                 image, options.mean.support, options.mean.padding, options.mean.constant,
-                options.mean.planar,
+                options.mean.planar, window=contiguous_window,
             )
             evaluate(values)
             yield FeatureImage(_mean_name(options), values)

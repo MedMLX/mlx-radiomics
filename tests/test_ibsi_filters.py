@@ -288,16 +288,20 @@ def _orders_of_length(ndim: int, length: int) -> list[tuple[int, ...]]:
 
 @pytest.mark.parametrize("shape", [(7, 8), (5, 6, 7)])
 @pytest.mark.parametrize("padding", list(FilterPadding))
+@pytest.mark.parametrize("windowed", [False, True], ids=["full", "window"])
 def test_mean_filter_matches_independent_padding_convolution(
-    shape: tuple[int, ...], padding: FilterPadding,
+    shape: tuple[int, ...], padding: FilterPadding, windowed: bool,
 ) -> None:
     image = np.random.default_rng(11).normal(size=shape)
     options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=5, padding=padding, constant=0.25)
     )
-    [(name, actual)] = _production(image, options)
+    window = (slice(0, 2), *(slice(3, 5),) * (len(shape) - 1)) if windowed else None
+    [(name, actual)] = _production(image, options, window=window)
     kernel = np.full((5,) * len(shape), 1.0 / 5 ** len(shape))
     expected = _convolve(image, kernel, padding, 0.25)
+    if window is not None:
+        expected = expected[window]
     assert name == {
         FilterPadding.CONSTANT: "mean-M5-constant0p25",
         FilterPadding.NEAREST: "mean-M5-nearest",

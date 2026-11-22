@@ -445,6 +445,8 @@ def mean_response(
     padding: FilterPadding,
     constant: float,
     planar: bool = False,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> mx.array:
     """Mean filter over an isotropic ``support``-voxel cube (IBSI ``S60F``).
 
@@ -455,9 +457,10 @@ def mean_response(
         constant: Extension value used by :attr:`FilterPadding.CONSTANT`.
         planar: Filter each axis-0 plane of a 3-D image with the ``M x M`` 2-D
             kernel; axis 0 is neither averaged nor padded.
+        window: Optional nonempty contiguous output window in the source coordinates.
 
     Returns:
-        Float32 array with the image's shape. The kernel is ``1 / M**D`` over the
+        Full or windowed float32 response. The kernel is ``1 / M**D`` over the
         full cube (``D = 2`` when planar), so a constant interior is preserved.
 
     The cube is separable, so the padded image is summed with unit weights along
@@ -487,9 +490,9 @@ def mean_response(
         raise ValueError("mean filter support must be a positive odd integer")
     half = support // 2
     filtered = range(1, 3) if planar else range(image.ndim)
-    result = pad_image(
+    result = _convolution_source(
         image, [(half, half) if axis in filtered else (0, 0) for axis in range(image.ndim)],
-        padding, constant,
+        padding, constant, window,
     )
     return _mean_valid(result, support, filtered)
 
