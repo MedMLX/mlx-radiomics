@@ -202,19 +202,24 @@ def _pair_arrays(values: tuple[float, ...]) -> tuple[NDArray[np.float32], NDArra
 
 
 @lru_cache(maxsize=128)
-def _recursive_kernel(length: int) -> MetalKernel:
+def _recursive_kernel(length: int, cropped: bool) -> MetalKernel:
     """Compile the pair-precision causal/anticausal recursion for rows of ``length``."""
+    bounds = "int start = interval[0], stop = interval[1];" if cropped else (
+        f"constexpr int start = 0, stop = {length};"
+    )
     return cast(
         MetalKernel,
         mx.fast.metal_kernel(
             name="mlxradiomics_recursive_gaussian",
             header=PAIR_HEADER,
-            input_names=["image", "coeff_hi", "coeff_lo"],
+            input_names=["image", "coeff_hi", "coeff_lo"] + (["interval"] if cropped else []),
             output_names=["causal_lo", "output"],
             source=f"""
         uint row = thread_position_in_grid.x;
         if (row >= image_shape[0]) return;
         uint base = row * {length};
+        {bounds}
+        uint target = row * uint(stop - start);
         Pair n[4], d[4], m[4];
         for (int k = 0; k < 4; k++) {{
             n[k] = Pair{{coeff_hi[k], coeff_lo[k]}};
@@ -230,7 +235,7 @@ def _recursive_kernel(length: int) -> MetalKernel:
 
         // Each recurrence reads only its four previous states. Keep them local
         // and retain each causal pair until the reverse pass can sum the result.
-        for (int i = 0; i < {length}; i++) {{
+        for (int i = 0; i < stop; i++) {{
             Pair numerator = zero, feedback = zero;
             #pragma unroll
             for (int k = 0; k < 4; k++) {{
@@ -245,12 +250,15 @@ def _recursive_kernel(length: int) -> MetalKernel:
             history[2] = history[1];
             history[1] = history[0];
             history[0] = value;
-            output[base + i] = value.hi;
-            causal_lo[base + i] = value.lo;
+            if (i >= start) {{
+                uint index = target + uint(i - start);
+                output[index] = value.hi;
+                causal_lo[index] = value.lo;
+            }}
         }}
 
         Pair offset = add(multiply(kc, x0), multiply(ka, xn));
-        for (int i = {length - 1}; i >= 0; i--) {{
+        for (int i = {length - 1}; i >= start; i--) {{
             Pair numerator = zero, feedback = zero;
             #pragma unroll
             for (int k = 0; k < 4; k++) {{
@@ -265,9 +273,12 @@ def _recursive_kernel(length: int) -> MetalKernel:
             history[2] = history[1];
             history[1] = history[0];
             history[0] = anticausal;
-            Pair causal = Pair{{output[base + i], causal_lo[base + i]}};
-            Pair value = add(add(causal, anticausal), offset);
-            output[base + i] = value.hi + value.lo;
+            if (i < stop) {{
+                uint index = target + uint(i - start);
+                Pair causal = Pair{{output[index], causal_lo[index]}};
+                Pair value = add(add(causal, anticausal), offset);
+                output[index] = value.hi + value.lo;
+            }}
         }}
         """,
         ),
@@ -275,7 +286,8 @@ def _recursive_kernel(length: int) -> MetalKernel:
 
 
 def recursive_gaussian(
-    image: mx.array, sigma: float, spacing: float, axis: int, order: int
+    image: mx.array, sigma: float, spacing: float, axis: int, order: int, *,
+    interval: tuple[int, int] | None = None,
 ) -> mx.array:
     """Filter ``image`` along one axis with a recursive Gaussian of order 0 or 2.
 
@@ -295,14 +307,17 @@ def recursive_gaussian(
         spacing: Voxel spacing along ``axis`` in the same units, finite and positive.
         axis: NumPy axis to filter.
         order: 0 for smoothing or 2 for the second derivative.
+        interval: Optional nonempty output interval along the filtered axis. Both
+            recurrences still start at the original endpoints.
 
     Returns:
-        A float32 array with the image's shape.
+        A float32 array with the filtered axis restricted to the output interval.
 
     Raises:
         ValueError: If ``axis`` does not index the image, ``order`` is not 0 or 2,
             ``sigma`` or ``spacing`` is invalid, the filtered axis has fewer than four
-            samples, or the requested second-order ratio is unsupported.
+            samples, the interval lies outside the axis, or the requested second-order
+            ratio is unsupported.
     """
     if type(axis) is not int or not 0 <= axis < image.ndim:
         raise ValueError("axis must index the image's dimensions")
@@ -311,6 +326,10 @@ def recursive_gaussian(
     length = transposed.shape[-1]
     if length < 4:
         raise ValueError("recursive Gaussian requires at least four samples along the axis")
+    start, stop = (0, length) if interval is None else interval
+    if not 0 <= start < stop <= length:
+        raise ValueError("recursive Gaussian output interval must be inside the filtered axis")
+    cropped = start != 0 or stop != length
     rows = mx.reshape(transposed, (-1, length))
     high, low = _pair_arrays(
         coefficients.numerator
@@ -318,14 +337,17 @@ def recursive_gaussian(
         + coefficients.anticausal
         + (coefficients.causal_dc, coefficients.anticausal_dc)
     )
-    output = _recursive_kernel(length)(
-        inputs=[rows, mx.array(high), mx.array(low)],
+    inputs = [rows, mx.array(high), mx.array(low)]
+    if cropped:
+        inputs.append(mx.array((start, stop), dtype=mx.int32))
+    output = _recursive_kernel(length, cropped)(
+        inputs=inputs,
         grid=(rows.shape[0], 1, 1),
         threadgroup=(64, 1, 1),
-        output_shapes=[rows.shape] * 2,
+        output_shapes=[(rows.shape[0], stop - start)] * 2,
         output_dtypes=[mx.float32] * 2,
     )[1]
-    return mx.moveaxis(mx.reshape(output, transposed.shape), -1, axis)
+    return mx.moveaxis(mx.reshape(output, (*transposed.shape[:-1], stop - start)), -1, axis)
 
 
 def validate_log_domain(shape: tuple[int, ...], spacing: tuple[float, ...], sigma: float) -> None:
@@ -346,7 +368,10 @@ def validate_log_domain(shape: tuple[int, ...], spacing: tuple[float, ...], sigm
         raise ValueError("LoG sigma exceeds the image's physical support")
 
 
-def laplacian_gaussian(image: mx.array, spacing: tuple[float, ...], sigma: float) -> mx.array:
+def laplacian_gaussian(
+    image: mx.array, spacing: tuple[float, ...], sigma: float, *,
+    window: tuple[slice, ...] | None = None,
+) -> mx.array:
     """Laplacian of Gaussian of a 3-D image (PyRadiomics ``log`` image type).
 
     The sum over axes of the second derivative along that axis, with Gaussian smoothing
@@ -357,9 +382,10 @@ def laplacian_gaussian(image: mx.array, spacing: tuple[float, ...], sigma: float
         spacing: Voxel spacing in mm per array axis, three finite positive values.
         sigma: Gaussian sigma in mm, finite and positive. Each axis must satisfy the
             recursive filter's width and second-order normalization conditions.
+        window: Optional contiguous output slices in the original image coordinates.
 
     Returns:
-        Float32 array of the image's shape.
+        Full or windowed float32 response.
 
     Raises:
         ValueError: If the image is not 3-D with every axis at least 4 voxels, ``spacing``
@@ -367,13 +393,33 @@ def laplacian_gaussian(image: mx.array, spacing: tuple[float, ...], sigma: float
             image's physical extent, or an axis has an unsupported sigma ratio.
     """
     validate_log_domain(tuple(image.shape), spacing, sigma)
-    output = mx.zeros_like(image)
+    intervals: tuple[tuple[int, int] | None, ...] = (None, None, None)
+    output_shape = image.shape
+    if window is not None:
+        bounds = tuple(
+            part.indices(length) for part, length in zip(window, image.shape, strict=True)
+        )
+        if any(step != 1 for _, _, step in bounds):
+            raise ValueError("recursive LoG output window requires contiguous slices")
+        output_shape = tuple(max(0, stop - start) for start, stop, _ in bounds)
+        if 0 in output_shape:
+            return mx.zeros(output_shape, dtype=mx.float32)
+        intervals = tuple((start, stop) for start, stop, _ in bounds)
+    output = mx.zeros(output_shape, dtype=image.dtype)
     # ITK traverses physical x,y,z axes, opposite the NumPy array-axis order.
+    # After a pass, the remaining passes act on different axes and cannot read
+    # its discarded output coordinates. Every pass still reads complete input lines.
     for derivative_axis in range(2, -1, -1):
-        filtered = recursive_gaussian(image, sigma, spacing[derivative_axis], derivative_axis, 2)
+        filtered = recursive_gaussian(
+            image, sigma, spacing[derivative_axis], derivative_axis, 2,
+            interval=intervals[derivative_axis],
+        )
         for smooth_axis in range(2, -1, -1):
             if smooth_axis != derivative_axis:
-                filtered = recursive_gaussian(filtered, sigma, spacing[smooth_axis], smooth_axis, 0)
+                filtered = recursive_gaussian(
+                    filtered, sigma, spacing[smooth_axis], smooth_axis, 0,
+                    interval=intervals[smooth_axis],
+                )
         output = output + filtered / spacing[derivative_axis] ** 2
         evaluate(output)
     return output

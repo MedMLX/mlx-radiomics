@@ -559,7 +559,7 @@ def feature_images(
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
             is cropped to it. Wavelets limit the input where their tap reach allows.
-            Gabor, sampled LoG and Laws energy evaluate the requested output using the
+            Gabor, LoG and Laws energy evaluate the requested output using the
             full image's filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
@@ -599,7 +599,7 @@ def _feature_images(
     window: tuple[slice, ...] | None = None,
     _finite_input: bool = False,
 ) -> Iterator[FeatureImage]:
-    """Generate ``feature_images`` outputs; only wavelets are cropped to ``window``."""
+    """Generate full or windowed responses for the requested filters."""
     if image.ndim not in (2, 3) or len(spacing) != image.ndim:
         raise ValueError("feature images require aligned 2D/3D spacing")
     # Validate the complete name set before the first transform runs or a streaming
@@ -615,6 +615,11 @@ def _feature_images(
         source_tail = source_tail.astype(mx.float32)
     maximum = mx.max(mx.abs(image))
     zero_scale: bool | None = None
+    contiguous_window = None
+    if window is not None and len(window) == image.ndim:
+        bounds = tuple(part.indices(size) for part, size in zip(window, image.shape, strict=True))
+        if all(step == 1 and start < stop for start, stop, step in bounds):
+            contiguous_window = tuple(slice(start, stop) for start, stop, _ in bounds)
     for kind in options.image_types:
         if kind == ImageType.LBP2D:
             values = lbp2d(
@@ -657,7 +662,8 @@ def _feature_images(
 
             for sigma in options.log.sigma:
                 yield FeatureImage(
-                    _log_name(sigma, options), laplacian_gaussian(image, spacing, sigma),
+                    _log_name(sigma, options),
+                    laplacian_gaussian(image, spacing, sigma, window=contiguous_window),
                 )
             continue
         if kind == ImageType.MEAN:

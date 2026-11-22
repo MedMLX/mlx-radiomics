@@ -5,7 +5,9 @@ import pytest
 import SimpleITK as sitk
 from numpy.typing import NDArray
 
+from mlxradiomics.config.transforms import ImageType, LoGSettings, TransformSettings
 from mlxradiomics.filters.recursive_gaussian import laplacian_gaussian, recursive_gaussian
+from mlxradiomics.imaging.transforms import feature_images
 from mlxradiomics.numerics.runtime import mx
 
 RATIOS = (0.1, 0.5, 1.0, 2.0, 20.0, 50.0, 200.0)
@@ -58,8 +60,15 @@ def test_recurrence_matches_pinned_simpleitk(ratio: float, order: int) -> None:
     np.testing.assert_allclose(values, expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize(
+    "window",
+    [None, (slice(2, 5), slice(4, 7), slice(5, 9)), (slice(0, 3), slice(8, 9), slice(8, 10))],
+    ids=["full", "interior", "touching-edges"],
+)
 @pytest.mark.parametrize("constant", [False, True], ids=["nonconstant", "constant"])
-def test_anisotropic_laplacian_matches_pinned_simpleitk(constant: bool) -> None:
+def test_anisotropic_laplacian_matches_pinned_simpleitk(
+    constant: bool, window: tuple[slice, ...] | None,
+) -> None:
     sigma, spacing = 1.0, (0.5, 1.0, 2.0)
     shape = (8, 9, 10)
     coordinate = np.indices(shape).sum(axis=0)
@@ -73,8 +82,12 @@ def test_anisotropic_laplacian_matches_pinned_simpleitk(constant: bool) -> None:
     reference.SetSigma(sigma)
     reference.SetNormalizeAcrossScale(True)
     expected = np.asarray(sitk.GetArrayFromImage(reference.Execute(source)), dtype=np.float64)
+    if window is not None:
+        expected = expected[window]
+    options = TransformSettings(image_types=(ImageType.LOG,), log=LoGSettings(sigma=(sigma,)))
     with mx.stream(mx.gpu):
-        values = np.asarray(laplacian_gaussian(mx.array(image), spacing, sigma), dtype=np.float64)
+        [item] = feature_images(mx.array(image), spacing, options, window=window)
+        values = np.asarray(item.image, dtype=np.float64)
     np.testing.assert_allclose(values, expected, rtol=1e-5, atol=2e-6)
     if constant:
         np.testing.assert_allclose(values, 0.0, rtol=0.0, atol=1e-6)
