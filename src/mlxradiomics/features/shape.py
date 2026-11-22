@@ -140,8 +140,8 @@ def shape_statistics(
       Maximum2DDiameterSlice, Column and Row restrict to vertex pairs sharing their axis-0,
       axis-1 and axis-2 coordinate respectively. Large meshes within the scratch budget
       use convex-hull vertices for the overall diameter and group vertices by their
-      coordinate for each planar diameter. Distances use float32 spacing and a
-      scale-safe component norm.
+      coordinate for each planar diameter. The component norm uses separate binary
+      spacing exponents when a half-voxel distance can underflow in float32.
     * Axis lengths: ``4 * sqrt(eigenvalue)`` of the ROI voxel-center covariance
       (spacing applied). ``covariance_divisor="n-1"`` (default, IBSI) uses the sample
       divisor N-1 and ``"n"`` the population divisor N. A singleton has zero axes.
