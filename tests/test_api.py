@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from numpy.typing import NDArray
+from radiomics_reference.mathematics import masked_neighborhood_mean
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import (
     ImageType,
@@ -29,8 +31,9 @@ from mlxradiomics.config.transforms import MeanSettings
 def test_array_file_and_streamed_features_share_values_and_preserve_geometry(
     tmp_path: Path,
 ) -> None:
-    image = np.array([[1.0, 2.0], [3.0, 4.0]])
-    mask = np.ones((2, 2), dtype=np.uint8)
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
+    assert np.all(mask == 1)
+    expected_mean = float(image.mean())
     settings = Settings(features=("firstorder_Mean",))
     transforms = TransformSettings(
         image_types=(ImageType.ORIGINAL, ImageType.MEAN), mean=MeanSettings(support=1)
@@ -59,13 +62,23 @@ def test_array_file_and_streamed_features_share_values_and_preserve_geometry(
     assert_type(array_result, Result[float])
     assert_type(file_result, Result[float])
     for result in (array_result, file_result):
-        assert result.features == {name: 2.5 for name in names}
+        assert result.features == {name: expected_mean for name in names}
     assert file_result.metadata.get("image_geometry") == {
         "shape": (2, 2),
         "spacing": (2.0, 3.0),
         "origin": (7.0, 11.0),
         "direction": (1.0, 0.0, 0.0, 1.0),
     }
+    compact = extract_files(
+        paths[0], paths[1], settings=settings, transforms=transforms,
+        mode="voxel", map_dtype="float32",
+    )
+    assert_type(compact, Result[NDArray[np.float32]])
+    assert compact.metadata.get("map_dtype") == "float32"
+    assert compact.metadata.get("image_geometry") == file_result.metadata.get("image_geometry")
+    for values in compact.features.values():
+        assert values.dtype == np.float32
+        np.testing.assert_array_equal(values, np.full(image.shape, expected_mean, dtype=np.float32))
 
     collected = {name: np.zeros((2, 2), dtype=np.float32) for name in names}
     lifetime: list[tuple[str, str]] = []
@@ -98,9 +111,9 @@ def test_array_file_and_streamed_features_share_values_and_preserve_geometry(
         ("open", "mean-M1-mirror"),
         ("close", "mean-M1-mirror"),
     ]
-    # Every radius-one neighborhood covers all four pixels; each mean is 2.5.
+    # Every radius-one neighborhood covers all four liver pixels.
     for name, values in collected.items():
-        np.testing.assert_array_equal(values, np.full((2, 2), 2.5, dtype=np.float32))
+        np.testing.assert_array_equal(values, np.full(image.shape, expected_mean, dtype=np.float32))
         assert streamed.metadata["feature_validity"][name]["finite"] == 4
 
 
@@ -115,6 +128,66 @@ def test_invalid_mode_and_roi_sink_are_rejected_before_file_io(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="require mode='voxel'"):
         extract_files(image, mask, sink=consume)
+    with pytest.raises(ValueError, match="map_dtype"):
+        extract_files(image, mask, mode="voxel", map_dtype=cast(Literal["float32"], "float16"))
+
+
+@pytest.mark.parametrize("features", [
+    ("firstorder_Mean",),
+    ("firstorder_Entropy",),
+    ("ivh_AreaUnderIVHCurve",),
+    ("firstorder_Mean", "firstorder_Entropy", "ivh_AreaUnderIVHCurve", "glcm_Contrast"),
+])
+def test_compact_retained_maps_preserve_values_and_background(features: tuple[str, ...]) -> None:
+    image, mask, _ = hcc_crop(np.s_[103:107, 214:219, 64])
+    assert mask.any() and not mask.all()
+    settings = Settings(features=features, bin_width=25)
+    transforms = TransformSettings(
+        image_types=(ImageType.ORIGINAL, ImageType.MEAN), mean=MeanSettings(support=1),
+    )
+    legacy = extract(image, mask, settings=settings, transforms=transforms,
+                     spacing=(1.0, 1.0), mode="voxel")
+    compact = extract(image, mask, settings=settings, transforms=transforms,
+                      spacing=(1.0, 1.0), mode="voxel", map_dtype="float32")
+    assert_type(legacy, Result[NDArray[np.float64]])
+    assert_type(compact, Result[NDArray[np.float32]])
+    assert legacy.metadata.get("map_dtype") == "float64"
+    assert compact.metadata.get("map_dtype") == "float32"
+    assert compact.metadata["feature_validity"] == legacy.metadata["feature_validity"]
+    for name, values in compact.features.items():
+        original = legacy.features[name]
+        assert values.dtype == np.float32 and original.dtype == np.float64
+        assert 2 * values.nbytes == original.nbytes
+        np.testing.assert_array_equal(values.astype(np.float64), original)
+        np.testing.assert_array_equal(np.signbit(values), np.signbit(original))
+        np.testing.assert_array_equal(values[mask == 0], 0)
+    if "firstorder_Mean" in features:
+        np.testing.assert_allclose(compact.features["original_firstorder_Mean"],
+                                   masked_neighborhood_mean(image, mask == 1), rtol=1e-6)
+
+
+def test_compact_retained_maps_preserve_nonfinite_values_and_zero_signs() -> None:
+    mask = np.zeros((3, 4), dtype=np.uint8)
+    mask[1, 1:3] = 1
+    settings = Settings(
+        features=("firstorder_Energy", "firstorder_Skewness", "firstorder_Entropy"),
+        bin_count=1, zero_variance_moments="nan",
+    )
+    background, _, _ = hcc_crop(np.s_[0:3, 0:4, 64])
+    assert np.all(background == -2048)
+    # Scale the scan's constant stored background into the feature-overflow domain.
+    image = background * (-1e20 / 2048)
+    legacy = extract(image, mask, settings=settings, spacing=(1.0, 1.0), mode="voxel")
+    compact = extract(image, mask, settings=settings, spacing=(1.0, 1.0),
+                      mode="voxel", map_dtype="float32")
+    assert np.isposinf(compact.features["original_firstorder_Energy"][mask == 1]).all()
+    assert np.isnan(compact.features["original_firstorder_Skewness"][mask == 1]).all()
+    assert np.signbit(compact.features["original_firstorder_Entropy"][mask == 1]).all()
+    for name, values in compact.features.items():
+        original = legacy.features[name]
+        np.testing.assert_array_equal(values.astype(np.float64), original)
+        np.testing.assert_array_equal(np.signbit(values), np.signbit(original))
+        assert not np.signbit(values[mask == 0]).any()
 
 
 def test_configuration_loads_without_execution_dependencies() -> None:
@@ -143,27 +216,29 @@ def test_configuration_loads_without_execution_dependencies() -> None:
 
 
 def test_feature_discovery_builds_supported_extraction_selections() -> None:
-    image = np.array([[1.0, 2.0], [3.0, 4.0]])
-    mask = np.ones((2, 2), dtype=np.uint8)
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
+    assert np.all(mask == 1)
+    expected_mean = float(image.mean())
     names = list_features("firstorder", "shape", "shape2D", "localintensity", ndim=2)
     result = extract(image, mask, spacing=(1.0, 1.0), settings=Settings(features=names))
-    assert result.features["original_firstorder_Mean"] == 2.5
+    assert result.features["original_firstorder_Mean"] == expected_mean
     assert result.features["original_shape2D_PixelSurface"] == 4.0
     voxel_names = list_features("firstorder", "shape", "shape2D", "localintensity", mode="voxel")
     voxel = extract(
         image, mask, spacing=(1.0, 1.0), mode="voxel", settings=Settings(features=voxel_names),
     )
-    np.testing.assert_array_equal(voxel.features["original_firstorder_Mean"], np.full((2, 2), 2.5))
+    np.testing.assert_array_equal(voxel.features["original_firstorder_Mean"],
+                                  np.full(image.shape, expected_mean))
     with pytest.raises(ValueError, match="unknown feature families"):
         list_features("glmc")
 
 
 def test_array_extraction_warns_before_assuming_unit_spacing() -> None:
-    image = np.array([[1.0, 2.0], [3.0, 4.0]])
-    mask = np.ones((2, 2), dtype=np.uint8)
+    image, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62])
     settings = Settings(features=("firstorder_TotalEnergy",))
     with pytest.warns(UserWarning, match="assumes 1 mm spacing"):
         assumed = extract(image, mask, settings=settings)
     explicit = extract(image, mask, settings=settings, spacing=(2.0, 3.0))
-    assert assumed.features["original_firstorder_TotalEnergy"] == 30.0
-    assert explicit.features["original_firstorder_TotalEnergy"] == 180.0
+    energy = float(np.sum(image**2))
+    assert assumed.features["original_firstorder_TotalEnergy"] == energy
+    assert explicit.features["original_firstorder_TotalEnergy"] == energy * 6

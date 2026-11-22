@@ -5,8 +5,16 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from conftest import Conventions, settings_for
+from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics import Settings, extract
+
+
+def _pair(maximum: float = 1.0) -> NDArray[np.float64]:
+    """Scale the contrast of two CT pixels to the lattice admission boundary."""
+    ct, _, _ = hcc_patch((1, 2))
+    return (ct - ct.min()) / np.ptp(ct) * maximum
 
 
 @pytest.mark.parametrize("conventions", ["pyradiomics", "ibsi"])
@@ -17,7 +25,7 @@ from mlxradiomics import Settings, extract
 def test_tiny_roi_refuses_oversized_selected_count_buffer(
     conventions: Conventions, feature: str,
 ) -> None:
-    image = np.array([[0., 1.]])
+    image = _pair()
     family = feature.split("_")[0]
     with pytest.raises(MemoryError, match=rf"{family} ROI count buffer requires"):
         extract(image, np.ones(image.shape, dtype=np.uint8), settings=settings_for(
@@ -29,7 +37,7 @@ def test_tiny_roi_refuses_oversized_selected_count_buffer(
 
 
 def test_unused_dense_buffers_do_not_block_raw_or_sparse_features() -> None:
-    image = np.array([[0., 1.]])
+    image = _pair()
     mask = np.ones(image.shape, dtype=np.uint8)
     settings = Settings(features=("firstorder_Mean", "glcm_Contrast", "glcm_DifferenceVariance"),
                         bin_width=2.0**-27, bin_anchor=0, scratch_mib=1)
@@ -42,7 +50,7 @@ def test_unused_dense_buffers_do_not_block_raw_or_sparse_features() -> None:
 
 
 def test_explicit_count_budget_preserves_bins_and_entropy_at_allocation_boundary() -> None:
-    image = np.array([[0., 1.]])
+    image = _pair()
     mask = np.ones(image.shape, dtype=np.uint8)
     settings = Settings(features=("firstorder_Entropy",), bin_count=2**18 + 1, scratch_mib=1)
     with pytest.raises(MemoryError, match="ROI count buffer requires"):
@@ -54,15 +62,16 @@ def test_explicit_count_budget_preserves_bins_and_entropy_at_allocation_boundary
 
 
 def test_run_buffer_admission_uses_the_actual_cropped_domain() -> None:
-    image = np.zeros((4096, 2), dtype=np.float64)
-    image[0, 1] = 65536
+    ct, _, _ = hcc_patch((256, 2))
+    image = (ct - ct[0, 0]) * 65536
+    assert image[0, 0] == 0 and image[0, 1] == 65536
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0] = 1
     result = extract(image, mask, settings=Settings(
         features=("glrlm_ShortRunEmphasis",), bin_width=1, bin_anchor=0, scratch_mib=1,
     ))
     # The two adjacent, different-gray voxels form only length-one runs. Their
-    # cropped count matrix fits 1 MiB, while using the 4096-row file shape would not.
+    # cropped count matrix fits 1 MiB, while using the 256-row file shape would not.
     assert result.features["original_glrlm_ShortRunEmphasis"] == 1.0
 
 
@@ -73,7 +82,7 @@ def test_run_buffer_admission_uses_the_actual_cropped_domain() -> None:
 def test_larger_memory_budget_cannot_overflow_count_indexes(
     feature: str, maximum: float, bits: int,
 ) -> None:
-    image = np.array([[0., maximum]])
+    image = _pair(maximum)
     with pytest.raises(
         MemoryError, match=rf"ROI count buffer exceeds {bits}-bit indexing capacity",
     ):

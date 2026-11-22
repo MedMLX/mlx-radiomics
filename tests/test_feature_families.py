@@ -5,78 +5,66 @@ value comes from a recorded result or from production feature arithmetic.
 """
 
 from dataclasses import replace
-from math import log2
 from typing import cast
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from radiomics_reference.mathematics import ngtdm_features
+from radiomics_reference.catalogue import dependence_zones, firstorder, glcm
+from radiomics_reference.mathematics import glrlm_features, ngtdm_features
+from radiomics_reference.real_images import hcc_crop, hcc_patch, hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.voxel.storage import voxel_map_store
 
-# Zones of the 3x3 bins [[1, 1, 1], [1, 2, 2], [3, 3, 3]] are level 1 size 4,
-# level 2 size 2 and level 3 size 3. The statistics below follow from those three
-# (gray level, zone size) counts without a production feature calculation.
-_GLSZM_EXPECTED: dict[str, float] = {
-    "SmallAreaEmphasis": 61 / 432,
-    "LargeAreaEmphasis": 29 / 3,
-    "GrayLevelVariance": 2 / 3,
-    "SizeZoneNonUniformity": 1.0,
-    "ZoneVariance": 2 / 3,
-    "ZoneEntropy": log2(3),
-    "ZonePercentage": 1 / 3,
-    "LowGrayLevelZoneEmphasis": 49 / 108,
-    "HighGrayLevelZoneEmphasis": 14 / 3,
-}
-
 
 def _three_level_image() -> tuple[NDArray[np.float64], NDArray[np.uint8]]:
-    bins = np.array([[1, 1, 1], [1, 2, 2], [3, 3, 3]], dtype=np.int32)
-    image = (bins - 1).astype(np.float64) * 25.0
+    source = hcc_patch((3, 3))[0]
+    image = np.minimum(2, np.floor((source - source.min()) * 3 / np.ptp(source))) * 25
     return image, np.ones(image.shape, dtype=np.uint8)
 
 
-def test_glszm_matches_hand_counted_zones() -> None:
+def test_glszm_matches_independently_counted_ct_zones() -> None:
     image, mask = _three_level_image()
-    settings = Settings(features=tuple(f"glszm_{name}" for name in _GLSZM_EXPECTED),
-                        bin_width=25.0)
+    settings = Settings(features=("glszm_SmallAreaEmphasis", "glszm_LargeAreaEmphasis",
+        "glszm_GrayLevelVariance", "glszm_SizeZoneNonUniformity", "glszm_ZoneVariance",
+        "glszm_ZoneEntropy", "glszm_ZonePercentage", "glszm_LowGrayLevelZoneEmphasis",
+        "glszm_HighGrayLevelZoneEmphasis"), bin_width=25.0)
+    bins = (image / 25).astype(np.int32) + 1
+    expected = dependence_zones(bins, mask.astype(bool), settings)
     result = extract(image, mask, settings=settings)
-
-    assert set(result.features) == {f"original_glszm_{name}" for name in _GLSZM_EXPECTED}
-    for name, expected in _GLSZM_EXPECTED.items():
-        value = result.features[f"original_glszm_{name}"]
-        assert isinstance(value, float)
-        np.testing.assert_allclose(value, expected, rtol=1e-6, atol=1e-6, err_msg=name)
+    assert set(result.features) == {f"original_{name}" for name in settings.features}
+    for name in settings.features:
+        np.testing.assert_allclose(result.features[f"original_{name}"], expected[name],
+                                   rtol=1e-6, atol=1e-6, err_msg=name)
 
 
-def test_gray_level_256_keeps_a_uniform_distribution() -> None:
-    # Fixed-count binning maps the 256 distinct values to gray levels 1..256. Every
-    # texture cell then holds one voxel or one size-1 zone, so entropy is log2(256).
-    image = np.arange(256, dtype=np.float64).reshape(16, 16)
+def test_gray_level_256_preserves_ct_counts() -> None:
+    image = hcc_patch((16, 16))[0]
     mask = np.ones(image.shape, dtype=np.uint8)
-    expected: dict[str, float] = {
-        "firstorder_Entropy": 8.0,
-        "firstorder_Uniformity": 1 / 256,
-        "glrlm_RunEntropy": 8.0,
-        "glrlm_RunPercentage": 1.0,
-        "glszm_ZoneEntropy": 8.0,
-        "glszm_ZonePercentage": 1.0,
-        "gldm_DependenceEntropy": 8.0,
-        "gldm_DependenceNonUniformity": 256.0,
+    names = ("firstorder_Entropy", "firstorder_Uniformity", "glrlm_RunEntropy",
+        "glrlm_RunPercentage", "glszm_ZoneEntropy", "glszm_ZonePercentage",
+        "gldm_DependenceEntropy", "gldm_DependenceNonUniformity")
+    settings = Settings(bin_count=256, features=names)
+    bins = np.minimum(256, 1 + np.floor(
+        (image - image.min()) * 256 / np.ptp(image),
+    )).astype(np.int32)
+    assert bins.max() == 256
+    expected = {
+        **{f"firstorder_{k}": v for k, v in firstorder(image, bins, mask.astype(bool),
+            0.0, 1.0, settings.kurtosis, settings.zero_variance_moments).items()},
+        **{f"glrlm_{k}": v for k, v in glrlm_features(bins, mask.astype(bool)).items()},
+        **dependence_zones(bins, mask.astype(bool), settings),
     }
-    settings = Settings(bin_count=256, features=tuple(expected))
     result = extract(image, mask, settings=settings)
-
-    for name, target in expected.items():
-        value = result.features[f"original_{name}"]
-        assert isinstance(value, float)
-        np.testing.assert_allclose(value, target, rtol=1e-6, atol=1e-6, err_msg=name)
+    for name in names:
+        np.testing.assert_allclose(result.features[f"original_{name}"], expected[name],
+                                   rtol=1e-6, atol=1e-6, err_msg=name)
 
 
 def test_ngtdm_large_roi_preserves_fractional_neighbor_sums() -> None:
-    image = (np.indices((384, 384)).sum(axis=0) % 3).astype(np.float64)
+    source = hcc_crop(np.s_[40:424, 40:424, 64])[0]
+    image = np.minimum(2, np.floor((source - source.min()) * 3 / np.ptp(source)))
     mask = np.ones(image.shape, dtype=np.uint8)
     # Two-column strips give five-neighbor interiors and repeated non-binary
     # fractions. Atomic float32 bin accumulation loses their low-order bits.
@@ -95,7 +83,7 @@ def test_ngtdm_large_roi_preserves_fractional_neighbor_sums() -> None:
     "ambiguous", [False, True], ids=["disconnected-anisotropic", "cropped-ambiguous-cells"],
 )
 def test_mesh_volume_preserves_scale_and_closed_geometry(ambiguous: bool) -> None:
-    image = np.ones((8, 11, 14) if ambiguous else (53, 53, 53))
+    image = hcc_resampled((8, 11, 14) if ambiguous else (53, 53, 53))
     mask = np.zeros(image.shape, dtype=np.uint8)
     if ambiguous:
         mask[2:6, 3:8, 4:10] = np.random.default_rng(1).random((4, 5, 6)) > 0.35
@@ -133,13 +121,16 @@ def test_mesh_volume_preserves_scale_and_closed_geometry(ambiguous: bool) -> Non
 def test_sparse_voxel_mcc_preserves_defined_centers(explicit: bool, stream: bool) -> None:
     # The solid cube has every direction, the isolated center has none, and the
     # disconnected line has only one. Each center uses its own defined directions.
-    image = (np.indices((8, 8, 8)).sum(axis=0) % 2).astype(np.float64) * 25
+    image = hcc_patch((8, 8, 8))[0]
     dense = np.zeros(image.shape, dtype=np.uint8)
     dense[1:4, 1:4, 1:4] = 1
     mask = dense.copy()
     mask[6, 6, 6] = 1
     mask[6, 1, 1:3] = 1
-    settings = Settings(scratch_mib=1)
+    anchor = float(image[mask == 1].min())
+    # Four-HU bins resolve the line's two source levels within the 1 MiB budget.
+    settings = Settings(scratch_mib=1, bin_anchor=anchor, bin_width=4)
+    bins = (1 + np.floor((image - anchor) / 4)).astype(np.int32)
     if explicit:
         settings = replace(settings, features=("glcm_MCC",))
     if stream:
@@ -153,11 +144,14 @@ def test_sparse_voxel_mcc_preserves_defined_centers(explicit: bool, stream: bool
         result = extract(image, mask, settings=settings, mode="voxel")
         actual = dict(result.features)
     mcc = np.asarray(actual["original_glcm_MCC"])
-    # Odd-parity offsets pair opposite states; even-parity offsets pair equal states.
-    # Every defined two-state GLCM is a permutation with second singular value one.
-    np.testing.assert_allclose(mcc[dense == 1], 1.0, rtol=1e-6, atol=1e-6)
+    for center in np.ndindex(image.shape):
+        if not mask[center]:
+            continue
+        domain = tuple(slice(max(0, i - 1), min(size, i + 2))
+                       for i, size in zip(center, image.shape, strict=True))
+        expected = glcm(bins[domain], mask[domain].astype(bool), settings, int(bins.max()))["MCC"]
+        np.testing.assert_allclose(mcc[center], expected, rtol=1e-6, atol=1e-6, equal_nan=True)
     assert np.isfinite(mcc[dense == 1]).all()
-    np.testing.assert_allclose(mcc[6, 1, 1:3], 1.0, rtol=1e-6, atol=1e-6)
     assert np.isnan(mcc[6, 6, 6])
     np.testing.assert_array_equal(mcc[mask == 0], 0)
     assert result.metadata["roi_voxels"] == 30
@@ -168,4 +162,4 @@ def test_sparse_voxel_mcc_preserves_defined_centers(explicit: bool, stream: bool
     assert set(actual) == {f"original_{name}" for name in settings.features}
     if not explicit:
         assert np.asarray(actual["original_firstorder_Mean"])[6, 6, 6] == image[6, 6, 6]
-        assert result.metadata["feature_validity"]["original_firstorder_Mean"]["valid_zero"] == 1
+        assert result.metadata["feature_validity"]["original_firstorder_Mean"]["valid_zero"] == 0

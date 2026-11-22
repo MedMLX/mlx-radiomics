@@ -25,7 +25,7 @@ keywords = [
   "feature-extraction",
 ]
 name = "mlxradiomics"
-version = "1.0.0"
+version = "1.1.0"
 description = "Extract radiomics features and voxel maps on the Apple Silicon GPU with native MLX"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -34,7 +34,7 @@ license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
   "numpy>=2.0,<3",
   "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
-  "medmlx-core>=0.2.6,<0.3",
+  "medmlx-core>=0.3,<0.4",
   "nibabel>=5.3,<6",
   "isal>=1.9.1,<2",
   "SimpleITK==2.5.6",

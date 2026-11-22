@@ -11,10 +11,10 @@ import dataclasses
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TypedDict
 
 from medmlx_core.errors import InvalidInputError
-from medmlx_core.outputs import OutputEntry, output_entry
+from medmlx_core.outputs import Artifact, artifact
+from medmlx_core.outputs import RunResult as _RunResult
 
 from mlxradiomics.config.parameters import ExtractionParameters, load_params, parse_params
 from mlxradiomics.config.settings import Settings
@@ -24,8 +24,8 @@ from mlxradiomics.contracts.types import (
     ImageGeometryPayload,
     RunDetails,
 )
-from mlxradiomics.imaging.io import Volume, read_image_dimension
-from mlxradiomics.imaging.spatial import load_image_pair
+from mlxradiomics.imaging.io import Volume
+from mlxradiomics.imaging.spatial import LoadedCase, prepare_image_pair
 from mlxradiomics.workflows.reporting import publish_report
 
 # Registered through the ``medmlx.models`` entry point in pyproject.toml; MedMLX
@@ -45,20 +45,12 @@ MODEL = {
 }
 
 
-class RunFiles(TypedDict):
-    """Absolute paths written by a run; voxel runs set ``maps`` and leave ``features_csv`` None."""
-
-    features_json: str
-    features_csv: str | None
-    maps: dict[str, str]
-
-
-class RunResult(TypedDict):
-    """MedMLX output entries, grouped file paths and metadata returned by :func:`run`."""
-
-    outputs: list[OutputEntry]
-    files: RunFiles
-    details: RunDetails
+# Paths by role, their MedMLX descriptions and metadata from :func:`run`.
+#
+# ``outputs`` names each file by role: ``features``, ``features_table`` when
+# written, and one role per map named by its feature. ``artifacts`` describes every
+# ``outputs`` role.
+type RunResult = _RunResult[RunDetails]
 
 
 def _load_parameters(
@@ -90,13 +82,13 @@ def _load_parameters(
     return result
 
 
-def _scalar_field_entry(
-    path: str | Path, *, processed: Volume, source: ImageGeometryPayload | None,
-) -> OutputEntry:
+def _scalar_field_artifact(
+    *, processed: Volume, source: ImageGeometryPayload | None,
+) -> Artifact:
     """Describe a voxel map on the input grid only when every geometry field matches.
 
     A cropped or resampled map is still physically positioned by its NIfTI affine, but it
-    is no longer an array over the input volume's voxel grid. Such an entry uses
+    is no longer an array over the input volume's voxel grid. Such a map uses
     ``image_physical`` and omits ``grid_of``, which must name an input argument sharing the
     output grid. The run metadata keeps ``source_geometry`` for input provenance.
     """
@@ -107,10 +99,8 @@ def _scalar_field_entry(
         and tuple(processed.direction) == tuple(source["direction"])
     )
     if matches_input:
-        return output_entry(
-            path, kind="scalar_field", coordinate_space="image_voxel", grid_of="image_path",
-        )
-    return output_entry(path, kind="scalar_field", coordinate_space="image_physical")
+        return artifact(kind="scalar_field", coordinate_space="image_voxel", grid_of="image_path")
+    return artifact(kind="scalar_field", coordinate_space="image_physical")
 
 
 def run(
@@ -123,8 +113,8 @@ def run(
     label: int | None = None,
     voxel: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> RunResult:
     """Extract radiomics features from one NIfTI/NRRD image and label mask.
 
@@ -146,9 +136,9 @@ def run(
             float32 map at a time is expanded and written. Temporary files are removed
             on failure or success. Disk use grows with ROI size, feature count and image
             types.
-        temporary_dir: Existing directory for voxel scratch; None uses the system default.
+        scratch_dir: Existing directory for voxel scratch; None uses the system default.
             Publication staging remains on the output filesystem for atomic renames.
-        max_temporary_mib: Positive integer cap for logical voxel scratch (compact spool
+        max_scratch_mib: Positive integer cap for logical voxel scratch (compact spool
             plus one dense float32 grid), in MiB. Checked before extraction and each batch.
             This excludes staged/final outputs and is not an RSS cap. Output filesystem
             capacity is admitted separately with a conservative staging estimate.
@@ -165,12 +155,13 @@ def run(
             may alias a referenced data file. Paired NIfTI/Analyze inputs are rejected.
 
     Returns:
-        ``outputs`` lists MedMLX file descriptions. ``files.features_json`` points to a
+        ``outputs`` maps roles to paths and ``artifacts`` describes them.
+        ``outputs["features"]`` points to a
         metadata-plus-values (ROI) or metadata-plus-map-paths (voxel) JSON file. ROI mode
-        also writes ``features_csv``; voxel mode also writes one float32 NIfTI per feature
+        also writes ``features_table`` (CSV); voxel mode also writes one float32 NIfTI per feature
         and image type at ``<output_dir>/maps/<prefix>_<feature>.nii.gz``, reusing the
         processed image geometry (zero outside the ROI, with nonfinite values possible
-        inside). A map entry uses ``coordinate_space="image_voxel"`` and
+        inside). A map's artifact uses ``coordinate_space="image_voxel"`` and
         ``grid_of="image_path"`` only when the processed grid exactly matches the input's
         shape, spacing, origin and direction. After a crop or resampling it uses
         ``image_physical`` with no ``grid_of``, and ``source_geometry`` in the execution
@@ -187,22 +178,42 @@ def run(
             is false or is not a boolean.
         ModelExecutionError: Extraction itself failed.
     """
+    return extract_case(
+        LoadedCase(Path(image_path).expanduser(), Path(mask_path).expanduser()),
+        output_dir=output_dir, params=params, params_path=params_path, label=label,
+        voxel=voxel, overwrite=overwrite, scratch_dir=scratch_dir,
+        max_scratch_mib=max_scratch_mib,
+    )
+
+
+def extract_case(
+    case: LoadedCase,
+    *,
+    output_dir: str | os.PathLike[str],
+    params: Mapping[str, object] | None = None,
+    params_path: str | os.PathLike[str] | None = None,
+    label: int | None = None,
+    voxel: bool = False,
+    overwrite: bool = False,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
+) -> RunResult:
+    """Extract one label of a loaded case with the ordinary publication contract."""
     if type(overwrite) is not bool:
         raise InvalidInputError("overwrite must be a boolean")
     if type(voxel) is not bool:  # JSON callers can send "false", which is truthy
         raise InvalidInputError("voxel must be a boolean")
-    if max_temporary_mib is not None and (
-        type(max_temporary_mib) is not int or max_temporary_mib <= 0
+    if max_scratch_mib is not None and (
+        type(max_scratch_mib) is not int or max_scratch_mib <= 0
     ):
-        raise InvalidInputError("max_temporary_mib must be a positive integer")
-    if not voxel and (temporary_dir is not None or max_temporary_mib is not None):
-        raise InvalidInputError("temporary storage options require voxel=True")
+        raise InvalidInputError("max_scratch_mib must be a positive integer")
+    if not voxel and (scratch_dir is not None or max_scratch_mib is not None):
+        raise InvalidInputError("scratch_dir and max_scratch_mib require voxel=True")
 
-    source_image = Path(image_path).expanduser()
-    source_mask = Path(mask_path).expanduser()
+    source_image, source_mask = case.image_path, case.mask_path
     try:
         # Parse dimension-dependent parameters before the one full validated image read.
-        dimension = read_image_dimension(source_image)
+        dimension = case.dimension()
     except (ValueError, RuntimeError, OSError, EOFError) as error:
         # SimpleITK raises RuntimeError, and gzip OSError or EOFError, for unreadable files.
         raise InvalidInputError(str(error)) from error
@@ -210,8 +221,8 @@ def run(
     settings = parameters.settings
     transforms = parameters.transforms
     try:
-        pair = load_image_pair(
-            source_image, source_mask, settings=settings,
+        pair = prepare_image_pair(
+            *case.volumes(), settings=settings,
             image_settings=parameters.image_settings,
         )
     except (ValueError, RuntimeError, OSError, EOFError) as error:
@@ -227,25 +238,23 @@ def run(
         processed.array, pair.mask.array, output_dir=output_dir, settings=extraction,
         transforms=transforms, reference=processed, inputs=inputs,
         source_geometry=pair.source_geometry, image_settings=parameters.image_settings,
-        overwrite=overwrite, temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+        overwrite=overwrite, temporary_dir=scratch_dir, max_temporary_mib=max_scratch_mib,
         metadata_settings=settings, voxel=voxel,
         input_volumes=(source_image, source_mask),
     )
-    entries = [output_entry(saved.report, kind="report", coordinate_space="not_applicable")]
+    outputs = {"features": saved.report.as_posix()}
+    artifacts = {"features": artifact(kind="report", coordinate_space="not_applicable")}
     if saved.table is not None:
-        entries.append(
-            output_entry(saved.table, kind="measurement", coordinate_space="not_applicable")
+        outputs["features_table"] = saved.table.as_posix()
+        artifacts["features_table"] = artifact(
+            kind="measurement", coordinate_space="not_applicable",
         )
-    entries.extend(
-        _scalar_field_entry(path, processed=processed, source=pair.source_geometry)
-        for path in saved.maps.values()
-    )
+    # Feature names have an image-type prefix, so they cannot collide with the report roles.
+    for name, path in saved.maps.items():
+        outputs[name] = path.as_posix()
+        artifacts[name] = _scalar_field_artifact(processed=processed, source=pair.source_geometry)
     return {
-        "outputs": entries,
-        "files": {
-            "features_json": saved.report.as_posix(),
-            "features_csv": saved.table.as_posix() if saved.table else None,
-            "maps": {name: path.as_posix() for name, path in saved.maps.items()},
-        },
+        "outputs": outputs,
+        "artifacts": artifacts,
         "details": saved.details,
     }

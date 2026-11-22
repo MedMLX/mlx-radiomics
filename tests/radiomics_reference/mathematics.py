@@ -166,8 +166,13 @@ def ngtdm_features(
     mask: NDArray[np.bool_],
     distances: tuple[int, ...] = (1,),
     force2d_axis: int | None = None,
+    *,
+    ibsi_caps: bool = False,
 ) -> dict[str, float]:
-    """Evaluate NGTDM statistics from eligible centers and their scalar neighbor means."""
+    """Enumerate NGTDM, optionally applying the IBSI QCDE/NQ30/1X9X singular rules.
+
+    Caps apply only when there are eligible centers; an empty domain remains undefined.
+    """
     if bins.shape != mask.shape:
         raise ValueError("bins and mask must share a shape")
     shape = bins.shape
@@ -211,15 +216,18 @@ def ngtdm_features(
     )
     total_difference = sum(difference[level] for level in levels)
     return {
-        "Coarseness": inf if raw == 0 else 1 / raw,
+        "Coarseness": (min(1e6, inf if raw == 0 else 1 / raw) if ibsi_caps
+                       else inf if raw == 0 else 1 / raw),
         "Contrast": (0.0 if gray_levels <= 1
                      else contrast_sum * total_difference / total
                      / (gray_levels * (gray_levels - 1))),
-        "Busyness": (nan if busyness_denominator == 0 and raw == 0
+        "Busyness": (0.0 if ibsi_caps and gray_levels == 1
+                     else nan if busyness_denominator == 0 and raw == 0
                      else inf if busyness_denominator == 0
                      else raw / busyness_denominator),
         "Complexity": complexity_numerator / total,
-        "Strength": (nan if total_difference == 0 and strength_numerator == 0
+        "Strength": (0.0 if ibsi_caps and total_difference == 0
+                     else nan if total_difference == 0 and strength_numerator == 0
                      else inf if total_difference == 0
                      else strength_numerator / total_difference),
     }

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, TypeVar
 
-from mlxradiomics.contracts.types import ExecutionMetadata, FloatArray
+from mlxradiomics.contracts.types import ExecutionMetadata, VoxelArray
 
-Value = TypeVar("Value", covariant=True, default=float | FloatArray)
+Value = TypeVar("Value", covariant=True, default=float | VoxelArray)
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,8 @@ class Result(Generic[Value]):
 
     Keys are ``<image>_<family>_<name>``, such as ``original_firstorder_Mean``.
     ROI extraction returns ``Result[float]``; voxel extraction returns
-    ``Result[NDArray[np.float64]]`` with zero outside the ROI. A streaming sink
+    ``Result[NDArray[np.float64]]`` by default, or float32 maps when requested,
+    with zero outside the ROI. A streaming sink
     receives evaluated float32 batches and leaves ``features`` empty.
 
     NaN denotes an undefined feature; infinity denotes an unbounded float32

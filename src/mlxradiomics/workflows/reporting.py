@@ -174,7 +174,7 @@ def publish_report(
     if max_temporary_mib is not None and (
         type(max_temporary_mib) is not int or max_temporary_mib <= 0
     ):
-        raise InvalidInputError("max_temporary_mib must be a positive integer")
+        raise InvalidInputError("max_scratch_mib must be a positive integer")
     try:
         settings.validate(image.ndim)
         layout = _map_layout(reference, settings, transforms) if voxel else {}

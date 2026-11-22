@@ -9,6 +9,7 @@ import numpy as np
 from medmlx_core import MissingDependencyError, import_mlx
 from numpy.typing import NDArray
 
+from mlxradiomics.contracts.types import MapDtype
 from mlxradiomics.numerics.protocols import EvaluationRuntime
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ __all__ = [
     "releases_cache",
     "require_retained_capacity",
     "trim_cache",
+    "validate_map_dtype",
 ]
 
 # MLX accepts NumPy bool arrays; its DLPack constructor annotation omits them.
@@ -69,18 +71,24 @@ def releases_cache[**P, R](function: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-def require_retained_capacity(voxels: int, maps: int) -> None:
-    """Admit dense float64 maps against one quarter of physical unified memory.
+def validate_map_dtype(map_dtype: MapDtype) -> None:
+    """Reject unsupported retained-map storage before extraction or file loading."""
+    if map_dtype not in ("float64", "float32"):
+        raise ValueError("map_dtype must be 'float64' or 'float32'")
+
+
+def require_retained_capacity(voxels: int, maps: int, map_dtype: MapDtype = "float64") -> None:
+    """Admit dense maps against one quarter of physical unified memory.
 
     Count the complete selection, including every derived image, before allocating
     any map. The remaining memory serves inputs, host preprocessing and GPU scratch;
     this payload admission is not a reservation or a bound on total process memory.
     """
-    required = voxels * maps * 8
+    required = voxels * maps * (4 if map_dtype == "float32" else 8)
     budget = int(mx.device_info(mx.gpu)["memory_size"]) // 4
     if required > budget:
         raise MemoryError(
-            f"retaining {maps:,} float64 voxel maps requires {required:,} bytes, above "
+            f"retaining {maps:,} {map_dtype} voxel maps requires {required:,} bytes, above "
             f"the {budget:,}-byte retained-map budget (one quarter of unified memory); "
             "use sink or export/export_files to stream the maps"
         )

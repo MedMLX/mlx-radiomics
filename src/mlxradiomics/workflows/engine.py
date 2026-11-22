@@ -16,9 +16,10 @@ from mlxradiomics.contracts.metadata import dependency_version
 from mlxradiomics.contracts.results import Result
 from mlxradiomics.contracts.types import (
     ExecutionMetadata,
-    FloatArray,
     HostArray,
+    MapDtype,
     SettingsPayload,
+    VoxelArray,
     VoxelSink,
 )
 from mlxradiomics.contracts.validity import empty_validity
@@ -37,6 +38,7 @@ from mlxradiomics.numerics.runtime import (
     mx,
     releases_cache,
     require_retained_capacity,
+    validate_map_dtype,
 )
 from mlxradiomics.voxel.extraction import extract_voxels
 from mlxradiomics.workflows.roi import extract_roi
@@ -56,6 +58,7 @@ def extract(
     voxel: bool = False,
     histogram_method: str = "mlx",
     voxel_sink: VoxelSink | None = None,
+    map_dtype: MapDtype = "float64",
 ) -> Result:
     """Extract original-image features from aligned arrays (NumPy axis order).
 
@@ -88,6 +91,8 @@ def extract(
             shape ``(batch, ndim)`` and float32 arrays of shape ``(batch,)`` keyed
             ``original_<family>_<Name>``. No full maps are allocated and the returned
             ``features`` mapping is empty. Sink exceptions propagate.
+        map_dtype: Retained-map storage; defaults to float64. Float32 retains the same
+            evaluated float32 batch values using half the map payload.
 
     Returns:
         A ``Result`` with keys ``original_<family>_<Name>``, or an empty feature mapping
@@ -105,7 +110,7 @@ def extract(
         RuntimeError: If the Metal histogram route is requested without Metal, or an
             iterative GPU solver (GLSZM zone labeling, Jacobi eigenvalues) does not
             converge.
-        MemoryError: If retained float64 maps would exceed one quarter of unified
+        MemoryError: If retained maps would exceed one quarter of unified
             memory. Supply ``voxel_sink`` to stream evaluated batches instead.
     """
     return extract_with_shape_mask(
@@ -116,6 +121,7 @@ def extract(
         voxel=voxel,
         histogram_method=histogram_method,
         voxel_sink=voxel_sink,
+        map_dtype=map_dtype,
     )
 
 
@@ -167,6 +173,7 @@ def extract_with_shape_mask(
     voxel: bool = False,
     histogram_method: str = "mlx",
     voxel_sink: VoxelSink | None = None,
+    map_dtype: MapDtype = "float64",
     shape_mask: HostArray | None = None,
     _prepared_input: tuple[PreparedInput, NDArray[np.float64]] | None = None,
     _prepared_masks: PreparedInput | None = None,
@@ -188,13 +195,14 @@ def extract_with_shape_mask(
         raise ValueError("histogram_method must be mlx or metal")
     if voxel_sink is not None and not voxel:
         raise ValueError("voxel_sink requires voxel=True")
+    validate_map_dtype(map_dtype)
     settings = settings or Settings()
     if voxel and any(name.startswith("shape") for name in settings.features):
         raise ValueError("shape features are unavailable in voxel mode")
     if voxel and any(name.startswith("localintensity_") for name in settings.features):
         raise ValueError("physical local-intensity peak features are unavailable in voxel mode")
     if voxel and voxel_sink is None:
-        require_retained_capacity(image.size, len(settings.features))
+        require_retained_capacity(image.size, len(settings.features), map_dtype)
     source_shape = tuple(int(size) for size in np.shape(image))
     # Direct ROI extraction prepares only the window every selected feature reads.
     # Private prepared inputs arrive in their caller's coordinates and are not cropped
@@ -278,7 +286,7 @@ def extract_with_shape_mask(
             data = replace(
                 data, image=data.image[window], roi=data.roi[window],
                 shape_roi=data.shape_roi[window], sampling_mask=data.sampling_mask[window],
-                bins=data.bins[window],
+                bins=data.bins[window] if data.bins is not None else None,
             )
     dtype = mx.float32
     roi_voxels = int(np.count_nonzero(data.roi))
@@ -316,7 +324,9 @@ def extract_with_shape_mask(
         "feature_validity": validity,
         "aggregation": resolved_aggregations(settings, data.image.ndim),
     }
-    features: Mapping[str, float | FloatArray]
+    features: Mapping[str, float | VoxelArray]
+    if voxel:
+        metadata["map_dtype"] = map_dtype
     if ivh is not None:
         metadata["ivh_lattice"] = {"origin": ivh.origin, "step": ivh.step, "levels": ivh.levels}
     with mx.stream(mx.gpu):
@@ -327,7 +337,7 @@ def extract_with_shape_mask(
             assert voxel_window is not None
             features, memory = extract_voxels(
                 data, settings, dtype, prod(spacing), histogram_method, voxel_sink, validity, ivh,
-                source_shape=source_shape, window=voxel_window,
+                map_dtype, source_shape=source_shape, window=voxel_window,
             )
             metadata.update(
                 batch_size=memory["batch_size"],

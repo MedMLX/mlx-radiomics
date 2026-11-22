@@ -8,7 +8,7 @@ float32 on MLX.
 
 The FFT-based Simoncelli and Riesz response functions need MLX 0.32.5 or later:
 earlier releases can overrun a batched FFT's destination buffer and corrupt
-neighbouring arrays. On an older MLX the response functions raise ``ValueError``
+neighboring arrays. On an older MLX the response functions raise ``ValueError``
 (:data:`FFT_DISABLED_REASON`) before allocating a spectrum. ``FFT_AVAILABLE``
 reports the gate. LoG, separable wavelets and LBP live in their own modules.
 

@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
-from medmlx_core.outputs import OutputEntry, validate_outputs
+from medmlx_core.outputs import Artifact, validate_outputs
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.filtering import FilterPadding, FourierGrid, RieszBase
 from mlxradiomics.config.parameters import load_params, parse_params, settings_from_params
@@ -25,11 +26,12 @@ def _inputs(
     root: Path, *, direction: tuple[float, ...] | None = None,
 ) -> tuple[Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(21)
-    values = rng.integers(-120, 120, size=(10, 11, 12)).astype(np.int16)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[2:9, 2:9, 3:10] = 1
-    image = sitk.GetImageFromArray(values)
+    values, liver, _ = hcc_crop(np.s_[103:113, 214:225, 60:72])
+    # Select a central part of the source annotation so zero-padding crops leave
+    # a smaller output grid; keep its actual liver boundary and tumor exclusions.
+    labels = np.zeros_like(liver)
+    labels[2:9, 2:9, 3:10] = liver[2:9, 2:9, 3:10]
+    image = sitk.GetImageFromArray(values.astype(np.int16))
     mask = sitk.GetImageFromArray(labels)
     image.SetSpacing((1.5, 1.0, 0.8))
     image.SetOrigin((3.0, -2.0, 5.0))
@@ -50,10 +52,18 @@ def _params(*, image_types: dict[str, object], setting: dict[str, object]) -> di
     }
 
 
-def _scalar_fields(result: RunResult) -> list[OutputEntry]:
-    return [
-        entry for entry in validate_outputs(result["outputs"]) if entry["kind"] == "scalar_field"
-    ]
+def _scalar_fields(result: RunResult) -> list[Artifact]:
+    artifacts = validate_outputs(result).artifacts
+    return [entry for entry in artifacts.values() if entry["kind"] == "scalar_field"]
+
+
+def _maps(result: RunResult) -> dict[str, str]:
+    """Return the voxel-map paths: the ``outputs`` roles whose artifact is a scalar field."""
+    artifacts = validate_outputs(result).artifacts
+    return {
+        role: path for role, path in result["outputs"].items()
+        if artifacts[role]["kind"] == "scalar_field"
+    }
 
 
 def _geometry(result: RunResult) -> tuple[dict[str, object], dict[str, object]]:
@@ -121,7 +131,7 @@ def test_parameter_file_matches_equivalent_python_call(tmp_path: Path) -> None:
         transforms=TransformSettings(image_types=(ImageType.ORIGINAL, ImageType.WAVELET)),
         mode="voxel",
     )
-    payload = json.loads(Path(result["files"]["features_json"]).read_text())
+    payload = json.loads(Path(result["outputs"]["features"]).read_text())
     assert result["details"]["shape"] == [9, 11, 15]
     assert result["details"]["spacing"] == [1.0, 1.0, 1.0]
     assert payload["details"]["execution"]["source_geometry"]["shape"] == [10, 11, 12]
@@ -131,8 +141,9 @@ def test_parameter_file_matches_equivalent_python_call(tmp_path: Path) -> None:
     assert {(entry["coordinate_space"], entry.get("grid_of")) for entry in fields} == {
         ("image_physical", None)
     }
-    assert set(result["files"]["maps"]) == set(expected.features)
-    for name, path in result["files"]["maps"].items():
+    maps = _maps(result)
+    assert set(maps) == set(expected.features)
+    for name, path in maps.items():
         written = sitk.GetArrayFromImage(sitk.ReadImage(path))
         np.testing.assert_allclose(
             written.astype(np.float64), expected.features[name], rtol=1e-4, atol=1e-4,
@@ -161,7 +172,7 @@ def test_parameter_file_correct_mask_and_effective_settings(tmp_path: Path) -> N
     image_settings = cast(dict[str, object], execution["image_settings"])
     assert source["shape"] == [10, 11, 12]
     assert image_settings["correct_mask"] is True
-    features = json.loads(Path(result["files"]["features_json"]).read_text())["features"]
+    features = json.loads(Path(result["outputs"]["features"]).read_text())["features"]
     assert set(features) == {
         "original_firstorder_Mean", "original_glcm_Contrast",
         "square_firstorder_Mean", "square_glcm_Contrast",
@@ -205,7 +216,7 @@ def test_map_descriptor_reports_a_cropped_grid_as_physical(tmp_path: Path) -> No
     assert {(entry["coordinate_space"], entry.get("grid_of")) for entry in fields} == {
         ("image_physical", None),
     }
-    written = read_image(next(iter(result["files"]["maps"].values())))
+    written = read_image(next(iter(_maps(result).values())))
     np.testing.assert_allclose(
         written.spacing, cast(list[float], image_geometry["spacing"]), rtol=0, atol=1e-6,
     )
@@ -331,7 +342,7 @@ def test_planar_separable_wavelet_parameter_file_runs_on_3d_input(tmp_path: Path
     )
     result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
-    features = json.loads(Path(result["files"]["features_json"]).read_text())["features"]
+    features = json.loads(Path(result["outputs"]["features"]).read_text())["features"]
     assert any(name.startswith("separablewavelet-haar-L1-LH-") and "-2D_firstorder_Mean" in name
                for name in features)
 

@@ -1,4 +1,4 @@
-"""Feature catalogue and extraction settings.
+"""Feature catalog and extraction settings.
 
 Unsupported settings raise ``ValueError``; nothing falls back to another backend.
 """
@@ -116,12 +116,12 @@ def list_features(
 ) -> tuple[str, ...]:
     """List selectable names, optionally restricted to families, mode and dimension.
 
-    With no families, list the full catalogue, not the 93-feature default selection.
+    With no families, list the full catalog, not the 93-feature default selection.
     Unknown families raise ``ValueError``. Voxel mode excludes shape and local intensity.
     ``ndim=2`` excludes 3-D shape and local intensity; ``ndim=3`` excludes shape2D,
     whose single-slice 3-D use requires explicit selection and ``force2d_axis``.
     The returned tuple can be passed directly to ``Settings(features=...)``.
-    Names retain catalogue order and occur once even when a family is repeated.
+    Names retain catalog order and occur once even when a family is repeated.
     """
     if mode not in ("roi", "voxel"):
         raise ValueError("mode must be 'roi' or 'voxel'")

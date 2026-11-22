@@ -421,7 +421,10 @@ def intensity_features(
         ),
         "glcm": glcm(bins, mask, settings, ng),
         "glrlm": glrlm_features(bins, mask, settings.force2d_axis),
-        "ngtdm": ngtdm_features(bins, mask, settings.distances, settings.force2d_axis),
+        "ngtdm": ngtdm_features(
+            bins, mask, settings.distances, settings.force2d_axis,
+            ibsi_caps=settings.ngtdm_singular_cases == "ibsi-caps",
+        ),
         "intensityhistogram": histogram_features(bins, mask, ng),
     }
     return {**{f"{family}_{name}": value for family, values in families.items()

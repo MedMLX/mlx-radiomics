@@ -18,6 +18,8 @@ import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError, ModelExecutionError
 from medmlx_core.outputs import validate_outputs
+from radiomics_reference.mathematics import masked_neighborhood_mean
+from radiomics_reference.real_images import hcc_crop
 
 import mlxradiomics
 from mlxradiomics.contracts.json import JsonValue
@@ -26,14 +28,12 @@ from mlxradiomics.medmlx import run
 
 MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 # Untyped view of the runner for deserialized invalid argument values.
-run_untyped = cast(Callable[..., object], run)
+extract_untyped = cast(Callable[..., object], run)
 
 
 def _write_pair(directory: Path) -> tuple[Path, Path]:
     directory.mkdir(parents=True, exist_ok=True)
-    values = np.random.default_rng(2024).integers(-200, 200, size=(4, 5, 6)).astype(np.float64)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[1:3, 1:4, 1:5] = 1
+    values, labels, _ = hcc_crop(np.s_[105:109, 215:220, 62:68])
     image, mask = sitk.GetImageFromArray(values), sitk.GetImageFromArray(labels)
     image.SetSpacing((1.5, 1.0, 0.8))
     image.SetOrigin((3.0, -2.0, 5.0))
@@ -57,17 +57,21 @@ def test_run_roi_writes_independent_first_order_values(tmp_path: Path) -> None:
     result = run(image_path=image_path, mask_path=mask_path, output_dir=output,
                  params_path=params, overwrite=True)
     array = sitk.GetArrayFromImage(sitk.ReadImage(str(image_path))).astype(np.float64)
-    selected = array[1:3, 1:4, 1:5]
+    labels = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_path)))
+    selected = array[labels == 1]
     expected = {"original_firstorder_Mean": float(np.mean(selected)),
                 "original_firstorder_Variance": float(np.var(selected))}
-    entries = validate_outputs(result["outputs"])
-    assert {entry["kind"] for entry in entries} == {"report", "measurement"}
-    assert {entry["path"] for entry in entries} == {
-        str(output / "features.json"), str(output / "features.csv"),
+    paths, artifacts = validate_outputs(result)
+    assert paths == {
+        "features": str(output / "features.json"),
+        "features_table": str(output / "features.csv"),
     }
-    payload = json.loads(Path(result["files"]["features_json"]).read_text())
+    assert {role: entry["kind"] for role, entry in artifacts.items()} == {
+        "features": "report", "features_table": "measurement",
+    }
+    payload = json.loads(Path(paths["features"]).read_text())
     assert payload["features"] == pytest.approx(expected)
-    with Path(cast(str, result["files"]["features_csv"])).open(newline="") as handle:
+    with Path(paths["features_table"]).open(newline="") as handle:
         header, values = csv.reader(handle)
     assert dict(zip(header, map(float, values), strict=True)) == pytest.approx(expected)
     assert unrelated.read_bytes() == b"previous features"
@@ -78,26 +82,21 @@ def test_run_voxel_writes_local_means_on_the_input_grid(tmp_path: Path) -> None:
     result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=MEAN, voxel=True)
     source, mask = read_image(image_path), read_image(mask_path)
-    expected = np.zeros(source.array.shape, dtype=np.float32)
-    for center in np.argwhere(mask.array == 1):
-        neighborhood = tuple(slice(int(v) - 1, int(v) + 2) for v in center)
-        sampled = source.array[neighborhood][mask.array[neighborhood] == 1].astype(np.float64)
-        expected[tuple(center)] = np.mean(sampled)
+    expected = masked_neighborhood_mean(source.array.astype(np.float64), mask.array == 1)
     name = "original_firstorder_Mean"
-    entries = validate_outputs(result["outputs"])
-    fields = [entry for entry in entries if entry["kind"] == "scalar_field"]
-    assert len(entries) == 2 and len(fields) == 1
-    assert fields[0]["path"] == result["files"]["maps"][name]
-    assert fields[0].get("grid_of") == "image_path"
-    assert fields[0]["coordinate_space"] == "image_voxel"
-    output = read_image(result["files"]["maps"][name])
+    paths, artifacts = validate_outputs(result)
+    assert set(paths) == set(artifacts) == {"features", name}
+    assert artifacts[name]["kind"] == "scalar_field"
+    assert artifacts[name].get("grid_of") == "image_path"
+    assert artifacts[name]["coordinate_space"] == "image_voxel"
+    output = read_image(paths[name])
     np.testing.assert_allclose(output.array.astype(np.float64), expected, rtol=1e-4, atol=1e-4)
     assert output.spacing == source.spacing
     assert output.origin == source.origin
     assert output.direction == source.direction
     assert result["details"]["feature_count"] == 1
-    payload = json.loads(Path(result["files"]["features_json"]).read_text())
-    assert payload["maps"] == result["files"]["maps"]
+    payload = json.loads(Path(paths["features"]).read_text())
+    assert payload["maps"] == {name: paths[name]}
 
 
 def _reject_json_constant(value: str) -> Never:
@@ -115,7 +114,10 @@ def test_run_roi_reports_nonfinite_values_as_json_strings(
     image_path, mask_path = _write_pair(tmp_path / "inputs")
     # Constant intensities give mathematically undefined skewness; a separate
     # energy shift produces overflow without relying on unstable moment arithmetic.
-    image = np.zeros((4, 5, 6), dtype=np.float64)
+    background, _, _ = hcc_crop(np.s_[0:4, 0:5, 60:66])
+    assert np.all(background == -2048)
+    # Rebase constant source background to zero so JSON also exercises valid-zero counts.
+    image = background - background.flat[0]
     node = sitk.GetImageFromArray(image)
     node.CopyInformation(sitk.ReadImage(mask_path))
     sitk.WriteImage(node, image_path)
@@ -126,7 +128,7 @@ def test_run_roi_reports_nonfinite_values_as_json_strings(
     result = run(image_path=image_path, mask_path=mask_path, output_dir=tmp_path / "out",
                  params=params)
     payload = cast(dict[str, JsonValue], json.loads(
-        Path(result["files"]["features_json"]).read_text(), parse_constant=_reject_json_constant,
+        Path(result["outputs"]["features"]).read_text(), parse_constant=_reject_json_constant,
     ))
     assert payload["schema_version"] == 2
     features = payload["features"]
@@ -182,7 +184,7 @@ def test_run_rejects_bad_arguments(tmp_path: Path, problem: str) -> None:
         output.mkdir()
         (output / "features.json").write_bytes(b"previous")
     with pytest.raises(InvalidInputError):
-        run_untyped(**arguments)
+        extract_untyped(**arguments)
 
 
 @pytest.mark.parametrize(
@@ -431,7 +433,7 @@ def test_run_refuses_a_concurrent_call_to_the_same_directory(
         finally:
             resume.set()
         result = first.result(timeout=20)
-    assert Path(result["files"]["features_json"]).is_file()
+    assert Path(result["outputs"]["features"]).is_file()
     assert {path.name for path in output.iterdir()} == {"features.json", "features.csv"}
 
 
@@ -470,9 +472,8 @@ def test_run_preserves_an_output_created_after_preflight(
 
 def test_invalid_filter_dimension_is_an_input_error(tmp_path: Path) -> None:
     """A planar filter on a 2D image is a rejected request, not an execution failure."""
-    image = sitk.GetImageFromArray(np.arange(64, dtype=np.float32).reshape(8, 8))
-    labels = np.zeros((8, 8), dtype=np.uint8)
-    labels[2:6, 2:6] = 1
+    values, labels, _ = hcc_crop(np.s_[103:111, 214:222, 64])
+    image = sitk.GetImageFromArray(values.astype(np.float32))
     mask = sitk.GetImageFromArray(labels)
     mask.CopyInformation(image)
     sitk.WriteImage(image, tmp_path / "image.nii.gz")

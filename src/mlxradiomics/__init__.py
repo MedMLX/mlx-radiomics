@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mlxradiomics.contracts.results import Result as Result
     from mlxradiomics.contracts.types import VoxelSink as VoxelSink
     from mlxradiomics.contracts.types import VoxelSinkFactory as VoxelSinkFactory
+    from mlxradiomics.medmlx import run as run
     from mlxradiomics.workflows.exporting import export as export
     from mlxradiomics.workflows.exporting import export_files as export_files
     from mlxradiomics.workflows.extraction import extract as extract
@@ -53,6 +54,7 @@ __all__ = [
     "extract",
     "extract_files",
     "list_features",
+    "run",
 ]
 
 _EXPORT_MODULES = {
@@ -69,6 +71,7 @@ _EXPORT_MODULES = {
     "extract_files": "workflows.extraction",
     "export": "workflows.exporting",
     "export_files": "workflows.exporting",
+    "run": "medmlx",
 }
 
 

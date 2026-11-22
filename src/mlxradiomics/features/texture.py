@@ -537,7 +537,7 @@ def zone_statistics(
     A zone is a connected set of masked voxels with the same gray level, using the full
     unit-distance neighborhood (26-connected in 3-D, 8-connected in 2-D or in-plane with
     ``force2d_axis``); ``settings.distances`` is ignored, as in PyRadiomics. Each zone is
-    labelled with its smallest flat voxel index (:func:`zone_labels`).
+    labeled with its smallest flat voxel index (:func:`zone_labels`).
 
     With ``fixed_columns`` the size axis spans every possible zone size, ``prod(shape)``,
     instead of the largest zone in the batch. Voxel batches use it so the fixed pairwise
@@ -579,7 +579,7 @@ def zone_labels(
     level. One union-find pass links roots by atomic minimum and a second resolves every
     position to its root. A set's root is never linked, and linking only points a root at
     a smaller one, so each zone's root is its smallest position. Unmasked voxels keep their own
-    position. Rows (ROIs or voxel neighborhoods) are labelled independently.
+    position. Rows (ROIs or voxel neighborhoods) are labeled independently.
     """
     width = prod(shape)
     parent = _zone_merge_kernel(shape, offsets)(

@@ -12,7 +12,8 @@ from numpy.typing import NDArray
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.contracts.types import (
     FeatureValidity,
-    FloatArray,
+    MapDtype,
+    VoxelArray,
     VoxelMemory,
     VoxelSink,
 )
@@ -57,7 +58,7 @@ class _VoxelResidents(NamedTuple):
 
     image: mx.array | None
     sampling_mask: mx.array
-    bins: mx.array
+    bins: mx.array | None
 
 
 class _TextureOffsets(NamedTuple):
@@ -111,7 +112,7 @@ def _local_pairs(
 
 def _voxel_first(
     values: mx.array,
-    bins: mx.array,
+    bins: mx.array | None,
     valid: mx.array,
     data: Prepared,
     settings: Settings,
@@ -215,8 +216,10 @@ def _voxel_first_group(
 ) -> dict[str, NDArray[np.float32]]:
     """Evaluate one bounded first-order group; retain only its result vectors."""
     index = plan.index(mx.array(centers, dtype=mx.int32), offsets)
-    bins, valid = index.gather(resident.bins), index.valid(resident.sampling_mask)
+    bins = index.gather(resident.bins) if resident.bins is not None else None
+    valid = index.valid(resident.sampling_mask)
     if source_resident is None:
+        assert bins is not None
         first = first_order_histogram(
             bins,
             valid,
@@ -431,17 +434,18 @@ def extract_voxels(
     sink: VoxelSink | None,
     validity: dict[str, FeatureValidity],
     ivh: IVHLattice | None,
+    map_dtype: MapDtype = "float64",
     *,
     source_shape: tuple[int, ...],
     window: tuple[slice, ...],
-) -> tuple[dict[str, FloatArray], VoxelMemory]:
+) -> tuple[dict[str, VoxelArray], VoxelMemory]:
     """Compute feature maps by batches of ROI voxels, each the center of a local kernel.
 
     ``data`` holds the compact ``window`` for masked kernels and the full image
     for unmasked kernels. Both deliver center coordinates on ``source_shape``.
 
-    Return float64 maps (0 outside the ROI), or send evaluated float32 batches to ``sink``
-    and return no maps. Both routes use the same feature arithmetic and batch schedule.
+    Return maps in ``map_dtype`` (0 outside the ROI), or send evaluated float32 batches
+    to ``sink`` and return no maps. Both routes use the same feature arithmetic and schedule.
     Mixed first-order/GLCM selections may compute first-order features in larger
     groups while delivering complete feature batches. Their cached result vectors
     are included in the scratch estimate chosen from ``settings.scratch_mib``.
@@ -477,7 +481,8 @@ def extract_voxels(
         # support on Metal once its global lattice is fixed.
         resident_centers = centers - lower if np.any(lower) else centers
         data = replace(
-            data, image=data.image[window], roi=data.roi[window], bins=data.bins[window],
+            data, image=data.image[window], roi=data.roi[window],
+            bins=data.bins[window] if data.bins is not None else None,
             sampling_mask=data.sampling_mask[window], shape_roi=data.shape_roi[window],
         )
     resident_shape = data.image.shape
@@ -493,7 +498,7 @@ def extract_voxels(
         mx.reshape(mx.array(data.image.astype(np.float32, copy=False), dtype=dtype), (-1,))
         if schedule.has_source_first else None,
         mx.reshape(array_from_bool(data.sampling_mask), (-1,)),
-        mx.reshape(mx.array(data.bins), (-1,)),
+        mx.reshape(mx.array(data.bins), (-1,)) if data.bins is not None else None,
     )
     # Source-precision buffers serve only selected first-order operations and guards.
     # Proven zero words stay implicit; unused bits/errors never cross the device boundary.
@@ -548,8 +553,8 @@ def extract_voxels(
         *(array for array in resident if array is not None),
         *(index for pair in (pair_indexes or ()) for index in pair),
     )
-    outputs = (
-        {f"original_{name}": np.zeros(shape, dtype=np.float64) for name in settings.features}
+    outputs: dict[str, VoxelArray] = (
+        {f"original_{name}": np.zeros(shape, dtype=map_dtype) for name in settings.features}
         if sink is None
         else {}
     )
@@ -579,7 +584,10 @@ def extract_voxels(
             or fallback_texture
         )
         index = neighborhood.index(chunk_device, offsets) if needs_gather else None
-        bins = index.gather(resident.bins) if index is not None else None
+        bins = (
+            index.gather(resident.bins)
+            if index is not None and resident.bins is not None else None
+        )
         valid = index.valid(resident.sampling_mask) if index is not None else None
         batch: dict[str, mx.array] = {}
         if ivh is not None and ivh_resident is not None:
@@ -603,8 +611,9 @@ def extract_voxels(
                 }
             )
         if bool(schedule.first_names) and not first_batch_size:
-            assert index is not None and bins is not None and valid is not None
+            assert index is not None and valid is not None
             if source_resident is None:
+                assert bins is not None
                 first = first_order_histogram(
                     bins,
                     valid,
@@ -663,6 +672,7 @@ def extract_voxels(
                 )
             )
         if schedule.fused_glcm:
+            assert resident.bins is not None
             batch.update(
                 local_glcm(
                     resident.bins,
@@ -695,6 +705,7 @@ def extract_voxels(
                 )
             )
         if schedule.fused_texture:
+            assert resident.bins is not None
             batch.update(
                 local_texture(
                     resident.bins,

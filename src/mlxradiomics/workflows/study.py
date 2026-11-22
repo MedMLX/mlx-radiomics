@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Literal, TypedDict, cast
 
 from medmlx_core.errors import InvalidInputError, ModelExecutionError
+from medmlx_core.outputs import Artifact
 
-from mlxradiomics.medmlx import RunFiles, run
+from mlxradiomics.imaging.spatial import LoadedCase
+from mlxradiomics.medmlx import extract_case
 from mlxradiomics.workflows.publication import reject_input_aliases
 
 _CASE_KEYS: frozenset[str] = frozenset(("case_id", "image_path", "mask_path"))
@@ -33,14 +35,16 @@ class CaseOutcome(TypedDict):
     """Status for one ``(case_id, label)`` combination.
 
     ``status`` is ``completed`` or ``failed``. Completed entries carry the runner's
-    grouped file paths; failed entries carry the exception type and message.
+    ``outputs`` and ``artifacts`` from :func:`mlxradiomics.medmlx.run`; failed entries
+    carry the exception type and message.
     """
 
     case_id: str
     label: int
     status: Literal["completed", "failed"]
     output_dir: str
-    files: RunFiles | None
+    outputs: dict[str, str] | None
+    artifacts: dict[str, Artifact] | None
     error_type: str | None
     error_message: str | None
 
@@ -87,8 +91,8 @@ def run_study(
     params_path: str | os.PathLike[str] | None = None,
     voxel: bool = False,
     overwrite: bool = False,
-    temporary_dir: str | os.PathLike[str] | None = None,
-    max_temporary_mib: int | None = None,
+    scratch_dir: str | os.PathLike[str] | None = None,
+    max_scratch_mib: int | None = None,
 ) -> list[CaseOutcome]:
     """Run one image/mask pair per case and label, reporting every outcome.
 
@@ -113,8 +117,8 @@ def run_study(
         params_path: YAML file holding the same mapping.
         voxel: Export voxel maps instead of ROI features.
         overwrite: Replace existing outputs instead of refusing them.
-        temporary_dir: Existing directory for voxel scratch.
-        max_temporary_mib: Positive cap in MiB for logical voxel scratch.
+        scratch_dir: Existing directory for voxel scratch.
+        max_scratch_mib: Positive cap in MiB for logical voxel scratch.
 
     Returns:
         One outcome per case and label, in case-major order.
@@ -159,25 +163,30 @@ def run_study(
     reject_input_aliases(existing_outputs, existing_inputs)
     outcomes: list[CaseOutcome] = []
     for case in parsed:
+        loaded = LoadedCase(
+            Path(case["image_path"]).expanduser(), Path(case["mask_path"]).expanduser(),
+        )
         for label in selected_labels:
             destination = root / case["case_id"] / f"label-{label}"
             try:
-                result = run(
-                    image_path=case["image_path"], mask_path=case["mask_path"],
+                result = extract_case(
+                    loaded,
                     output_dir=destination, params=params, params_path=params_path,
                     label=label, voxel=voxel, overwrite=overwrite,
-                    temporary_dir=temporary_dir, max_temporary_mib=max_temporary_mib,
+                    scratch_dir=scratch_dir, max_scratch_mib=max_scratch_mib,
                 )
             except (InvalidInputError, ModelExecutionError, OSError) as error:
                 outcomes.append({
                     "case_id": case["case_id"], "label": label, "status": "failed",
-                    "output_dir": destination.as_posix(), "files": None,
+                    "output_dir": destination.as_posix(), "outputs": None, "artifacts": None,
                     "error_type": type(error).__name__, "error_message": str(error),
                 })
             else:
                 outcomes.append({
                     "case_id": case["case_id"], "label": label, "status": "completed",
-                    "output_dir": destination.as_posix(), "files": result["files"],
+                    "output_dir": destination.as_posix(), "outputs": result["outputs"],
+                    "artifacts": result["artifacts"],
                     "error_type": None, "error_message": None,
                 })
+        del loaded
     return outcomes

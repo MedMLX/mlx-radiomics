@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.workflows.study import run_study
 
@@ -17,12 +18,12 @@ MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 def _case(root: Path, case_id: str, offset: int) -> dict[str, str]:
     directory = root / case_id
     directory.mkdir(parents=True)
-    rng = np.random.default_rng(100 + offset)
-    values = (rng.integers(-40, 40, size=(6, 7, 8)) + offset).astype(np.int16)
-    labels = np.zeros(values.shape, dtype=np.uint8)
-    labels[1:5, 1:5, 1:6] = 1
-    labels[2:4, 2:4, 2:5] = 2
-    image = sitk.GetImageFromArray(values)
+    values, liver, tumor = hcc_crop(np.s_[105:111, 215:222, 62:70])
+    # A controlled HU offset distinguishes case identities; anatomical labels
+    # remain the source-aligned, mutually exclusive liver and tumor annotations.
+    labels = np.where(tumor != 0, 2, liver).astype(np.uint8)
+    assert np.any(labels == 1) and np.any(labels == 2)
+    image = sitk.GetImageFromArray((values + offset).astype(np.int16))
     mask = sitk.GetImageFromArray(labels)
     mask.CopyInformation(image)
     image_path, mask_path = directory / "image.nii.gz", directory / "mask.nii.gz"
@@ -43,11 +44,11 @@ def test_study_runs_every_case_and_label_independently(tmp_path: Path) -> None:
     ]
     values: dict[tuple[str, int], float] = {}
     for outcome in outcomes:
-        files = outcome["files"]
-        assert files is not None
-        payload = json.loads(Path(files["features_json"]).read_text())
+        outputs = outcome["outputs"]
+        assert outputs is not None
+        payload = json.loads(Path(outputs["features"]).read_text())
         assert payload["details"]["label"] == outcome["label"]
-        assert Path(files["features_json"]).parent == (
+        assert Path(outputs["features"]).parent == (
             tmp_path / "out" / outcome["case_id"] / f"label-{outcome['label']}"
         )
         values[(outcome["case_id"], outcome["label"])] = payload["features"][
@@ -56,12 +57,60 @@ def test_study_runs_every_case_and_label_independently(tmp_path: Path) -> None:
     assert len(set(values.values())) == len(values)
 
 
+@pytest.mark.parametrize("spatial", [False, True])
+def test_study_reads_each_source_once_and_matches_independent_label_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spatial: bool,
+) -> None:
+    """Reuse source pixels while keeping normalization/crop/resegmentation label-local."""
+    from mlxradiomics.imaging import spatial as spatial_io
+    from mlxradiomics.medmlx import run
+
+    cases = [_case(tmp_path / "inputs", "case-a", 0), _case(tmp_path / "inputs", "case-b", 20)]
+    params: dict[str, object] = {
+        **MEAN,
+        **({"setting": {"normalize": True, "resampledPixelSpacing": [.7, 1.1, 1.3],
+                        "padDistance": 1, "resegmentRange": [-1.5, 1.5]}} if spatial else {}),
+    }
+    reads: list[tuple[str, Path]] = []
+    read_image, read_mask = spatial_io.read_image, spatial_io.read_mask
+
+    def image(path: Path) -> spatial_io.Volume:
+        reads.append(("image", path))
+        return read_image(path)
+
+    def mask(path: Path) -> spatial_io.Volume:
+        reads.append(("mask", path))
+        return read_mask(path)
+
+    monkeypatch.setattr(spatial_io, "read_image", image)
+    monkeypatch.setattr(spatial_io, "read_mask", mask)
+    outcomes = run_study(cases, tmp_path / "study", labels=(5, 1, 2), params=params)
+    assert reads == [
+        (kind, Path(case[f"{kind}_path"])) for case in cases for kind in ("image", "mask")
+    ]
+    assert [outcome["status"] for outcome in outcomes] == [
+        "failed", "completed", "completed", "failed", "completed", "completed",
+    ]
+    for case in cases:
+        for label in (1, 2):
+            baseline = run(
+                image_path=case["image_path"], mask_path=case["mask_path"],
+                output_dir=tmp_path / "independent" / case["case_id"] / f"label-{label}",
+                params=params, label=label,
+            )
+            actual = tmp_path / "study" / case["case_id"] / f"label-{label}" / "features.json"
+            assert json.loads(actual.read_text()) == json.loads(
+                Path(baseline["outputs"]["features"]).read_text(),
+            )
+
+
 def test_study_records_missing_label_and_continues(tmp_path: Path) -> None:
     case = _case(tmp_path / "inputs", "case-a", 0)
     outcomes = run_study([case], tmp_path / "out", labels=(1, 5), params=MEAN)
     assert [outcome["status"] for outcome in outcomes] == ["completed", "failed"]
     assert outcomes[1]["error_type"] == "InvalidInputError"
-    assert outcomes[1]["files"] is None
+    assert outcomes[1]["outputs"] is None
+    assert outcomes[1]["artifacts"] is None
     assert "absent" in (outcomes[1]["error_message"] or "")
     assert (tmp_path / "out" / "case-a" / "label-1" / "features.json").is_file()
 
@@ -127,10 +176,15 @@ def test_study_records_invalid_transform_dimension_and_continues(tmp_path: Path)
     assert [outcome["status"] for outcome in outcomes] == ["failed", "completed"]
     assert outcomes[0]["error_type"] == "InvalidInputError"
     assert "requires a 3D image" in (outcomes[0]["error_message"] or "")
-    files = outcomes[1]["files"]
-    assert files is not None
-    assert set(files["maps"]) == {"lbp-3D-m1_firstorder_Mean", "lbp-3D-k_firstorder_Mean"}
-    assert all(Path(path).is_file() for path in files["maps"].values())
+    outputs, artifacts = outcomes[1]["outputs"], outcomes[1]["artifacts"]
+    assert outputs is not None
+    assert artifacts is not None
+    maps = {
+        role: path for role, path in outputs.items()
+        if artifacts[role]["kind"] == "scalar_field"
+    }
+    assert set(maps) == {"lbp-3D-m1_firstorder_Mean", "lbp-3D-k_firstorder_Mean"}
+    assert all(Path(path).is_file() for path in maps.values())
 
 
 def test_study_rejects_duplicate_or_unsafe_identifiers(tmp_path: Path) -> None:

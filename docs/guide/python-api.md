@@ -17,7 +17,7 @@ All options are keyword-only.
 - File operations read spacing from the image. They accept `image_settings=`
   ({class}`~mlxradiomics.ImageSettings`) for resampling and mask correction.
 - Array `export` accepts `allow_synthetic_geometry=` to acknowledge its synthetic grid.
-- Exports accept `overwrite=`, `temporary_dir=` and `max_temporary_mib=`.
+- Exports accept `overwrite=`, `scratch_dir=` and `max_scratch_mib=`.
 
 Settings, enums and parameter-file parsing load without MLX or SimpleITK. The
 execution runtime loads when extraction or export is imported.
@@ -49,6 +49,8 @@ Extraction returns `.features` and `.metadata`. Exports return `.report`, `.maps
 and `.metadata`. Effective transforms are in `.metadata["transforms"]`. `mode`
 selects the value type for static type checkers as well as at runtime. In-memory
 maps are float64 NumPy arrays holding float32 results, zero outside the ROI.
+Pass `map_dtype="float32"` to `extract` or `extract_files` to retain float32 maps
+using half the storage, with the same values, special values and background.
 Saved NIfTI maps are float32. The float64 container does not increase calculation
 precision. Use export or streaming for large images instead of retaining all maps.
 
@@ -71,7 +73,7 @@ settings = Settings(features=list_features("firstorder", "glcm"))
 voxel_names = list_features(mode="voxel", ndim=3)
 ```
 
-`list_features` returns catalogue names filtered by family, mode and optional
+`list_features` returns catalog names filtered by family, mode and optional
 dimension; it does not change the 93-feature default. Unknown family names raise
 `ValueError`. Shape and local intensity are excluded from voxel selections;
 3-D discovery excludes `shape2D` because its 3-D use requires a single slice and
@@ -153,7 +155,7 @@ argument of the filter functions (DFT by default).
 
 Per-family `*_aggregation` fields choose how texture matrices are combined
 across directions and slices; see {class}`~mlxradiomics.Settings` for their
-accepted values. The [feature catalogue](features.md#catalogue) maps public
+accepted values. The [feature catalog](features.md#catalog) maps public
 names to IBSI identifiers.
 
 ## Streaming voxel batches

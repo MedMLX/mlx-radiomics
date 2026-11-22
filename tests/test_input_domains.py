@@ -1,52 +1,50 @@
-"""Synthetic CT/PET/MRI-scale numerical regressions, not patient validation.
-
-Small analytic images exercise the input domains that tiny integer phantoms miss:
-CT resegmentation, fractional PET weights and fine-bin MRI texture. Expectations
-are derived from the stated geometries and source values, never from runtime output.
-"""
-
-from math import sqrt
+"""Numerical input-domain regressions using HCC-TACE CT and liver voxels."""
 
 import numpy as np
 import pytest
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics import Settings, extract
 
+SPACING = (0.859375, 0.859375, 2.5)
+
 
 def test_ct_resegmentation_preserves_source_statistics() -> None:
-    """CT clipping changes the intensity population without changing the shape ROI."""
-    image = np.array([-1000, -100, -50, 0, 25, 50, 100, 1200], dtype=np.float64).reshape(2, 2, 2)
-    mask = np.ones(image.shape, dtype=np.uint8)
+    """Resegmentation changes the intensity population without changing the liver ROI."""
+    image, mask, _ = hcc_crop(np.s_[105:110, 215:221, 62:69])
+    selected = image[(mask != 0) & (image >= 50) & (image <= 100)]
+    assert 0 < selected.size < np.count_nonzero(mask)
     expected = {
-        "firstorder_Mean": 25 / 6,
-        "firstorder_Variance": 153125 / 36,
-        "firstorder_Minimum": -100,
-        "firstorder_Maximum": 100,
-        # Eight morphology voxels at 2 * 0.75 * 0.5 mm³, despite two clipped intensities.
-        "shape_VoxelVolume": 6,
+        "firstorder_Mean": float(selected.mean()),
+        "firstorder_Variance": float(selected.var()),
+        "firstorder_Minimum": float(selected.min()),
+        "firstorder_Maximum": float(selected.max()),
+        "shape_VoxelVolume": float(np.count_nonzero(mask) * np.prod(SPACING)),
     }
-    result = extract(image, mask, spacing=(2.0, 0.75, 0.5), settings=Settings(
+    result = extract(image, mask, spacing=SPACING, settings=Settings(
         features=tuple(expected), bin_width=10,
-        bin_anchor=-200, resegment_range=(-200.0, 200.0),
+        bin_anchor=-200, resegment_range=(50.0, 100.0),
     ))
     for name, target in expected.items():
         assert result.features[f"original_{name}"] == pytest.approx(target, rel=2e-6, abs=2e-6)
 
 
-def test_pet_fractional_weights_have_resolved_morphology() -> None:
-    """Near-equal finite PET-scale weights still define accurately resolvable outputs."""
-    delta = 1e-8
-    image = np.array([2, 2 + delta, 2.5, 2.5 + delta,
-                      3, 3 + delta, 3.5, 3.5 + delta]).reshape(2, 2, 2)
-    mask = np.ones(image.shape, dtype=np.uint8)
+def test_fractional_ct_weights_have_resolved_morphology() -> None:
+    """Closely spaced real-image weights preserve intensity and centroid measurements."""
+    ct, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62:64])
+    assert np.all(mask == 1)
+    image = 2.0 + (ct - ct.min()) * 1e-5
+    mean = float(image.mean())
+    coordinates = np.indices(image.shape, dtype=np.float64).reshape(3, -1)
+    coordinates *= np.asarray(SPACING, dtype=np.float64)[:, None]
+    center = (coordinates * image.ravel()).sum(axis=1) / image.sum()
+    geometric_center = np.asarray(SPACING, dtype=np.float64) / 2
     expected = {
-        "firstorder_Mean": 2.75 + delta / 2,
-        # The marching-cubes mesh volume of this unit-spaced cube is 17/3 mm³.
-        "shape_IntegratedIntensity": (17 / 3) * (2.75 + delta / 2),
-        # Weighted centroid displacement is (2, 1, 2*delta)/(22 + 4*delta).
-        "shape_CentreOfMassShift": sqrt(5 + 4 * delta**2) / (22 + 4 * delta),
+        "firstorder_Mean": mean,
+        "shape_IntegratedIntensity": (17 / 3) * float(np.prod(SPACING)) * mean,
+        "shape_CentreOfMassShift": float(np.linalg.norm(center - geometric_center)),
     }
-    result = extract(image, mask, spacing=(1.0, 1.0, 1.0), settings=Settings(
+    result = extract(image, mask, spacing=SPACING, settings=Settings(
         features=tuple(expected), bin_width=0.25,
         bin_anchor=0, resegment_range=(0.0,),
     ))
@@ -54,32 +52,34 @@ def test_pet_fractional_weights_have_resolved_morphology() -> None:
         assert result.features[f"original_{name}"] == pytest.approx(target, rel=2e-6, abs=2e-6)
 
 
-def test_mri_preserves_high_gray_level_indices() -> None:
-    """Fine MRI bins preserve actual level indices in histograms and texture features."""
-    levels = np.array([16001, 16002, 16003, 16004, 16005, 16006, 24001, 25001])
-    # Bin centers avoid boundary ambiguity. The intensity range is about 800–1250.
-    image = ((levels - 0.5) * 0.05).reshape(2, 2, 2)
-    mask = np.ones(image.shape, dtype=np.uint8)
+def test_ct_preserves_high_gray_level_indices() -> None:
+    """Fine bins preserve actual level indices for real-image histogram and texture values."""
+    ct, mask, _ = hcc_crop(np.s_[105:107, 217:219, 62:64])
+    assert np.all(mask == 1)
+    levels = ct.astype(np.int64) + 20001
+    image = (levels - 0.5) * 0.05
+    flat = levels.ravel().astype(np.float64)
+    first, second = np.meshgrid(flat, flat, indexing="ij")
+    distinct = ~np.eye(flat.size, dtype=bool)
+    mean = float(flat.mean())
     expected = {
-        "intensityhistogram_Minimum": 16001,
-        "intensityhistogram_Maximum": 25001,
-        "intensityhistogram_Mean": 145023 / 8,
-        "intensityhistogram_Variance": 870490215 / 64,
-        "glcm_JointAverage": 145023 / 8,
-        "glcm_Contrast": 124355745 / 4,
-        "glcm_ClusterShade": 2147415036525 / 32,
-        "glcm_Idmn": 0.9554796923530556,
+        "intensityhistogram_Minimum": int(flat.min()),
+        "intensityhistogram_Maximum": int(flat.max()),
+        "intensityhistogram_Mean": mean,
+        "intensityhistogram_Variance": float(flat.var()),
+        "glcm_JointAverage": mean,
+        "glcm_Contrast": float(np.mean((first[distinct] - second[distinct]) ** 2)),
+        "glcm_ClusterShade": float(np.mean((first[distinct] + second[distinct] - 2 * mean) ** 3)),
+        "glcm_Idmn": float(np.mean(1 / (1 + (first[distinct] - second[distinct]) ** 2
+                                                / flat.max() ** 2))),
     }
-    # A 2x2x2 cube makes every distinct voxel pair a Chebyshev-distance-one pair.
-    # The merged symmetric GLCM therefore gives each of the 56 ordered pairs 1/56
-    # probability. The exact rational moments above follow from those eight levels;
-    # Idmn uses the full maximum level 25001, not eight compacted occupied levels.
-    result = extract(image, mask, spacing=(1.0, 1.0, 1.0), settings=Settings(
+    # Every distinct voxel pair in a 2x2x2 ROI is a 3D Chebyshev-distance-one pair.
+    result = extract(image, mask, spacing=SPACING, settings=Settings(
         features=tuple(expected), bin_width=0.05,
         bin_anchor=0, resegment_range=(0.0,), glcm_aggregation="3d_merge",
     ))
-    assert result.metadata["gray_levels"] == 25001
-    assert result.features["original_intensityhistogram_Minimum"] == 16001
-    assert result.features["original_intensityhistogram_Maximum"] == 25001
+    assert result.metadata["gray_levels"] == int(flat.max())
+    assert result.features["original_intensityhistogram_Minimum"] == int(flat.min())
+    assert result.features["original_intensityhistogram_Maximum"] == int(flat.max())
     for name, target in expected.items():
         assert result.features[f"original_{name}"] == pytest.approx(target, rel=2e-6, abs=2e-6)

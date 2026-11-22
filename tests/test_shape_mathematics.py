@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from conftest import Conventions, convention_shape_statistics, settings_for
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_resampled
 
 from mlxradiomics import Settings, extract
 from mlxradiomics.config.settings import SHAPE, SHAPE2D, EllipsoidArea
@@ -67,7 +68,7 @@ def test_cuboid_mesh_diameters_match_face_center_extrema(
 def test_disconnected_2d_mesh_area_is_additive(separation: int) -> None:
     mask = np.zeros((separation + 1,) * 2, np.uint8)
     mask[0, 0] = mask[-1, -1] = 1
-    result = extract(np.ones(mask.shape), mask, spacing=(0.977, 0.977),
+    result = extract(hcc_resampled(mask.shape), mask, spacing=(0.977, 0.977),
                      settings=Settings(features=("shape2D_MeshSurface",)))
     assert result.features["original_shape2D_MeshSurface"] == pytest.approx(0.977**2, rel=1e-6)
 
@@ -124,7 +125,7 @@ def _values(
     mask: NDArray[np.uint8], spacing: tuple[float, float, float],
     names: tuple[str, ...] = SHAPE,
 ) -> dict[str, float]:
-    image = np.ones(mask.shape, dtype=np.float32)
+    image = hcc_resampled(mask.shape).astype(np.float32)
     settings = settings_for("pyradiomics", features=tuple(f"shape_{name}" for name in names))
     result = extract(image, mask, settings=settings, spacing=spacing)
     return {
@@ -356,7 +357,7 @@ def _values2d(
     mask: NDArray[np.uint8], spacing: tuple[float, float],
     names: tuple[str, ...] = SHAPE2D,
 ) -> dict[str, float]:
-    image = np.ones(mask.shape, dtype=np.float32)
+    image = hcc_resampled(mask.shape).astype(np.float32)
     settings = settings_for("pyradiomics",
         features=tuple(f"shape2D_{name}" for name in names))
     result = extract(image, mask, settings=settings, spacing=spacing)
@@ -384,7 +385,7 @@ def _shape_values(
 @pytest.mark.parametrize("spacing", [1e-12, 1e10])
 def test_isolated_voxel_extreme_spacing_restores_units(spacing: float) -> None:
     # The octahedron has V=s^3/6, A=sqrt(3)s^2, sphericity=pi^(1/3)/sqrt(3), and
-    # its opposite face centres are one spacing apart. Squaring the physical edge
+    # its opposite face centers are one spacing apart. Squaring the physical edge
     # crosses float32's range at these spacings; the scaled mesh must not.
     mask = np.zeros((3, 3, 3), dtype=np.uint8)
     mask[1, 1, 1] = 1
@@ -601,7 +602,7 @@ def test_convention_sets_use_distinct_covariance_denominators_and_matching_aee()
     )
     for conventions, variance in cases:
         result = extract(
-            np.ones(mask.shape), mask,
+            hcc_resampled(mask.shape), mask,
             settings=settings_for(
                 conventions,
                 features=tuple(f'shape_{name}' for name in names),
@@ -623,9 +624,9 @@ def test_covariance_divisor_and_ellipsoid_area_are_independent_settings() -> Non
     names = ("MajorAxisLength", "AreaDensityApproximateEnclosingEllipsoid")
     volume_area = 24 + 12 * sqrt(2) + sqrt(3)
     features = tuple(f"shape_{name}" for name in names)
-    sample_exact = extract(np.ones(mask.shape), mask, settings=Settings(
+    sample_exact = extract(hcc_resampled(mask.shape), mask, settings=Settings(
         features=features, ellipsoid_area="exact"))
-    population_series = extract(np.ones(mask.shape), mask, settings=Settings(
+    population_series = extract(hcc_resampled(mask.shape), mask, settings=Settings(
         features=features, covariance_divisor="n"))
     # Spheres have the same exact and printed-series area; only the divisor differs.
     for result, variance in ((sample_exact, 18 / 26), (population_series, 18 / 27)):
@@ -647,7 +648,7 @@ def test_aee_area_density_uses_the_printed_series_only_for_ibsi_series() -> None
 
     def values(area: EllipsoidArea) -> dict[str, float]:
         result = extract(
-            np.ones(mask.shape), mask,
+            hcc_resampled(mask.shape), mask,
             settings=Settings(ellipsoid_area=area,
                               features=tuple(f"shape_{name}" for name in names)),
         )
@@ -669,7 +670,7 @@ def test_ibsi_shape2d_uses_sample_covariance() -> None:
     # Four corners have squared deviations totaling one on each axis, hence 1/3.
     mask = np.ones((2, 2), dtype=np.uint8)
     result = extract(
-        np.ones(mask.shape), mask,
+        hcc_resampled(mask.shape), mask,
         settings=Settings(features=("shape2D_MajorAxisLength",)),
     )
     assert result.features["original_shape2D_MajorAxisLength"] == pytest.approx(
@@ -681,7 +682,7 @@ def test_ibsi_singleton_shape_has_zero_axes() -> None:
     mask = np.ones((1, 1, 1), dtype=np.uint8)
     names = ("MajorAxisLength", "MinorAxisLength", "LeastAxisLength")
     result = extract(
-        np.ones(mask.shape), mask,
+        hcc_resampled(mask.shape), mask,
         settings=Settings(features=tuple(f"shape_{n}" for n in names)),
     )
     for name in names:
@@ -694,7 +695,7 @@ def test_mesh_refuses_cropped_extents_beyond_exact_half_grid_vertices() -> None:
     def surface(separation: int) -> float:
         mask = np.zeros((1, 1, separation + 1), np.uint8)
         mask[0, 0, [0, separation]] = 1
-        result = extract(mask.astype(np.float64), mask,
+        result = extract(hcc_resampled(mask.shape), mask,
                          settings=Settings(features=("shape_SurfaceArea",), bin_count=1))
         return float(result.features["original_shape_SurfaceArea"])
 

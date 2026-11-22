@@ -8,6 +8,7 @@ import pytest
 import SimpleITK as sitk
 from medmlx_core.errors import InvalidInputError
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop, hcc_patch
 
 from mlxradiomics.imaging.io import Volume
 from mlxradiomics.medmlx import run
@@ -16,8 +17,14 @@ MEAN = {"featureClass": {"firstorder": ["Mean"]}}
 
 
 def _inputs(root: Path, shape: tuple[int, ...]) -> tuple[Path, Path]:
-    image = sitk.GetImageFromArray(np.full(shape, 17, dtype=np.int16))
-    mask = sitk.GetImageFromArray(np.ones(shape, dtype=np.uint8))
+    if len(shape) == 3:
+        crop = tuple(slice(start, start + size)
+                     for start, size in zip((100, 180, 25), shape, strict=True))
+        values, liver, _ = hcc_crop(crop)
+    else:
+        values, liver, _ = hcc_patch(shape)
+    image = sitk.GetImageFromArray(values.astype(np.int16))
+    mask = sitk.GetImageFromArray(liver)
     paths = root / "image.nii.gz", root / "mask.nii.gz"
     sitk.WriteImage(image, paths[0])
     sitk.WriteImage(mask, paths[1])
@@ -39,8 +46,8 @@ def test_runner_rejects_invalid_scratch_before_extraction(
     monkeypatch.setattr("mlxradiomics.workflows.engine.extract", forbidden_extraction)
     with pytest.raises(InvalidInputError):
         run(image_path=paths[0], mask_path=paths[1], output_dir=tmp_path / "out",
-            params=MEAN, voxel=True, temporary_dir=scratch,
-            max_temporary_mib=0 if problem == "invalid_budget" else 1)
+            params=MEAN, voxel=True, scratch_dir=scratch,
+            max_scratch_mib=0 if problem == "invalid_budget" else 1)
     assert not list((tmp_path / "out").glob(".mlxradiomics-*"))
     if scratch.exists():
         assert not list(scratch.iterdir())
@@ -69,7 +76,7 @@ def test_runner_removes_owned_scratch_and_staging_after_writer_interruption(
     monkeypatch.setattr("mlxradiomics.workflows.reporting.write_feature_map", fail_write)
     with pytest.raises(interruption, match="injected writer interruption"):
         run(image_path=paths[0], mask_path=paths[1], output_dir=output,
-            params=MEAN, voxel=True, overwrite=True, temporary_dir=scratch, max_temporary_mib=1)
+            params=MEAN, voxel=True, overwrite=True, scratch_dir=scratch, max_scratch_mib=1)
     assert {path: path.read_bytes() for path in previous} == previous
     assert list(scratch.iterdir()) == [marker]
     assert not list(output.glob(".mlxradiomics-*"))

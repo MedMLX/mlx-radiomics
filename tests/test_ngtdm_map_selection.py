@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from conftest import settings_for
 from radiomics_reference.mathematics import NGTDM_NAMES, ngtdm_features
+from radiomics_reference.real_images import hcc_background, hcc_patch
 
 from mlxradiomics import extract
 
@@ -15,15 +16,13 @@ _SELECTIONS = [
 
 @pytest.mark.parametrize("selected", _SELECTIONS)
 @pytest.mark.parametrize("masked", [True, False], ids=["masked", "unmasked"])
+@pytest.mark.parametrize("constant", [False, True], ids=["ct", "stored-background"])
 def test_ngtdm_map_selection_matches_independent_neighborhood_definitions(
-    selected: tuple[str, ...], masked: bool,
+    selected: tuple[str, ...], masked: bool, constant: bool,
 ) -> None:
-    # Mixed gray levels at the image edge, a constant component and an isolated
-    # center exercise finite, infinite and undefined results in one small image.
-    image = np.zeros((5, 7), dtype=np.float64)
-    image[:2, :2] = ((0, 1), (3, 2))
-    image[3:, :2] = 3
-    image[4, 6] = 1
+    # Real CT and stored background cover finite and singular differences.
+    # The ROI includes disconnected components and one center without neighbors.
+    image = hcc_background((5, 7)) if constant else hcc_patch((5, 7))[0]
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[:2, :2] = 1
     mask[3:, :2] = 1
@@ -32,14 +31,13 @@ def test_ngtdm_map_selection_matches_independent_neighborhood_definitions(
     result = extract(
         image, mask,
         settings=settings_for("pyradiomics",
-            bin_width=1, features=names, masked_kernel=masked),
+            bin_width=10, bin_anchor=-2200, features=names, masked_kernel=masked),
         mode="voxel",
     )
     assert set(result.features) == {f"original_{name}" for name in names}
     centers = np.argwhere(mask > 0)
     sampling_mask = mask.astype(bool) if masked else np.ones(image.shape, dtype=bool)
-    # Bin width one at anchor zero maps source 0,1,2,3 to levels 1,2,3,4.
-    bins = image.astype(np.int32) + 1
+    bins = np.floor((image + 2200) / 10).astype(np.int32) + 1
     expected: dict[str, list[float]] = {name: [] for name in selected}
     for center in centers:
         window = tuple(slice(max(0, c - 1), min(size, c + 2))

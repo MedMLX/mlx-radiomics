@@ -19,3 +19,11 @@ def maximum_filter(
     mode: Literal["constant"],
     cval: float,
 ) -> NDArray[np.bool_]: ...
+
+def zoom(
+    input: NDArray[np.generic],
+    zoom: tuple[float, ...],
+    *,
+    order: int = 3,
+    prefilter: bool = True,
+) -> NDArray[np.generic]: ...

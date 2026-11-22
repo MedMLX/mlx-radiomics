@@ -5,11 +5,12 @@ box sums or directly enumerated separable kernels.
 """
 
 from itertools import product
-from math import fsum, prod
+from math import fsum
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from radiomics_reference.real_images import hcc_crop
 
 from mlxradiomics.config.filtering import FilterPadding, OrientationPooling
 from mlxradiomics.filters import convolution as filters
@@ -22,7 +23,8 @@ from mlxradiomics.numerics.runtime import mx
 def test_fused_mean_matches_independent_dense_box(
     planar: bool, padding: FilterPadding,
 ) -> None:
-    image = np.random.default_rng(213).integers(-100, 101, (4, 5, 7)).astype(np.float32)
+    ct, _, _ = hcc_crop(np.s_[105:109, 215:220, 62:69])
+    image = ct.astype(np.float32)
     support, constant = 5, 13.0
     axes = tuple(range(1 if planar else 0, image.ndim))
     widths = [(support // 2, support // 2) if axis in axes else (0, 0)
@@ -81,7 +83,8 @@ def _direct_wavelet_band(
 def test_wavelet_bands_match_independent_dense_kernels(
     shape: tuple[int, ...], planar: bool, level: int,
 ) -> None:
-    image = np.arange(prod(shape), dtype=np.float64).reshape(shape) % 23 - 11
+    crop = np.s_[105:110, 215:222, 64] if len(shape) == 2 else np.s_[105:108, 215:220, 62:69]
+    image, _, _ = hcc_crop(crop)
     low, high, constant = (0.5, 1.0, 0.5), (0.5, 0.0, -0.5), 7.0
     axes = 2 if planar else len(shape)
     # Reverse order ensures the cached path is not tied to an all-low-first bank.

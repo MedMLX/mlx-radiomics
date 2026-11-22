@@ -10,7 +10,7 @@ Extract radiomics features and voxel maps on the Apple Silicon GPU with native M
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
-[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalogue](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md)
+[Getting started](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/getting-started.md) · [Python API](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md) · [Feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md)
 
 <img src="https://raw.githubusercontent.com/MedMLX/mlx-radiomics/main/docs/feature-maps.png" alt="CT tumor ROI and six radiomics feature-map overlays" width="100%">
 
@@ -20,25 +20,23 @@ Extract radiomics features and voxel maps on the Apple Silicon GPU with native M
 | :--- | :--- |
 | Aligned image + integer label mask | ROI features (JSON/CSV) or one float32 NIfTI map per feature |
 
-No model weights to download.
-
-PyRadiomics feature names and parameter files, with configurable IBSI conventions.
-Requires Apple Silicon with Metal.
+PyRadiomics feature names and parameter files, with configurable IBSI conventions. No
+model weights to download. Requires Apple Silicon with Metal.
 
 ## Install
 
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install mlxradiomics
+uv pip install "mlxradiomics>=1.1.0"
 ```
 
-Install `mlxradiomics[lbp]` for LBP3D derived images.
+| Extra | Adds |
+| :--- | :--- |
+| `mlxradiomics[lbp]` | LBP3D derived images |
+| `mlxradiomics[viz]` | Static feature-map figures: `mlxradiomics.viz` provides five perceptually uniform palettes with reversed variants, ROI overlays, whole-ROI histograms, and PNG/PDF/SVG export |
 
-Install `mlxradiomics[viz]` for static feature-map figures.
-`mlxradiomics.viz` provides five perceptually uniform palettes with reversed
-variants, ROI overlays, whole-ROI histograms, and PNG/PDF/SVG export. See the
-[visualization guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/visualization.md) and
+See the [visualization guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/visualization.md) and
 [runnable example](https://github.com/MedMLX/mlx-radiomics/blob/main/examples/visualize_feature_maps.py).
 
 ## Python API
@@ -91,15 +89,22 @@ saved.metadata["settings"]                   # effective extraction settings
 | Voxel maps in memory | `extract(image, mask, mode="voxel")` | `extract_files(image_path, mask_path, mode="voxel")` | `Result[NDArray[np.float64]]` |
 | Voxel maps on disk | `export(image, mask, output_dir)` | `export_files(image_path, mask_path, output_dir)` | `MapExport(report, maps, metadata)` |
 
-Options are keyword-only. Use `settings=` for features and binning,
-`transforms=` for derived images, and `spacing=` for array voxel sizes in
-NumPy axis order. File operations read geometry from the image. Array extraction warns when
-`spacing` is omitted and assumes 1 mm on each axis. Array `export` writes zero
-origin and identity direction; use file operations for scanner-aligned output,
-or explicitly acknowledge synthetic coordinates with `allow_synthetic_geometry=True`.
+Options are keyword-only:
 
-Feature arithmetic is float32. In-memory float64 maps hold those float32 results,
-not higher-precision calculations; saved maps and streamed batches are float32.
+| Option | Sets |
+| :--- | :--- |
+| `settings=` | Features and binning |
+| `transforms=` | Derived images |
+| `spacing=` | Array voxel sizes in NumPy axis order |
+
+- **Geometry:** file operations read geometry from the image. Array extraction warns
+  when `spacing` is omitted and assumes 1 mm on each axis. Array `export` writes zero
+  origin and identity direction; use file operations for scanner-aligned output, or
+  explicitly acknowledge synthetic coordinates with `allow_synthetic_geometry=True`.
+- **Precision:** feature arithmetic is float32. In-memory float64 maps hold those float32
+  results, not higher-precision calculations. Pass `map_dtype="float32"` to `extract`
+  or `extract_files` to halve retained map storage. Saved maps and streamed batches
+  are float32.
 
 Extraction results expose `.features` and `.metadata`; exports expose `.report`,
 `.maps` and `.metadata`. The [Python guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md)
@@ -128,10 +133,11 @@ featureClass:
   glcm: [Contrast, JointEntropy]
 ```
 
-`imageType` keys: `Original`, `Square`, `SquareRoot`, `Logarithm`, `Exponential`,
-`Gradient`, `Wavelet`, `LoG`, `LBP2D`, `LBP3D`, `Mean`, `Laws`, `Gabor`,
-`SeparableWavelet`. `Simoncelli` (alias `NonseparableWavelet`) and `Riesz`
-are recognized but cannot run on this release; see [Limits](#limits).
+| `imageType` keys | Status |
+| :--- | :--- |
+| `Original`, `Square`, `SquareRoot`, `Logarithm`, `Exponential`, `Gradient`, `Wavelet`, `LoG`, `LBP2D`, `LBP3D`, `Mean`, `Laws`, `Gabor`, `SeparableWavelet` | Supported |
+| `Simoncelli` (alias `NonseparableWavelet`), `Riesz` | Recognized but cannot run on this release; see [Limits](#limits) |
+
 See [parameter files](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/parameters.md) for filter options and
 [conventions](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md#conventions) for definition settings.
 
@@ -166,7 +172,7 @@ Calculation conventions such as kurtosis, shape covariance divisor, NGTDM
 singular cases and fixed-bin-size origin are independent `Settings` fields with
 IBSI defaults. Select each alternative explicitly; see
 [Conventions](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/python-api.md#conventions).
-The [feature catalogue](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalogue) lists public names and
+The [feature catalog](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/features.md#catalogue) lists public names and
 their IBSI identifiers.
 
 ## MedMLX and automation
@@ -190,18 +196,21 @@ The MCP `run_model` tool takes the arguments of `mlxradiomics.medmlx.run` below.
 from mlxradiomics.medmlx import run
 
 result = run(image_path="image.nii.gz", mask_path="mask.nii.gz", output_dir="features")
-result["files"]["features_json"]  # path to the report
+result["outputs"]["features"]  # path to the report
 ```
 
 ### Inputs and outputs
 
-Use a 2D or 3D NIfTI/NRRD image and an integer label mask on the same grid.
-`label` defaults to 1. ROI mode writes `features.json` and `features.csv`;
-`voxel=True` writes float32 NIfTI maps under `maps/`, zero outside the ROI.
-Set `overwrite=True` to replace existing outputs.
+Use a 2D or 3D NIfTI/NRRD image and an integer label mask on the same grid. `label`
+defaults to 1. Set `overwrite=True` to replace existing outputs.
+
+| Mode | Writes |
+| :--- | :--- |
+| ROI (default) | `features.json` (role `features`) and `features.csv` (role `features_table`) |
+| `voxel=True` | float32 NIfTI maps under `maps/`, zero outside the ROI |
 
 Feature keys include image, family and name, such as `original_glcm_Contrast`.
-The result contains `outputs`, `files` and `details`. See the
+The result contains `outputs`, `artifacts` and `details`. See the
 [runner guide](https://github.com/MedMLX/mlx-radiomics/blob/main/docs/guide/runner.md)
 for all arguments, report fields, geometry and error handling.
 

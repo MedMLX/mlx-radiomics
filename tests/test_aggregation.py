@@ -11,6 +11,7 @@ from conftest import Conventions, settings_for
 from numpy.typing import NDArray
 from radiomics_reference.catalogue import glcm_matrix, size_features
 from radiomics_reference.mathematics import ngtdm_features
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics import Settings
 from mlxradiomics.config.settings import (
@@ -130,9 +131,9 @@ def _reference_directional(
 
 
 def _fixture() -> tuple[NDArray[np.int32], NDArray[np.bool_]]:
-    image = np.ones((4, 4, 5), dtype=np.int32)
-    image[1] = 1 + np.indices((4, 5)).sum(axis=0) % 3
-    image[3] = 3
+    source = hcc_patch((4, 4, 5))[0]
+    # Three HU strata retain the source spatial pattern, including constant slices.
+    image = (1 + np.minimum(2, (source - source.min()) * 3 / np.ptp(source))).astype(np.int32)
     mask = np.ones(image.shape, dtype=bool)
     mask[1, 1:3, 2:4] = False
     mask[2] = False
@@ -187,8 +188,8 @@ def test_directional_aggregation(
 
 
 def test_2d_average_weights_each_valid_direction_matrix_equally() -> None:
-    image = np.zeros((2, 3, 3), dtype=np.float64)
-    image[0, 1] = (0, 1, 0)
+    image = hcc_patch((2, 3, 3))[0]
+    image = np.floor((image - image.min()) / 10)
     mask = np.zeros(image.shape, dtype=np.uint8)
     mask[0, 1] = 1
     mask[1] = 1
@@ -197,9 +198,11 @@ def test_2d_average_weights_each_valid_direction_matrix_equally() -> None:
         settings=Settings(features=("glcm_Contrast",), bin_width=1,
                           glcm_aggregation="2d_average", slice_axis=0),
     )
-    # The first slice has one direction with contrast one; the second has four
-    # directions with contrast zero. The declared policy averages all five matrices.
-    np.testing.assert_allclose(actual.features["original_glcm_Contrast"], 1 / 5,
+    # The narrow first slice has one direction; the full second slice has four.
+    # Enumerate their matrices independently, with equal weight per valid direction.
+    bins = image.astype(np.int32) + 1
+    target = _reference_directional(bins, mask.astype(bool), "glcm", "2d_average", 0)
+    np.testing.assert_allclose(actual.features["original_glcm_Contrast"], target["Contrast"],
                                rtol=1e-6, atol=1e-7)
 
 

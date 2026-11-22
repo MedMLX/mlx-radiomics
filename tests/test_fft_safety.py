@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pytest
+from radiomics_reference.real_images import hcc_patch
 
 from mlxradiomics.config.filtering import FilterPadding, FourierGrid, RieszBase
 from mlxradiomics.config.settings import Settings
@@ -120,7 +121,7 @@ def test_low_level_fft_entry_points_refuse_before_fft(
 ) -> None:
     # Direct callers must not bypass the disabled status and reach a batched FFT.
     with pytest.raises(ValueError, match=_DISABLED):
-        entry_point(mx.zeros((8, 8)))
+        entry_point(mx.array(hcc_patch((8, 8))[0].astype(np.float32)))
 
 
 @_REFUSING
@@ -132,7 +133,7 @@ def test_low_level_fft_entry_points_refuse_before_fft(
 def test_fft_filters_are_rejected_before_extraction(options: TransformSettings) -> None:
     shape = (8, 8, 8)
     spacing = (1.0, 1.0, 1.0)
-    image = np.arange(8**3, dtype=np.float64).reshape(shape)
+    image = hcc_patch(shape)[0]
     mask = np.zeros(shape, dtype=np.uint8)
     mask[1:-1, 1:-1, 1:-1] = 1
 

@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.config.transforms import ImageType, TransformSettings
 from mlxradiomics.contracts.results import Result
-from mlxradiomics.contracts.types import Features, HostArray, VoxelSink
+from mlxradiomics.contracts.types import Features, HostArray, MapDtype, VoxelArray, VoxelSink
 from mlxradiomics.contracts.validity import accumulate_validity, empty_validity
 from mlxradiomics.imaging.preprocessing import PreparedInput
 from mlxradiomics.imaging.transforms import feature_images
@@ -170,6 +170,7 @@ def extract_lbp_kurtosis(
     voxel: bool,
     histogram_method: str,
     voxel_sink: VoxelSink | None,
+    map_dtype: MapDtype = "float64",
     shape_mask: HostArray | None = None,
     _prepared_masks: PreparedInput | None = None,
 ) -> Result:
@@ -194,6 +195,7 @@ def extract_lbp_kurtosis(
             voxel=voxel,
             histogram_method=histogram_method,
             voxel_sink=voxel_sink,
+            map_dtype=map_dtype,
             shape_mask=shape_mask,
             _prepared_masks=_prepared_masks,
         )
@@ -213,8 +215,8 @@ def extract_lbp_kurtosis(
             for axis in range(image.ndim)
         )
         affected = maximum_filter(invalid, size=widths, mode="constant", cval=0)
-        retained = (
-            {name: np.zeros(image.shape, dtype=np.float64) for name in validity}
+        retained: dict[str, VoxelArray] = (
+            {name: np.zeros(image.shape, dtype=map_dtype) for name in validity}
             if voxel_sink is None
             else {}
         )
@@ -240,6 +242,7 @@ def extract_lbp_kurtosis(
             voxel=True,
             histogram_method=histogram_method,
             voxel_sink=consume,
+            map_dtype=map_dtype,
             shape_mask=shape_mask,
             _prepared_masks=_prepared_masks,
         )
@@ -251,6 +254,7 @@ def extract_lbp_kurtosis(
             settings=settings,
             spacing=spacing,
             histogram_method=histogram_method,
+            map_dtype=map_dtype,
             shape_mask=shape_mask,
             _prepared_masks=_prepared_masks,
         )
