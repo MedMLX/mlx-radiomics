@@ -9,7 +9,7 @@ from collections.abc import Collection
 from mlxradiomics.numerics.count_statistics import count_entropy
 from mlxradiomics.numerics.reduction import sum_rows
 from mlxradiomics.numerics.runtime import mx
-from mlxradiomics.numerics.sparse_counts import coalesce
+from mlxradiomics.numerics.sparse_counts import coalesce, compact_cells, pending_cells
 
 
 def use_sparse_size(ng: int, ns: int) -> bool:
@@ -32,6 +32,7 @@ def sparse_size_statistics(
     *,
     voxel_count: mx.array | int | None = None,
     total_count: mx.array | None = None,
+    coalesced: bool = False,
 ) -> dict[str, mx.array]:
     """Evaluate size-matrix features from padded ``(batch, occupied cells)`` arrays.
 
@@ -39,7 +40,12 @@ def sparse_size_statistics(
     nonnegative integers; padded entries have zero count. GLDZM requires an
     explicit voxel count because its distance index cannot reconstruct volume.
     All count and feature arithmetic runs on Metal. Only the number of occupied
-    cells and marginal entries crosses to the host to allocate compact reductions.
+    cells and marginal entries crosses to the host to allocate compact reductions;
+    both marginals share one wait.
+
+    ``coalesced`` states that the arrays come from ``sparse_counts.coordinate_counts``
+    or ``merge_counts``. A single such row is already sorted, unique and positive (or
+    one zero cell), which re-coalescing would reproduce, so it is used as given.
     """
     spec = {
         "gldm": ("Dependence", "SmallDependence", "LargeDependence", "LowGrayLevel",
@@ -74,9 +80,6 @@ def sparse_size_statistics(
     def reduce(values: mx.array) -> mx.array:
         return sum_rows(values[None, :])[0]
 
-    def marginal(indices: mx.array, weights: mx.array) -> tuple[mx.array, mx.array]:
-        return coalesce(mx.where(weights > 0, indices, -1), weights)
-
     def integer_variance(
         indices: mx.array, weights: mx.array, safe_total: mx.array,
     ) -> mx.array:
@@ -92,7 +95,12 @@ def sparse_size_statistics(
     for row in range(counts.shape[0]):
         # Fix the occupied-cell order and remove batch padding before any
         # floating-point reduction, independently of other rows' cell counts.
-        row_keys, row_counts = coalesce(mx.where(counts[row] > 0, keys[row], -1), counts[row])
+        if coalesced and counts.shape[0] == 1:
+            row_keys, row_counts = keys[0], counts[0]
+        else:
+            row_keys, row_counts = coalesce(
+                mx.where(counts[row] > 0, keys[row], -1), counts[row],
+            )
         exact = row_counts.astype(mx.int64)
         total = totals[row]
         total_f = total.astype(mx.float32)
@@ -101,26 +109,35 @@ def sparse_size_statistics(
         p = exact.astype(mx.float32) / safe_total
         i_squared, j_squared = i.astype(mx.float32)**2, j.astype(mx.float32)**2
         output: dict[str, mx.array] = {}
+        marginal_axes = [
+            (indices, group, variance_name)
+            for indices, group, variance_name in (
+                (i, "GrayLevel", "GrayLevelVariance"), (j, size, variance),
+            )
+            if any(wanted(name) for name in (
+                group + "NonUniformity", group + "NonUniformityNormalized", variance_name,
+            ))
+        ]
+        marginals = compact_cells([
+            pending_cells(mx.where(exact > 0, indices, -1), exact)
+            for indices, _, _ in marginal_axes
+        ])
 
         if wanted(small + "Emphasis"):
             output[small + "Emphasis"] = reduce(p / j_squared)
         if wanted(large + "Emphasis"):
             output[large + "Emphasis"] = reduce(p * j_squared)
-        for indices, group, variance_name in (
-            (i, "GrayLevel", "GrayLevelVariance"), (j, size, variance),
+        for (_, group, variance_name), (levels, weights) in zip(
+            marginal_axes, marginals, strict=True,
         ):
-            if any(wanted(name) for name in (
-                group + "NonUniformity", group + "NonUniformityNormalized", variance_name,
-            )):
-                levels, weights = marginal(indices, exact)
-                if wanted(group + "NonUniformity") or wanted(group + "NonUniformityNormalized"):
-                    squared = reduce(weights.astype(mx.float32)**2)
-                    if wanted(group + "NonUniformity"):
-                        output[group + "NonUniformity"] = squared / total_f
-                    if wanted(group + "NonUniformityNormalized"):
-                        output[group + "NonUniformityNormalized"] = squared / total_f**2
-                if wanted(variance_name):
-                    output[variance_name] = integer_variance(levels, weights, safe_total)
+            if wanted(group + "NonUniformity") or wanted(group + "NonUniformityNormalized"):
+                squared = reduce(weights.astype(mx.float32)**2)
+                if wanted(group + "NonUniformity"):
+                    output[group + "NonUniformity"] = squared / total_f
+                if wanted(group + "NonUniformityNormalized"):
+                    output[group + "NonUniformityNormalized"] = squared / total_f**2
+            if wanted(variance_name):
+                output[variance_name] = integer_variance(levels, weights, safe_total)
         if wanted(entropy):
             output[entropy] = count_entropy(exact[None, :], total[None], mx.float32)[0]
         if wanted(low + "Emphasis"):

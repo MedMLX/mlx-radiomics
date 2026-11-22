@@ -308,7 +308,7 @@ def _batched_results(
                 )
                 values = sparse_size_statistics(
                     matrix.cell_keys, matrix.counts, matrix.column_count, family, names,
-                    voxel_count=matrix.voxels, total_count=count,
+                    voxel_count=matrix.voxels, total_count=count, coalesced=True,
                 )
                 active = count > 0
             yield matrix, values, active, True
@@ -457,7 +457,7 @@ def aggregated_texture_statistics(
                     assert matrix.column_count is not None
                     features = sparse_size_statistics(
                         matrix.cell_keys, matrix.counts, matrix.column_count, family, names,
-                        voxel_count=matrix.voxels, total_count=count,
+                        voxel_count=matrix.voxels, total_count=count, coalesced=True,
                     )
                 active = count > 0
             mcc_defined = active

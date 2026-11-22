@@ -627,7 +627,7 @@ def zone_statistics(
     if not fixed_columns and use_sparse_size(ng, maximum_size):
         keys, counts = coordinate_counts(bins, sizes, starts, maximum_size)
         return {f"glszm_{k}": value for k, value in sparse_size_statistics(
-            keys, counts, maximum_size, "glszm", selected,
+            keys, counts, maximum_size, "glszm", selected, coalesced=True,
         ).items()}
     counts = count_matrix(bins, sizes, starts, ng, maximum_size)
     return {f"glszm_{k}": v for k, v in size_statistics(counts, "glszm", selected).items()}
