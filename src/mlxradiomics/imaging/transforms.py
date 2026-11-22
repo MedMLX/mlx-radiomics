@@ -31,7 +31,6 @@ from mlxradiomics.filters import (
     FFT_AVAILABLE,
     FFT_DISABLED_REASON,
     gabor_responses,
-    laws_energy,
     laws_response,
     log_response,
     mean_response,
@@ -41,9 +40,13 @@ from mlxradiomics.filters import (
     separable_wavelet_responses,
     simoncelli_response,
 )
+from mlxradiomics.filters._kernels import scaled_central_difference
+from mlxradiomics.filters.convolution import laws_energy_response
 from mlxradiomics.filters.lbp2d import lbp2d
 from mlxradiomics.filters.riesz_steering import align_riesz, riesz_multi_indices
 from mlxradiomics.numerics.runtime import evaluate, mx
+
+_FLOAT32 = np.finfo(np.float32)
 
 
 @dataclass(frozen=True)
@@ -483,7 +486,10 @@ def _wavelets(
                        approximation[crop])
 
 
-def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) -> mx.array:
+def _gradient(
+    image: mx.array, spacing: tuple[float, ...], use_spacing: bool,
+    window: tuple[slice, ...] | None,
+) -> mx.array:
     """Gradient magnitude from central differences ``(x[i+1] - x[i-1]) / 2`` per axis.
 
     Edge voxels are replicated at the boundary, so edge differences span one step but are
@@ -493,12 +499,20 @@ def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) ->
     it after the square root: squaring ``1e-30`` underflowed and squaring ``1e20``
     overflowed although both magnitudes are normal float32 values.
     """
+    region = window or (slice(None),) * image.ndim
     components: list[mx.array] = []
     for axis, size in enumerate(image.shape):
-        indexes = mx.arange(size, dtype=mx.int32)
-        left = mx.take(image, mx.maximum(indexes - 1, 0), axis=axis)
-        right = mx.take(image, mx.minimum(indexes + 1, size - 1), axis=axis)
+        # Keep the full differentiated axis so neighbors at a window edge still
+        # come from the input image. The other axes only need output coordinates.
+        source = image[(*region[:axis], slice(None), *region[axis + 1:])]
+        start, stop, _ = region[axis].indices(size)
+        indexes = mx.arange(start, stop, dtype=mx.int32)
+        left = mx.take(source, mx.maximum(indexes - 1, 0), axis=axis)
+        right = mx.take(source, mx.minimum(indexes + 1, size - 1), axis=axis)
         step = spacing[axis] if use_spacing else 1.0
+        if 0 < step < float(_FLOAT32.tiny) or step > float(_FLOAT32.max):
+            components.append(scaled_central_difference(left, right, step))
+            continue
         difference = right - left
         halved = mx.where(
             mx.isinf(difference) & mx.isfinite(right) & mx.isfinite(left),
@@ -510,7 +524,7 @@ def _gradient(image: mx.array, spacing: tuple[float, ...], use_spacing: bool) ->
     for component in components[1:]:
         largest = mx.maximum(largest, mx.abs(component))
     divisor = mx.where((largest > 0) & mx.isfinite(largest), largest, 1)
-    squared = mx.zeros_like(image)
+    squared = mx.zeros_like(largest)
     for component in components:
         squared = squared + (component / divisor) ** 2
     return mx.where(mx.isinf(largest), largest, largest * mx.sqrt(squared))
@@ -558,9 +572,9 @@ def feature_images(
             distinguish constant source fields and by LBP2D to compare
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
-            is cropped to it. Wavelets then filter only the window plus their tap reach
-            where that stays inside the image, with bit-identical window values; other
-            transforms still run on the whole image before cropping.
+            is cropped to it. Wavelets limit the input where their tap reach allows.
+            Gabor, LoG, gradient, mean and Laws energy evaluate the requested
+            output using the full image's filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
 
@@ -580,9 +594,7 @@ def feature_images(
         source_dtype=source_dtype, source_residual=source_residual,
         source_tail=source_tail, window=window, _finite_input=_finite_input,
     ):
-        # Wavelets arrive cropped; full-grid images are cut to the window here. A cropped
-        # wavelet shares the full shape only when the window spans the whole image, where
-        # these slices are the identity.
+        # Window-aware filters can arrive cropped. A full-size window is the identity.
         if window is not None and feature.image.shape == image.shape:
             feature = FeatureImage(feature.name, feature.image[window])
         yield feature
@@ -601,7 +613,7 @@ def _feature_images(
     window: tuple[slice, ...] | None = None,
     _finite_input: bool = False,
 ) -> Iterator[FeatureImage]:
-    """Generate ``feature_images`` outputs; only wavelets are cropped to ``window``."""
+    """Generate full or windowed responses for the requested filters."""
     if image.ndim not in (2, 3) or len(spacing) != image.ndim:
         raise ValueError("feature images require aligned 2D/3D spacing")
     # Validate the complete name set before the first transform runs or a streaming
@@ -617,6 +629,11 @@ def _feature_images(
         source_tail = source_tail.astype(mx.float32)
     maximum = mx.max(mx.abs(image))
     zero_scale: bool | None = None
+    contiguous_window = None
+    if window is not None and len(window) == image.ndim:
+        bounds = tuple(part.indices(size) for part, size in zip(window, image.shape, strict=True))
+        if all(step == 1 and start < stop for start, stop, step in bounds):
+            contiguous_window = tuple(slice(start, stop) for start, stop, _ in bounds)
     for kind in options.image_types:
         if kind == ImageType.LBP2D:
             values = lbp2d(
@@ -650,7 +667,7 @@ def _feature_images(
                 for sigma in options.log.sigma:
                     values = log_response(
                         image, spacing, sigma, options.log.cutoff, options.log.planar,
-                        options.log.padding, options.log.constant,
+                        options.log.padding, options.log.constant, window=window,
                     )
                     evaluate(values)
                     yield FeatureImage(_log_name(sigma, options), values)
@@ -659,26 +676,29 @@ def _feature_images(
 
             for sigma in options.log.sigma:
                 yield FeatureImage(
-                    _log_name(sigma, options), laplacian_gaussian(image, spacing, sigma),
+                    _log_name(sigma, options),
+                    laplacian_gaussian(image, spacing, sigma, window=contiguous_window),
                 )
             continue
         if kind == ImageType.MEAN:
             values = mean_response(
                 image, options.mean.support, options.mean.padding, options.mean.constant,
-                options.mean.planar,
+                options.mean.planar, window=contiguous_window,
             )
             evaluate(values)
             yield FeatureImage(_mean_name(options), values)
             continue
         if kind == ImageType.LAWS:
-            values = laws_response(
-                image, options.laws.kernel, options.laws.padding, options.laws.constant,
-                options.laws.pooling,
-            )
-            if options.laws.energy_distance is not None:
-                values = laws_energy(
-                    values, options.laws.kernel, options.laws.energy_distance,
+            if options.laws.energy_distance is None:
+                values = laws_response(
+                    image, options.laws.kernel, options.laws.padding, options.laws.constant,
+                    options.laws.pooling,
+                )
+            else:
+                values = laws_energy_response(
+                    image, options.laws.kernel, options.laws.energy_distance,
                     options.laws.padding, options.laws.constant,
+                    options.laws.pooling, window=window,
                 )
             evaluate(values)
             yield FeatureImage(_laws_name(options), values)
@@ -689,7 +709,7 @@ def _feature_images(
                     image, spacing, sigma, wavelength, options.gabor.gamma,
                     options.gabor.theta, options.gabor.response,
                     options.gabor.slice_axis, options.gabor.padding,
-                    options.gabor.constant, options.gabor.pooling,
+                    options.gabor.constant, options.gabor.pooling, window=window,
                 )
                 plane = _gabor_plane_tag(options, image.ndim)
                 for index, values in enumerate(responses):
@@ -765,7 +785,9 @@ def _feature_images(
                 mx.sign(image) * mx.log1p(mx.abs(image)) * (maximum / mx.log1p(maximum))
             ),
             ImageType.EXPONENTIAL: lambda: mx.power(maximum, image / maximum),
-            ImageType.GRADIENT: lambda: _gradient(image, spacing, options.gradient.use_spacing),
+            ImageType.GRADIENT: lambda: _gradient(
+                image, spacing, options.gradient.use_spacing, contiguous_window,
+            ),
         }[kind]()
         evaluate(values)
         yield FeatureImage(kind.value, values)

@@ -1,4 +1,4 @@
-"""Voxel-map GLCM features with one fused Metal pass per center and direction.
+"""Voxel-map GLCM features from local pairs and occupied counts on Metal.
 
 A voxel map's local neighborhood is small: a radius-1 cube has 27 voxels, so one
 direction has at most 18 voxel pairs and 36 symmetric counts. The dense path builds
@@ -6,6 +6,8 @@ an ``Ng x Ng`` matrix per center and direction and evaluates every feature with
 generic array operations over all ``Ng**2`` cells. Here one thread builds the
 occupied cells of one center's matrix for one direction and evaluates the requested
 ordinary features from them; a second thread per center averages the directions.
+Features linear in pair counts sum their integer numerators and average
+directions in one thread per center, without constructing the matrix.
 
 Arithmetic contracts of the dense path are retained or tightened:
 
@@ -27,9 +29,9 @@ Arithmetic contracts of the dense path are retained or tightened:
   eigenvalue is the largest singular value; the Gram square is formed only for
   asymmetric matrices.
 
-Values are not bit-identical to the dense path, whose reduction trees run over the
-zero cells as well. Eligibility is limited to neighborhoods of at most 27 voxels and
-the native texture definitions; other settings use the dense path.
+The dense path forms float32 probabilities before reducing over all matrix cells.
+Occupied-count kernels support windows up to 27 voxels. Pair means support windows
+up to 125 voxels when their integer numerators fit.
 """
 
 from __future__ import annotations
@@ -52,8 +54,31 @@ _ORDINARY = (
     "SumSquares",
 )
 _ALIASES = {"Dissimilarity": "DifferenceAverage", "SumVariance": "ClusterTendency"}
+# These numerators are additive over pairs, even before identical pairs are counted.
+# Each entry has an asymmetric and a symmetric contribution.
+_PAIR_NUMERATORS = {
+    "Autocorrelation": ("i * j", "2 * i * j"),
+    "JointAverage": ("i", "i + j"),
+    "Contrast": ("delta * delta", "2 * delta * delta"),
+    "DifferenceAverage": ("delta", "2 * delta"),
+    "SumAverage": ("i + j", "2 * (i + j)"),
+}
 MAX_WINDOW = 27
+_PAIR_MEAN_MAX_WINDOW = 125
 _INT64_LIMIT = 2**62
+
+
+def pair_means_only(names: tuple[str, ...]) -> bool:
+    """Return whether all selected features can be reduced directly over pairs."""
+    return bool(names) and all(_ALIASES.get(name, name) in _PAIR_NUMERATORS for name in names)
+
+
+def pair_means_eligible(window: int, pairs: tuple[int, ...], ng: int, symmetric: bool) -> bool:
+    """Bound local storage and integer numerators without a gray-level count matrix."""
+    if not pairs or window > _PAIR_MEAN_MAX_WINDOW:
+        return False
+    total = max(pairs) * (2 if symmetric else 1)
+    return total * max(ng * ng, 2 * ng) < _INT64_LIMIT
 
 
 def eligible(window: int, pairs: tuple[int, ...], ng: int, symmetric: bool) -> bool:
@@ -186,10 +211,11 @@ def _tables(
     return source, counts
 
 
-def window_code(ndim: int, window: int) -> str:
+def window_code(ndim: int, window: int, *, levels: str | None = None) -> str:
     """Return Metal source loading a center's neighborhood gray levels into ``levels``.
 
-    Level 0 marks a position outside the image or mask.
+    Level 0 marks a position outside the image or mask. A caller-supplied storage
+    declaration must hold the entire window and its admitted gray-level range.
     """
     coordinate = " && ".join(
         f"(z{a} = center_at[{a}] + WINDOW[q * {ndim} + {a}]) >= 0 && z{a} < dims[{a}]"
@@ -203,7 +229,7 @@ def window_code(ndim: int, window: int) -> str:
     return f"""
         int center_at[{ndim}];
         for (int a = 0; a < {ndim}; a++) center_at[a] = centers[center * {ndim} + a];
-        int levels[{window}];
+        {levels or f"int levels[{window}];"}
         for (int q = 0; q < {window}; q++) {{
             int {declarations};
             bool inside = {coordinate};
@@ -211,6 +237,71 @@ def window_code(ndim: int, window: int) -> str:
             levels[q] = inside && mask[flat] ? bins[flat] : 0;
         }}
     """
+
+
+def _direction_window_code(local_shape: tuple[int, ...], directions: int) -> str:
+    """Assign one thread to a local window and direction."""
+    return f"""
+        uint t = thread_position_in_grid.x;
+        uint total_centers = centers_shape[0];
+        if (t >= total_centers * {directions}) return;
+        uint center = t / {directions};
+        int d = int(t % {directions});
+        {window_code(len(local_shape), prod(local_shape))}
+    """
+
+
+@lru_cache(maxsize=64)
+def _pair_mean_kernel(
+    local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...], symmetric: bool,
+    slots: tuple[int, ...],
+) -> MetalKernel:
+    """Compile exact integer pair sums and ordered directional means per center."""
+    tables, _ = _tables(local_shape, offsets)
+    count = len(slots)
+    totals = "\n".join(f"long total_{k} = 0;" for k in range(count))
+    averages = "\n".join(f"Acc average_{k} = {{0, 0}};" for k in range(count))
+    increments = "\n".join(
+        f"total_{k} += {_PAIR_NUMERATORS[_ORDINARY[slot]][symmetric]};"
+        for k, slot in enumerate(slots)
+    )
+    add_directions = "\n".join(
+        f"acc_add(average_{k}, q_div(total_{k}, n));" for k in range(count)
+    )
+    stores = "\n".join(
+        f"averaged[ulong({k}) * total_centers + center] = "
+        f"angles > 0 ? acc_value(average_{k}) / float(angles) : NAN;" for k in range(count)
+    )
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_local_glcm_pair_means",
+        input_names=["bins", "mask", "centers", "dims"],
+        output_names=["averaged"],
+        header=KERNEL_HEADER + tables,
+        source=f"""
+        uint center = thread_position_in_grid.x;
+        uint total_centers = centers_shape[0];
+        if (center >= total_centers) return;
+        {window_code(len(local_shape), prod(local_shape))}
+        int angles = 0;
+        {averages}
+        for (int d = 0; d < {len(offsets)}; d++) {{
+            long n = 0;
+            {totals}
+            for (int p = PAIR_START[d]; p < PAIR_START[d + 1]; p++) {{
+                long i = levels[PAIR_LEFT[p]], j = levels[PAIR_RIGHT[p]];
+                if (i == 0 || j == 0) continue;
+                long delta = i > j ? i - j : j - i;
+                n += {2 if symmetric else 1};
+                {increments}
+            }}
+            if (n > 0) {{
+                angles++;
+                {add_directions}
+            }}
+        }}
+        {stores}
+        """,
+    ))
 
 
 def _cells_code(window: int, max_cells: int, symmetric: bool) -> str:
@@ -339,7 +430,6 @@ def _direction_kernel(
     """
     tables, counts = _tables(local_shape, offsets)
     window = prod(local_shape)
-    ndim = len(local_shape)
     directions = len(offsets)
     max_cells = max(counts) * (2 if symmetric else 1)
     features = len(slots)
@@ -358,12 +448,7 @@ def _direction_kernel(
         f"        out[{column}] = {_STORES[slot]};" for column, slot in enumerate(slots)
     )
     source = f"""
-        uint t = thread_position_in_grid.x;
-        uint total_centers = centers_shape[0];
-        if (t >= total_centers * {directions}) return;
-        uint center = t / {directions};
-        int d = int(t % {directions});
-        {window_code(ndim, window)}
+        {_direction_window_code(local_shape, directions)}
         {_cells_code(window, max_cells, symmetric)}
         active[t] = int(n);
         if (n == 0) return;
@@ -452,7 +537,6 @@ def _mcc_kernel(
     """
     tables, counts = _tables(local_shape, offsets)
     window = prod(local_shape)
-    ndim = len(local_shape)
     directions = len(offsets)
     max_cells = max(counts) * (2 if symmetric else 1)
     # Symmetric counts give a symmetric residual R; MCC is its largest |eigenvalue|.
@@ -472,12 +556,7 @@ def _mcc_kernel(
             }}
         """
     source = f"""
-        uint t = thread_position_in_grid.x;
-        uint total_centers = centers_shape[0];
-        if (t >= total_centers * {directions}) return;
-        uint center = t / {directions};
-        int d = int(t % {directions});
-        {window_code(ndim, window)}
+        {_direction_window_code(local_shape, directions)}
         {_cells_code(window, max_cells, symmetric)}
         converged[t] = true;
         if (n == 0 || nr < 2 || ncol < 2) {{ mcc[t] = NAN; return; }}
@@ -632,29 +711,36 @@ def local_glcm(
     batch = centers.shape[0]
     directions = len(offsets)
     dims = mx.array(image_shape, dtype=mx.int32)
+    inputs = [bins, mask, centers, dims]
     result: dict[str, mx.array] = {}
     ordinary = tuple(name for name in names if name != "MCC")
     if ordinary:
         slots = tuple(
             sorted({_ORDINARY.index(_ALIASES.get(name, name)) for name in ordinary})
         )
-        kernel = _direction_kernel(local_shape, offsets, symmetric, slots)
-        values, active = kernel(
-            inputs=[bins, mask, centers, dims, mx.array([gray_levels], dtype=mx.int32)],
-            grid=(batch * directions, 1, 1), threadgroup=(64, 1, 1),
-            output_shapes=[(batch * directions, len(slots)), (batch * directions,)],
-            output_dtypes=[mx.float32, mx.int32],
-        )
-        averaged = _average_kernel(directions, len(slots))(
-            inputs=[values, active], grid=(batch, 1, 1), threadgroup=(64, 1, 1),
-            output_shapes=[(len(slots), batch)], output_dtypes=[mx.float32],
-        )[0]
+        if pair_means_only(ordinary):
+            [averaged] = _pair_mean_kernel(local_shape, offsets, symmetric, slots)(
+                inputs=inputs, grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+                output_shapes=[(len(slots), batch)], output_dtypes=[mx.float32],
+            )
+        else:
+            kernel = _direction_kernel(local_shape, offsets, symmetric, slots)
+            values, active = kernel(
+                inputs=[*inputs, mx.array([gray_levels], dtype=mx.int32)],
+                grid=(batch * directions, 1, 1), threadgroup=(64, 1, 1),
+                output_shapes=[(batch * directions, len(slots)), (batch * directions,)],
+                output_dtypes=[mx.float32, mx.int32],
+            )
+            [averaged] = _average_kernel(directions, len(slots))(
+                inputs=[values, active], grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+                output_shapes=[(len(slots), batch)], output_dtypes=[mx.float32],
+            )
         for name in ordinary:
             slot = _ORDINARY.index(_ALIASES.get(name, name))
             result[f"glcm_{name}"] = averaged[slots.index(slot)]
     if "MCC" in names:
         mcc, converged = _mcc_kernel(local_shape, offsets, symmetric)(
-            inputs=[bins, mask, centers, dims],
+            inputs=inputs,
             grid=(batch * directions, 1, 1), threadgroup=(64, 1, 1),
             output_shapes=[(batch * directions,), (batch * directions,)],
             output_dtypes=[mx.float32, mx.bool_],

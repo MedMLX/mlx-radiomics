@@ -1,6 +1,7 @@
 """Serialization adapters for stable report metadata."""
 
 from dataclasses import asdict
+from functools import cache
 from importlib.metadata import version
 from typing import cast
 
@@ -17,6 +18,12 @@ from mlxradiomics.contracts.types import (
     TransformPayload,
 )
 from mlxradiomics.imaging.io import Volume
+
+
+@cache
+def dependency_version(name: str) -> str:
+    """Read each installed dependency version once per extraction process."""
+    return version(name)
 
 
 def file_metadata(
@@ -44,7 +51,7 @@ def file_metadata(
         runtime = result["runtime"].copy()
         runtime["versions"] = {
             **runtime["versions"],
-            **{name: version(name) for name in ("SimpleITK", "nibabel")},
+            **{name: dependency_version(name) for name in ("SimpleITK", "nibabel")},
         }
         result["runtime"] = runtime
         result["preprocessing"] = "Host SimpleITK I/O/spatial preprocessing and float64 binning"

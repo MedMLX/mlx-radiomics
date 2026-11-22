@@ -346,6 +346,8 @@ def log_response(
     planar: bool,
     padding: FilterPadding,
     constant: float,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> mx.array:
     """IBSI 2 sampled Laplacian-of-Gaussian response (manual Eq. 4.9, ``L6PA``).
 
@@ -365,9 +367,10 @@ def log_response(
         planar: Filter each axis-0 plane of a 3-D image with a 2-D kernel.
         padding: Boundary-extension method.
         constant: Extension value used by :attr:`FilterPadding.CONSTANT`.
+        window: Optional nonempty ``start:stop`` slices in source-axis order.
 
     Returns:
-        Float32 response map with the image's shape.
+        Float32 response map on the full grid or the requested window.
     """
     if image.ndim not in (2, 3):
         raise ValueError("LoG filtering requires a 2-D or 3-D image")
@@ -377,9 +380,9 @@ def log_response(
         if image.ndim != 3:
             raise ValueError("planar LoG filtering requires a 3-D image")
         kernel = _log_kernel(image.shape[1:], spacing[1:], sigma, cutoff)
-        return convolve_planes(image, kernel, padding, constant)
+        return convolve_planes(image, kernel, padding, constant, window=window)
     kernel = _log_kernel(image.shape, spacing, sigma, cutoff)
-    return convolve_nd(image, kernel, padding, constant)
+    return convolve_nd(image, kernel, padding, constant, window=window)
 
 
 def riesz_log_responses(

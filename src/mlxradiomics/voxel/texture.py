@@ -6,7 +6,7 @@ neighborhood once and evaluates the requested family from its occupied
 :func:`mlxradiomics.features.texture.texture_statistics` with native settings:
 
 * GLRLM runs follow each unit direction of the neighborhood; directions with a run
-  are averaged with an ordinary sum, as ``run_statistics`` does.
+  contribute to the mean in direction order.
 * GLSZM zones are same-level components under the full unit neighborhood.
 * GLDM dependence counts masked neighbors at the selected distances within
   ``gldm_alpha`` gray levels; NGTDM compares eligible centers with the mean level of
@@ -62,12 +62,15 @@ def _size_names(family: str) -> dict[str, int]:
 _SIZE_NAMES = {family: _size_names(family) for family in _SPECS}
 
 _SIZE_HEADER = r"""
-inline void add_size_cell(thread int* li, thread int* lj, thread int* lc, thread int& n,
-                          int i, int j) {
+// A window holds at most 125 voxels, so size and count each fit seven bits.
+// The eligible gray-level bound leaves room for the bin above those bits.
+template <typename Cells>
+inline void add_size_cell(Cells cells, thread int& n, int i, int j) {
+    uint key = (uint(i) << 14) | (uint(j) << 7);
     for (int k = 0; k < n; k++) {
-        if (li[k] == i && lj[k] == j) { lc[k] += 1; return; }
+        if ((cells[k] & ~127u) == key) { cells[k] += 1; return; }
     }
-    li[n] = i; lj[n] = j; lc[n] = 1; n++;
+    cells[n++] = key | 1u;
 }
 
 inline void add_marginal(thread int* keys, thread long* counts, thread int& n, int key, long c) {
@@ -92,11 +95,10 @@ inline float integer_variance(thread const int* keys, thread const long* counts,
 
 // Size-family features of cells (gray level i, size j, count c); voxels is the
 // denominator of the percentage (sum c*j for runs and zones, N for dependence).
-template <int CAP>
-inline void size_features(thread const int* li, thread const int* lj, thread const int* lc,
-                          int nk, long voxels, thread float* out) {
+template <int CAP, typename Cells>
+inline void size_features(Cells cells, int nk, long voxels, thread float* out) {
     long n = 0;
-    for (int k = 0; k < nk; k++) n += lc[k];
+    for (int k = 0; k < nk; k++) n += cells[k] & 127u;
     float nf = float(n);
     Acc small = {0, 0}, low = {0, 0}, small_low = {0, 0}, small_high = {0, 0};
     Acc large_low = {0, 0}, entropy = {0, 0};
@@ -105,20 +107,22 @@ inline void size_features(thread const int* li, thread const int* lj, thread con
     long gm[CAP], sm[CAP];
     int ng = 0, ns = 0;
     for (int k = 0; k < nk; k++) {
-        long i = li[k], j = lj[k], c = lc[k];
+        int i = int(cells[k] >> 14), j = int((cells[k] >> 7) & 127u);
+        long c = cells[k] & 127u;
+        long i2 = long(i) * i, j2 = long(j) * j;
         float cf = float(c);
-        acc_add(small, cf / float(j * j));
-        large += c * j * j;
-        high += c * i * i;
-        large_high += c * i * i * j * j;
+        acc_add(small, cf / float(j2));
+        large += c * j2;
+        high += c * i2;
+        large_high += c * i2 * j2;
         energy += c * c;
-        acc_add(low, cf / float(i * i));
-        acc_add(small_low, cf / (float(i * i) * float(j * j)));
-        acc_add(small_high, float(c * i * i) / float(j * j));
-        acc_add(large_low, float(c * j * j) / float(i * i));
+        acc_add(low, cf / float(i2));
+        acc_add(small_low, cf / (float(i2) * float(j2)));
+        acc_add(small_high, float(c * i2) / float(j2));
+        acc_add(large_low, float(c * j2) / float(i2));
         acc_add(entropy, entropy_term(c, n));
-        add_marginal(gi, gm, ng, li[k], c);
-        add_marginal(sj, sm, ns, lj[k], c);
+        add_marginal(gi, gm, ng, i, c);
+        add_marginal(sj, sm, ns, j, c);
     }
     long gln = 0, snu = 0;
     for (int k = 0; k < ng; k++) gln += gm[k] * gm[k];
@@ -188,6 +192,36 @@ def _neighbor_slot(ndim: int, table: str, index: str) -> str:
     return f"local_slot({args})"
 
 
+def _run_neighbor_tables(
+    local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...],
+) -> str:
+    """Return predecessor and successor window slots for each run direction."""
+    ndim = len(local_shape)
+    positions = np.indices(local_shape, dtype=np.int32).reshape(ndim, -1).T
+    strides = np.asarray([prod(local_shape[axis + 1:]) for axis in range(ndim)], dtype=np.int32)
+    directions = np.asarray(offsets, dtype=np.int32)[:, None, :]
+    tables: list[str] = []
+    for name, adjacent in (("RUN_BACK", positions - directions),
+                           ("RUN_NEXT", positions + directions)):
+        inside = np.all((adjacent >= 0) & (adjacent < np.asarray(local_shape)), axis=-1)
+        slots = np.where(inside, adjacent @ strides, -1)
+        tables.append(_offsets_table(name, tuple(tuple(map(int, row)) for row in slots)))
+    return "\n".join(tables)
+
+
+_WIDE_GROUP = 32
+
+
+def _window_words(window: int, name: str, word: str) -> str:
+    """Use disjoint threadgroup slots to keep wide dynamic arrays off the private stack."""
+    if window <= MAX_WINDOW:
+        return f"{word} {name}[{window}];"
+    return f"""
+        threadgroup {word} {name}_shared[{_WIDE_GROUP * window}];
+        threadgroup {word}* {name} = {name}_shared + thread_position_in_threadgroup.x * {window};
+    """
+
+
 @lru_cache(maxsize=64)
 def _run_kernel(
     local_shape: tuple[int, ...], offsets: tuple[tuple[int, ...], ...], slots: tuple[int, ...],
@@ -198,45 +232,36 @@ def _run_kernel(
     directions = len(offsets)
     header = "\n".join((
         KERNEL_HEADER, _SIZE_HEADER, _window_table(local_shape),
-        _local_index_code(ndim, local_shape), _offsets_table("RUN", offsets),
-        _offsets_table("BACK", tuple(tuple(-v for v in o) for o in offsets)),
+        _run_neighbor_tables(local_shape, offsets),
     ))
-    previous = _neighbor_slot(ndim, "BACK", "d")
-    coordinates = ", ".join(f"x{a}" for a in range(ndim))
-    position = "\n".join(
-        f"int x{a} = WINDOW[q * {ndim} + {a}] + LOCAL_HALF[{a}];" for a in range(ndim)
-    )
-    advance = "\n".join(f"x{a} += RUN[d * {ndim} + {a}];" for a in range(ndim))
     source = f"""
         uint t = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
         if (t >= total_centers * {directions}) return;
         uint center = t / {directions};
         int d = int(t % {directions});
-        {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
+        int direction = d * {window};
+        {_window_words(window, "cells", "uint")}
         int nk = 0;
         long voxels = 0;
         for (int q = 0; q < {window}; q++) {{
             int level = levels[q];
             if (level == 0) continue;
             voxels++;
-            int before = {previous};
+            int before = RUN_BACK[direction + q];
             if (before >= 0 && levels[before] == level) continue;
-            {position}
             int length = 1;
-            while (true) {{
-                {advance}
-                int next = local_slot({coordinates});
-                if (next < 0 || levels[next] != level) break;
+            for (int next = RUN_NEXT[direction + q]; next >= 0 && levels[next] == level;
+                 next = RUN_NEXT[direction + next]) {{
                 length++;
             }}
-            add_size_cell(li, lj, lc, nk, level, length);
+            add_size_cell(cells, nk, level, length);
         }}
         active[t] = nk > 0;
         if (nk == 0) return;
         float out[17];
-        size_features<{window}>(li, lj, lc, nk, voxels, out);
+        size_features<{window}>(cells, nk, voxels, out);
         {_size_stores(slots, "values[ulong(t) * " + str(len(slots)) + " + {column}]")}
     """
     return cast(MetalKernel, mx.fast.metal_kernel(
@@ -249,15 +274,17 @@ def _run_kernel(
 
 
 @lru_cache(maxsize=64)
-def _run_average_kernel(directions: int, features: int) -> MetalKernel:
-    """Average per-direction GLRLM features with ordinary running sums.
-
-    Directions are added in order, as ``run_statistics`` accumulates them.
-    """
+def _run_average_kernel(directions: int, features: int, compensated: bool) -> MetalKernel:
+    """Average GLRLM directions in order and follow the caller's accumulator."""
+    initialize = "Acc total = {0, 0};" if compensated else "float total = 0.0f;"
+    value = f"values[ulong(t) * {features} + f]"
+    accumulate = f"acc_add(total, {value});" if compensated else f"total = total + {value};"
+    numerator = "acc_value(total)" if compensated else "total"
     return cast(MetalKernel, mx.fast.metal_kernel(
         name="mlxradiomics_local_glrlm_average",
         input_names=["values", "active"],
         output_names=["averaged"],
+        header=KERNEL_HEADER if compensated else "",
         source=f"""
         uint center = thread_position_in_grid.x;
         uint total_centers = active_shape[0] / {directions};
@@ -265,13 +292,13 @@ def _run_average_kernel(directions: int, features: int) -> MetalKernel:
         int count = 0;
         for (int d = 0; d < {directions}; d++) count += active[center * {directions} + d];
         for (int f = 0; f < {features}; f++) {{
-            float total = 0.0f;
+            {initialize}
             for (int d = 0; d < {directions}; d++) {{
                 uint t = center * {directions} + d;
-                if (active[t]) total = total + values[ulong(t) * {features} + f];
+                if (active[t]) {{ {accumulate} }}
             }}
             averaged[ulong(f) * total_centers + center] =
-                count > 0 ? total / float(count) : NAN;
+                count > 0 ? {numerator} / float(count) : NAN;
         }}
         """,
     ))
@@ -293,38 +320,37 @@ def _zone_kernel(
         uint center = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
-        {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
+        {_window_words(window, "cells", "uint")}
         int nk = 0;
         long voxels = 0;
-        bool seen[{window}];
-        for (int q = 0; q < {window}; q++) seen[q] = false;
-        int stack[{window}];
+        // Remove visited levels from this thread's private window.
+        {_window_words(window, "stack", "uchar")}
         for (int q = 0; q < {window}; q++) {{
             int level = levels[q];
-            if (level == 0 || seen[q]) continue;
+            if (level == 0) continue;
             int top = 0, size = 0;
             stack[top++] = q;
-            seen[q] = true;
+            levels[q] = 0;
             while (top > 0) {{
                 int slot = stack[--top];
                 size++;
                 for (int m = 0; m < {len(neighbors)}; m++) {{
                     int other = {neighbor};
-                    if (other >= 0 && !seen[other] && levels[other] == level) {{
-                        seen[other] = true;
+                    if (other >= 0 && levels[other] == level) {{
+                        levels[other] = 0;
                         stack[top++] = other;
                     }}
                 }}
             }}
             voxels += size;
-            add_size_cell(li, lj, lc, nk, level, size);
+            add_size_cell(cells, nk, level, size);
         }}
         float out[17];
         if (nk == 0) {{
             for (int f = 0; f < 17; f++) out[f] = NAN;
         }} else {{
-            size_features<{window}>(li, lj, lc, nk, voxels, out);
+            size_features<{window}>(cells, nk, voxels, out);
         }}
         {_size_stores(slots, "values[ulong({column}) * total_centers + center]")}
     """
@@ -511,15 +537,15 @@ def _neighborhood_kernel(
     )
     dependence_features = f"""
         float out[17];
-        size_features<{window}>(li, lj, lc, nk, voxels, out);
+        size_features<{window}>(cells, nk, voxels, out);
         {dependence_stores}
     """
     source = f"""
         uint center = thread_position_in_grid.x;
         uint total_centers = centers_shape[0];
         if (center >= total_centers) return;
-        {window_code(ndim, window)}
-        int li[{window}], lj[{window}], lc[{window}];
+        {window_code(ndim, window, levels=_window_words(window, "levels", "ushort"))}
+        uint cells[{window}];
         int nk = 0;
         long voxels = 0;
         {ngtdm_state if ngtdm else ""}
@@ -537,7 +563,7 @@ def _neighborhood_kernel(
                     dependence += abs(levels[other] - level) <= {alpha};
                 }}
             }}
-            {"add_size_cell(li, lj, lc, nk, level, dependence);" if dependence_slots else ""}
+            {"add_size_cell(cells, nk, level, dependence);" if dependence_slots else ""}
             {_NGTDM_UPDATE if ngtdm else ""}
         }}
         {dependence_features if dependence_slots else ""}
@@ -554,9 +580,10 @@ def _neighborhood_kernel(
     ))
 
 
-def eligible(window: int, ng: int) -> bool:
-    """Neighborhoods of at most 27 voxels; ``Ng`` bounds the int64 emphasis numerators."""
-    return window <= MAX_WINDOW and window**3 * ng**4 < 2**62
+def eligible(window: int, ng: int, size_only: bool = False) -> bool:
+    """Bound private window storage and int64 size or neighborhood numerators."""
+    limit = 125 if size_only else MAX_WINDOW
+    return window <= limit and window**3 * ng**4 < 2**62
 
 
 def local_texture(
@@ -570,6 +597,8 @@ def local_texture(
     dependence_neighbors: tuple[tuple[int, ...], ...],
     alpha: int,
     names: tuple[str, ...],
+    *,
+    compensated_runs: bool,
 ) -> dict[str, mx.array]:
     """Return the requested GLRLM, GLSZM, GLDM and NGTDM maps for a batch of centers.
 
@@ -585,6 +614,7 @@ def local_texture(
             both signs.
         alpha: GLDM dependence tolerance in gray levels.
         names: Requested feature names with family prefixes.
+        compensated_runs: Whether run aggregation uses compensated directional sums.
 
     Returns:
         Name to float32 ``(batch,)`` array.
@@ -592,6 +622,7 @@ def local_texture(
     batch = centers.shape[0]
     dims = mx.array(image_shape, dtype=mx.int32)
     inputs = [bins, mask, centers, dims]
+    group_size = _WIDE_GROUP if prod(local_shape) > MAX_WINDOW else 64
     result: dict[str, mx.array] = {}
     run_slots, zone_slots, dependence_slots = (
         _slots(family, names) for family in ("glrlm", "glszm", "gldm")
@@ -599,18 +630,18 @@ def local_texture(
     if run_slots:
         directions = len(run_offsets)
         values, active = _run_kernel(local_shape, run_offsets, run_slots)(
-            inputs=inputs, grid=(batch * directions, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch * directions, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(batch * directions, len(run_slots)), (batch * directions,)],
             output_dtypes=[mx.float32, mx.bool_],
         )
-        averaged = _run_average_kernel(directions, len(run_slots))(
+        averaged = _run_average_kernel(directions, len(run_slots), compensated_runs)(
             inputs=[values, active], grid=(batch, 1, 1), threadgroup=(64, 1, 1),
             output_shapes=[(len(run_slots), batch)], output_dtypes=[mx.float32],
         )[0]
         result.update(_select("glrlm", averaged, run_slots, names))
     if zone_slots:
         values = _zone_kernel(local_shape, zone_neighbors, zone_slots)(
-            inputs=inputs, grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(len(zone_slots), batch)], output_dtypes=[mx.float32],
         )[0]
         result.update(_select("glszm", values, zone_slots, names))
@@ -620,7 +651,7 @@ def local_texture(
         outputs = _neighborhood_kernel(
             local_shape, dependence_neighbors, alpha, dependence_slots, ngtdm_slots,
         )(
-            inputs=inputs, grid=(batch, 1, 1), threadgroup=(64, 1, 1),
+            inputs=inputs, grid=(batch, 1, 1), threadgroup=(group_size, 1, 1),
             output_shapes=[(len(dependence_slots), batch)] * bool(dependence_slots)
             + [(len(ngtdm_slots), batch)] * ngtdm,
             output_dtypes=[mx.float32] * (bool(dependence_slots) + ngtdm),

@@ -35,25 +35,33 @@ AXIS_FEATURES = ("MajorAxisLength", "MinorAxisLength", "LeastAxisLength", "Elong
                  "Flatness")
 
 
-@pytest.mark.parametrize("shape", [(3, 4, 5), (21, 23, 25)])
-def test_cuboid_mesh_diameters_match_face_center_extrema(shape: tuple[int, int, int]) -> None:
+@pytest.mark.parametrize(("shape", "spacing"), [
+    ((3, 4, 5), (0.75, 1.25, 2.5)),
+    ((21, 23, 25), (0.75, 1.25, 2.5)),
+    ((43, 45, 47), (0.75, 1.25, 2.5)),
+    ((51, 3, 4), (2.0**-130, 2.0**-132, 2.0**-140)),
+    ((2, 3, 2), (2.0**-149, 2.0**-148, 2.0**-147)),
+    ((43, 45, 47), (1.0, 2.0**-132, 2.0**-134)),
+])
+def test_cuboid_mesh_diameters_match_face_center_extrema(
+    shape: tuple[int, int, int], spacing: tuple[float, float, float],
+) -> None:
     # A cuboid's midpoint mesh reaches a face center by half a voxel at each end.
     # Opposite extreme vertices span n voxels on one axis and n-1 on the others.
-    # The small surface uses one pass; the larger surface has partial pair tiles.
-    spacing = (0.75, 1.25, 2.5)
     mask = np.ones(shape, dtype=np.uint8)
     names = ("Maximum3DDiameter", "Maximum2DDiameterSlice",
              "Maximum2DDiameterColumn", "Maximum2DDiameterRow")
     values = _values(mask, spacing, names)
 
     def diameter(axes: tuple[int, ...]) -> float:
-        return sqrt(max(sum(((shape[axis] - (axis != face)) * spacing[axis])**2
-                            for axis in axes) for face in axes))
+        squared = max(sum(((shape[axis] - (axis != face)) * spacing[axis])**2
+                          for axis in axes) for face in axes)
+        return float(np.float32(sqrt(squared)))
 
-    assert values[names[0]] == pytest.approx(diameter((0, 1, 2)), rel=2e-6)
+    assert values[names[0]] == pytest.approx(diameter((0, 1, 2)), rel=2e-6, abs=0)
     for plane, name in enumerate(names[1:]):
         axes = tuple(axis for axis in range(3) if axis != plane)
-        assert values[name] == pytest.approx(diameter(axes), rel=2e-6)
+        assert values[name] == pytest.approx(diameter(axes), rel=2e-6, abs=0)
 
 
 @pytest.mark.parametrize("separation", [128, 512, 1024])

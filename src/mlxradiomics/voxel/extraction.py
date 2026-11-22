@@ -38,9 +38,11 @@ from mlxradiomics.numerics.runtime import (
 )
 from mlxradiomics.voxel.gather import NeighborhoodIndex, NeighborhoodPlan
 from mlxradiomics.voxel.glcm import eligible as fused_glcm_eligible
-from mlxradiomics.voxel.glcm import local_glcm
+from mlxradiomics.voxel.glcm import local_glcm, pair_means_eligible, pair_means_only
 from mlxradiomics.voxel.texture import eligible as fused_texture_eligible
 from mlxradiomics.voxel.texture import local_texture
+
+_OTHER_TEXTURE_PREFIXES = ("gldm_", "ngtdm_", "glrlm_", "glszm_", "gldzm_")
 
 
 class _FirstOrderResidents(NamedTuple):
@@ -76,14 +78,13 @@ class _VoxelPlan:
     glcm_names: tuple[str, ...]
     has_source_first: bool
     has_intensity_histogram: bool
-    has_texture: bool
     explicit_texture: bool
     kernel_axes: tuple[range, ...]
     local_shape: tuple[int, ...]
     pair_offsets: tuple[tuple[int, ...], ...]
     texture_offsets: _TextureOffsets
     fused_glcm: bool
-    fused_texture: bool
+    fused_texture: tuple[str, ...]
     cache_indexes: bool
     memory: VoxelMemory
 
@@ -294,9 +295,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     has_intensity_histogram = any(
         name.startswith("intensityhistogram_") for name in settings.features
     )
-    has_texture = any(
-        n.startswith(("gldm_", "ngtdm_", "glrlm_", "glszm_", "gldzm_")) for n in settings.features
-    )
+    texture_names = tuple(n for n in settings.features if n.startswith(_OTHER_TEXTURE_PREFIXES))
     glcm_names = tuple(
         name.removeprefix("glcm_") for name in settings.features if name.startswith("glcm_")
     )
@@ -309,13 +308,23 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
     kernel_size = prod(map(len, axes))
     local_shape = tuple(map(len, axes))
     all_pair_offsets = directions(local_shape, settings) if has_glcm else ()
-    pair_offsets = all_pair_offsets if not explicit else ()
+    # Neighborhood support and NGTDM singular cases do not affect GLCM pair
+    # means. A native full-domain directional average can use their direct sum
+    # even when other families still need explicit matrix processing.
+    only_pair_means = pair_means_only(glcm_names)
+    full_domain_pair_means = (
+        settings.glcm_aggregation == "native"
+        and settings.force2d_axis is None
+        and only_pair_means
+    )
+    pair_offsets = all_pair_offsets if not explicit or full_domain_pair_means else ()
     pair_counts = tuple(
         prod(s - abs(v) for s, v in zip(local_shape, delta, strict=True)) for delta in pair_offsets
     )
     # Native GLCM maps of small neighborhoods use one fused pass per center and
     # direction, without dense Ng x Ng matrices (see local_glcm).
-    fused_glcm = bool(pair_offsets) and fused_glcm_eligible(
+    eligible_glcm = pair_means_eligible if only_pair_means else fused_glcm_eligible
+    fused_glcm = bool(pair_offsets) and eligible_glcm(
         kernel_size,
         pair_counts,
         data.gray_levels,
@@ -338,6 +347,8 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
             )
         else:
             histogram_bytes = data.gray_levels**2 * 128
+    elif fused_glcm and only_pair_means:
+        histogram_bytes = 4 * len(glcm_names)
     elif has_glcm:
         histogram_bytes = max(data.gray_levels * 16, len(pair_offsets) * 4 * 32)
     else:
@@ -347,11 +358,23 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         or any(n.startswith("ivh_") for n in settings.features)
     ):
         histogram_bytes = max(histogram_bytes, data.gray_levels * 16)
-    # Native GLRLM/GLSZM/GLDM/NGTDM maps likewise evaluate occupied cells per center.
-    fused_texture = (
-        has_texture
-        and not explicit
-        and fused_texture_eligible(kernel_size, data.gray_levels)
+    # Runs and zones support wider windows than dependence/neighborhood features.
+    # Native domains retain their connectivity when other families need explicit aggregation.
+    fused_families: set[str] = set()
+    if texture_names and fused_texture_eligible(kernel_size, data.gray_levels, True):
+        if not explicit and fused_texture_eligible(kernel_size, data.gray_levels):
+            fused_families.update(("gldm", "ngtdm"))
+        if not explicit or (
+            settings.force2d_axis is None and settings.glrlm_aggregation == "native"
+        ):
+            fused_families.add("glrlm")
+        if not explicit or (
+            settings.force2d_axis is None and settings.glszm_aggregation == "native"
+            and not any(name.startswith("gldzm_") for name in texture_names)
+        ):
+            fused_families.add("glszm")
+    fused_texture = tuple(
+        name for name in texture_names if name.partition("_")[0] in fused_families
     )
     texture_offsets = _TextureOffsets(runs=(), zones=(), dependence=())
     if fused_texture:
@@ -364,7 +387,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
             dependence=dependence + tuple(tuple(-v for v in d) for d in dependence),
         )
         histogram_bytes = max(histogram_bytes, 17 * 4 * (len(texture_offsets.runs) + 2))
-    elif has_texture:
+    if len(fused_texture) < len(texture_names):
         histogram_bytes = max(histogram_bytes, data.gray_levels * kernel_size * 64)
     per_center = kernel_size * (64 + 16 * len(shape)) + histogram_bytes + 4096
     budget = settings.scratch_mib * 1024**2
@@ -390,7 +413,6 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         glcm_names=glcm_names,
         has_source_first=has_source_first,
         has_intensity_histogram=has_intensity_histogram,
-        has_texture=has_texture,
         explicit_texture=explicit,
         kernel_axes=axes,
         local_shape=local_shape,
@@ -413,11 +435,17 @@ def extract_voxels(
     validity: dict[str, FeatureValidity],
     ivh: IVHLattice | None,
     map_dtype: MapDtype = "float64",
+    *,
+    source_shape: tuple[int, ...],
+    window: tuple[slice, ...],
 ) -> tuple[dict[str, VoxelArray], VoxelMemory]:
     """Compute feature maps by batches of ROI voxels, each the center of a local kernel.
 
+    ``data`` holds the compact ``window`` for masked kernels and the full image
+    for unmasked kernels. Both deliver center coordinates on ``source_shape``.
+
     Return maps in ``map_dtype`` (0 outside the ROI), or send evaluated float32 batches
-    to ``sink`` and return no maps. Storage does not change feature arithmetic or scheduling.
+    to ``sink`` and return no maps. Both routes use the same feature arithmetic and schedule.
     Mixed first-order/GLCM selections may compute first-order features in larger
     groups while delivering complete feature batches. Their cached result vectors
     are included in the scratch estimate chosen from ``settings.scratch_mib``.
@@ -425,31 +453,38 @@ def extract_voxels(
     Raises:
         ValueError: If one center's working set exceeds the scratch budget.
     """
-    shape = data.image.shape
+    shape = source_shape
     schedule = _plan_voxels(data, settings)
+    fallback_features = tuple(
+        name for name in settings.features
+        if name not in schedule.fused_texture
+        and not (schedule.fused_glcm and name.startswith("glcm_"))
+    )
+    fallback_settings = (
+        settings if fallback_features == settings.features
+        else replace(settings, features=fallback_features)
+    )
+    fallback_glcm = bool(schedule.glcm_names) and not schedule.fused_glcm
+    fallback_texture = any(name.startswith(_OTHER_TEXTURE_PREFIXES) for name in fallback_features)
+    explicit_groups = schedule.explicit_texture and (fallback_glcm or fallback_texture)
     centers = schedule.centers
     memory = schedule.memory
     batch_size = memory["batch_size"]
     first_batch_size = memory.get("first_order_batch_size", 0)
-    # Every selected map reads only these centers plus the kernel's exact reach.
-    # Validation/binning have already seen the complete source. Keep their global
-    # lattice and the original output coordinates while bounding resident storage.
-    reach = np.array(
-        [0 if settings.force2d_axis == i else settings.kernel_radius for i in range(len(shape))],
-        dtype=np.int64,
-    )
-    lower = np.maximum(centers.min(axis=0).astype(np.int64) - reach, 0)
-    upper = np.minimum(centers.max(axis=0).astype(np.int64) + reach + 1, shape)
-    window = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
-    resident_centers = centers - lower.astype(np.int32) if np.any(lower) else centers
-    data = replace(
-        data,
-        image=data.image[window],
-        roi=data.roi[window],
-        bins=data.bins[window] if data.bins is not None else None,
-        sampling_mask=data.sampling_mask[window],
-        shape_roi=data.shape_roi[window],
-    )
+    lower = np.array([part.start for part in window], dtype=np.int32)
+    if settings.masked_kernel:
+        # Discretization already used the compact grid. Delivery uses source coordinates.
+        resident_centers = centers
+        centers = centers + lower if np.any(lower) else centers
+    else:
+        # Unmasked discretization sees the entire image. Only keep the required
+        # support on Metal once its global lattice is fixed.
+        resident_centers = centers - lower if np.any(lower) else centers
+        data = replace(
+            data, image=data.image[window], roi=data.roi[window],
+            bins=data.bins[window] if data.bins is not None else None,
+            sampling_mask=data.sampling_mask[window], shape_roi=data.shape_roi[window],
+        )
     resident_shape = data.image.shape
     local = np.array(list(product(*schedule.kernel_axes)), dtype=np.int32)
     offsets = mx.array(local, dtype=mx.int32)
@@ -460,7 +495,8 @@ def extract_voxels(
         else None
     )
     resident = _VoxelResidents(
-        mx.reshape(mx.array(data.image, dtype=dtype), (-1,)) if schedule.has_source_first else None,
+        mx.reshape(mx.array(data.image.astype(np.float32, copy=False), dtype=dtype), (-1,))
+        if schedule.has_source_first else None,
         mx.reshape(array_from_bool(data.sampling_mask), (-1,)),
         mx.reshape(mx.array(data.bins), (-1,)) if data.bins is not None else None,
     )
@@ -468,14 +504,17 @@ def extract_voxels(
     # Proven zero words stay implicit; unused bits/errors never cross the device boundary.
     source_resident: _FirstOrderResidents | None = None
     source_admission: FirstOrderAdmission | None = None
-    ivh_resident = mx.reshape(mx.array(ivh.bins[window]), (-1,)) if ivh is not None else None
+    ivh_resident = None
+    if ivh is not None:
+        ivh_bins = ivh.bins if settings.masked_kernel else ivh.bins[window]
+        ivh_resident = mx.reshape(mx.array(ivh_bins), (-1,))
     morphological_resident = (
         mx.reshape(array_from_bool(data.shape_roi), (-1,))
         if any(name.startswith("gldzm_") for name in settings.features)
         else None
     )
     if schedule.has_source_first:
-        samples = data.image[data.sampling_mask]
+        samples = np.asarray(data.image[data.sampling_mask], dtype=np.float64)
         source = prepare_first_order_source(
             samples.reshape(1, -1),
             np.ones((1, samples.size), dtype=np.bool_),
@@ -500,7 +539,9 @@ def extract_voxels(
         source_resident = _FirstOrderResidents(
             low_resident,
             (
-                mx.reshape(mx.array(data.image.view(np.uint64)), (-1,))
+                mx.reshape(
+                    mx.array(np.asarray(data.image, dtype=np.float64).view(np.uint64)), (-1,),
+                )
                 if inputs.source_bits
                 else None
             ),
@@ -539,9 +580,8 @@ def extract_voxels(
             (bool(schedule.first_names) and not first_batch_size)
             or schedule.has_intensity_histogram
             or ivh is not None
-            or (schedule.explicit_texture and (bool(schedule.glcm_names) or schedule.has_texture))
-            or (bool(schedule.glcm_names) and not schedule.fused_glcm)
-            or (schedule.has_texture and not schedule.fused_texture)
+            or fallback_glcm
+            or fallback_texture
         )
         index = neighborhood.index(chunk_device, offsets) if needs_gather else None
         bins = (
@@ -614,7 +654,7 @@ def extract_voxels(
                     ).items()
                 }
             )
-        if schedule.explicit_texture and (bool(schedule.glcm_names) or schedule.has_texture):
+        if explicit_groups:
             assert index is not None and bins is not None and valid is not None
             morphology = valid
             if morphological_resident is not None and settings.masked_kernel:
@@ -625,13 +665,13 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    settings,
+                    fallback_settings,
                     morphology=morphology,
                     histogram_method=method,
                     fixed_columns=True,
                 )
             )
-        elif schedule.fused_glcm:
+        if schedule.fused_glcm:
             assert resident.bins is not None
             batch.update(
                 local_glcm(
@@ -646,7 +686,7 @@ def extract_voxels(
                     schedule.glcm_names,
                 )
             )
-        elif bool(schedule.glcm_names):
+        elif not schedule.explicit_texture and fallback_glcm:
             assert bins is not None and valid is not None
             batch.update(
                 aggregate_glcm(
@@ -677,10 +717,11 @@ def extract_voxels(
                     schedule.texture_offsets.zones,
                     schedule.texture_offsets.dependence,
                     settings.gldm_alpha,
-                    settings.features,
+                    schedule.fused_texture,
+                    compensated_runs=schedule.explicit_texture,
                 )
             )
-        elif schedule.has_texture and not schedule.explicit_texture:
+        if fallback_texture and not schedule.explicit_texture:
             assert bins is not None and valid is not None
             batch.update(
                 texture_statistics(
@@ -688,7 +729,7 @@ def extract_voxels(
                     valid,
                     schedule.local_shape,
                     data.gray_levels,
-                    settings,
+                    fallback_settings,
                     fixed_columns=True,
                 )
             )

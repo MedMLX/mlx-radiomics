@@ -113,26 +113,44 @@ def test_elementary_and_gradient_images_follow_direct_formulas(
 
 
 @pytest.mark.parametrize(
-    "row", [(0.0, 1e-30, 2e-30), (0.0, 1e20, 2e20), (-2e38, 2e38, 2e38)],
-    ids=["tiny-ramp", "large-ramp", "opposite-limits"],
+    "row,step", [
+        pytest.param((0.0, 1e-30, 2e-30), 1.0, id="tiny-ramp"),
+        pytest.param((0.0, 1e20, 2e20), 1.0, id="large-ramp"),
+        pytest.param((-2e38, 2e38, 2e38), 1.0, id="opposite-limits"),
+        pytest.param((0.0, 1e38, 2e38), 1e40, id="spacing-above-float32"),
+        pytest.param((0.0, 1e-30, 2e-30), 1e-40, id="subnormal-spacing"),
+        pytest.param((2.0, 2.0, 2.0), 5e-324, id="constant-with-subnormal-spacing"),
+        pytest.param((2e-38, 2.01e-38, 2.02e-38), 1e-40, id="subnormal-difference"),
+        pytest.param((1e-39, 2e-39, 3e-39), 1e-40, id="subnormal-samples"),
+    ],
 )
+@pytest.mark.parametrize("windowed", [False, True], ids=["full", "window"])
 def test_gradient_magnitude_is_exact_across_the_float32_range(
-    row: tuple[float, float, float],
+    row: tuple[float, float, float], step: float, windowed: bool,
 ) -> None:
     # Each expected magnitude is a normal float32 value although squaring the components
     # or subtracting the opposite-sign endpoints would leave the float32 range.
-    source = hcc_patch((3, 3))[0]
-    # Calibrate CT contrast to the requested stress range; the repeated endpoint
-    # case clips its upper half to retain a sharp plateau at the positive limit.
-    unit = (source - source.min()) / np.ptp(source)
-    if row[1] == row[2]:
-        unit = np.minimum(unit * 2, 1)
-    image = (row[0] + unit * (row[-1] - row[0])).astype(np.float32)
+    if step == 1.0:
+        source = hcc_patch((3, 3))[0]
+        # Calibrate CT contrast to the requested stress range; the repeated endpoint
+        # case clips its upper half to retain a sharp plateau at the positive limit.
+        unit = (source - source.min()) / np.ptp(source)
+        if row[1] == row[2]:
+            unit = np.minimum(unit * 2, 1)
+        image = (row[0] + unit * (row[-1] - row[0])).astype(np.float32)
+    else:
+        image = np.tile(np.array(row, np.float32), (3, 1))
+    window = (slice(0, 1), slice(1, 3)) if windowed else None
+    spacing = (1.0, step)
     with mx.stream(mx.gpu):
-        output = next(feature_images(mx.array(image), (1.0, 1.0),
-                                     TransformSettings(image_types=(ImageType.GRADIENT,))))
+        output = next(feature_images(
+            mx.array(image), spacing, TransformSettings(image_types=(ImageType.GRADIENT,)),
+            window=window,
+        ))
         actual = np.asarray(output.image, dtype=np.float64)
-    expected = gradient_magnitude(image, (1.0, 1.0))
+    expected = gradient_magnitude(image, spacing)
+    if window is not None:
+        expected = expected[window]
     assert np.isfinite(expected).all() and np.isfinite(actual).all()
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=0)
 

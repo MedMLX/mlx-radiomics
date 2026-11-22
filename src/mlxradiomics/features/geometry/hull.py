@@ -17,8 +17,7 @@ def scipy_hull(host: NDArray[np.float64]) -> spatial.ConvexHull:
     grid or physical point set yields the same connectivity.
 
     Raises:
-        RuntimeError: If Qhull cannot build a three-dimensional hull, including a planar
-            or collinear point set.
+        RuntimeError: If Qhull cannot build a full-dimensional hull from the supplied points.
     """
     try:
         hull = spatial.ConvexHull(host)

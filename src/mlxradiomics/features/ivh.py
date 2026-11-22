@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from mlxradiomics.config.settings import IVH, Settings
+from mlxradiomics.contracts.types import HostArray
 from mlxradiomics.features.intensity_histogram import histogram_order_values, integer_histogram
 from mlxradiomics.numerics.runtime import mx
 
@@ -52,7 +53,7 @@ def _lattice_edges(low: Fraction, interval: Fraction, levels: int) -> NDArray[np
 
 
 def prepare_ivh(
-    image: NDArray[np.float64],
+    image: HostArray,
     mask: NDArray[np.bool_],
     settings: Settings,
     *,
@@ -77,7 +78,7 @@ def prepare_ivh(
     not otherwise define a partial-bin center. The returned origin, step and levels
     fully specify the effective domain, including unoccupied bins.
     """
-    selected = image[mask] if sampled is None else sampled
+    selected = np.asarray(image[mask], dtype=np.float64) if sampled is None else sampled
     minimum, maximum = float(selected.min()), float(selected.max())
     bounds = settings.ivh_intensity_range
     if bounds is None and settings.resegment_mode == "absolute" and settings.resegment_range:

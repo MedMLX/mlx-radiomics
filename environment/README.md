@@ -19,6 +19,24 @@ The development group and the optional `lbp` extra pin different SciPy releases,
 so provision the extra in its own environment with
 `uv sync --locked --no-dev --extra lbp`.
 
+## Official IBSI benchmarks
+
+Use a dedicated cache directory for the public IBSI data. Run these commands
+from the repository root, setting `IBSI_DATA` to that directory.
+
+```bash
+.venv/bin/python -m scripts.check_ibsi --data "$IBSI_DATA" --download
+make ibsi IBSI_DATA="$IBSI_DATA"
+```
+
+The first command downloads missing inputs from pinned IBSI revisions, checks
+the IBSI 1 workbook checksum, and runs both benchmarks. The Make target reuses
+the cached files offline. The runner checks the IBSI 1 digital phantom and CT
+configurations A–E, plus IBSI 2 phantom maps and CT feature values. It prints
+any tolerance failures and exits nonzero. Simoncelli uses the centered Fourier
+grid and runs when the installed MLX version supports the required FFT. The
+runner reports FFT-gated cases in the totals.
+
 ## Source layout
 
 The package root contains only `__init__.py` (the public API), `medmlx.py`

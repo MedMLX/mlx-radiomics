@@ -1,7 +1,7 @@
 """NIfTI/NRRD volume I/O with explicit value and geometry contracts.
 
-Reading and writing use SimpleITK. NiBabel also checks NIfTI image values before
-extraction because SimpleITK replaces stored non-finite voxels with zero.
+Reading and writing use SimpleITK. NiBabel checks NIfTI voxels that could be
+non-finite on disk because SimpleITK replaces those values with zero.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 import gzip
 from collections.abc import Mapping
-from math import prod
+from math import isfinite, prod
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -47,11 +47,9 @@ class _NiftiProxyFactory(Protocol):
 
 
 class _NiftiImage(Protocol):
-    """The part of a NiBabel image used to inspect stored voxel values."""
-
     @property
     def dataobj(self) -> _NiftiProxy:
-        """Expose scaled proxy data using its native dtype and required scaling precision."""
+        """Expose the scaling and storage metadata for the voxel payload."""
         ...
 
 
@@ -136,7 +134,8 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     import SimpleITK as sitk
 
     source = _require_volume_path(path)
-    if source.name.endswith((".nii", ".nii.gz")):
+    nifti = source.name.endswith((".nii", ".nii.gz"))
+    if nifti:
         _require_single_file_nifti(source)
     image = sitk.ReadImage(source.as_posix())
     if image.GetDimension() not in (2, 3):
@@ -153,13 +152,13 @@ def _read(path: str | Path, *, integer: bool) -> Volume:
     if integer and raw.dtype.kind not in "biu":
         raise ValueError(f"mask must contain integer labels: {source}")
     array = np.asarray(raw)
-    if not integer:
+    if not integer and array.dtype.kind == "f":
         flat = array.reshape(-1)
         count = max(1, _NIFTI_VALIDATION_BYTES // max(array.itemsize, 8))
         for start in range(0, array.size, count):
             if not np.all(np.isfinite(flat[start:start + count])):
                 raise ValueError(f"image contains non-finite voxels: {source}")
-    if not integer and source.name.endswith((".nii", ".nii.gz")):
+    if not integer and nifti:
         _validate_nifti_values(source)
     return Volume(
         array=array,
@@ -184,6 +183,13 @@ def _validate_nifti_values(source: Path) -> None:
     from nibabel.arrayproxy import ArrayProxy
 
     proxy = cast(_NiftiReader, nib).load(source.as_posix()).dataobj
+    # Integer storage cannot contain NaN or infinity. Skip the second decode
+    # when the largest possible scaled value fits in float64.
+    if proxy.dtype.kind in "iu":
+        info = np.iinfo(proxy.dtype.str)
+        magnitude = max(-int(info.min), int(info.max))
+        if isfinite(magnitude * abs(proxy.slope) + abs(proxy.inter)):
+            return
     size = prod(proxy.shape)
     # Scaling can promote to float64 (complex128 for a complex source, which the
     # volume contract later rejects). Bound both stored and scaled block payload.

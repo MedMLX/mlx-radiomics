@@ -67,13 +67,14 @@ def _ct_mode(size: int, frequency: int) -> NDArray[np.float64]:
 def _production(
     image: NDArray[np.generic], options: TransformSettings,
     spacing: tuple[float, ...] | None = None,
+    *, window: tuple[slice, ...] | None = None,
 ) -> list[tuple[str, NDArray[np.float64]]]:
     values = np.asarray(image, dtype=np.float32)
     spacing = spacing or (1.0,) * values.ndim
     with mx.stream(mx.gpu):
         return [
             (item.name, np.asarray(item.image, dtype=np.float64))
-            for item in feature_images(mx.array(values), spacing, options)
+            for item in feature_images(mx.array(values), spacing, options, window=window)
         ]
 
 
@@ -310,16 +311,20 @@ def _orders_of_length(ndim: int, length: int) -> list[tuple[int, ...]]:
 
 @pytest.mark.parametrize("shape", [(7, 8), (5, 6, 7)])
 @pytest.mark.parametrize("padding", list(FilterPadding))
+@pytest.mark.parametrize("windowed", [False, True], ids=["full", "window"])
 def test_mean_filter_matches_independent_padding_convolution(
-    shape: tuple[int, ...], padding: FilterPadding,
+    shape: tuple[int, ...], padding: FilterPadding, windowed: bool,
 ) -> None:
     image = _ct_input(shape)
     options = TransformSettings(
         image_types=(ImageType.MEAN,), mean=MeanSettings(support=5, padding=padding, constant=0.25)
     )
-    [(name, actual)] = _production(image, options)
+    window = (slice(0, 2), *(slice(3, 5),) * (len(shape) - 1)) if windowed else None
+    [(name, actual)] = _production(image, options, window=window)
     kernel = np.full((5,) * len(shape), 1.0 / 5 ** len(shape))
     expected = _convolve(image, kernel, padding, 0.25)
+    if window is not None:
+        expected = expected[window]
     assert name == {
         FilterPadding.CONSTANT: "mean-M5-constant0p25",
         FilterPadding.NEAREST: "mean-M5-nearest",
@@ -358,6 +363,9 @@ def test_sampled_log_matches_independent_kernel_convolution(
     padding_tag = "constant0p5" if padding is FilterPadding.CONSTANT else "mirror"
     assert name == f"log-sampled-s2mm-c3-{padding_tag}-{'2D' if planar else '3D'}"
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+    window = (slice(0, 2), slice(4, 5), slice(2, 8))
+    [(_, window_values)] = _production(image, options, spacing, window=window)
+    np.testing.assert_allclose(window_values, expected[window], rtol=1e-4, atol=1e-6)
 
 
 def test_mean_filter_preserves_a_large_finite_constant() -> None:
@@ -497,6 +505,31 @@ def test_laws_energy_is_the_absolute_response_mean_window() -> None:
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("padding", list(FilterPadding))
+def test_pooled_3d_laws_energy_window_uses_original_boundaries(padding: FilterPadding) -> None:
+    image = np.random.default_rng(24).normal(size=(8, 10, 11))
+    window = (slice(0, 3), slice(3, 6), slice(9, 11))
+    constant = -5.0
+    options = TransformSettings(
+        image_types=(ImageType.LAWS,),
+        laws=LawsSettings(
+            kernel="L5E5E5", padding=padding, constant=constant,
+            pooling=OrientationPooling.MAX, energy_distance=3,
+        ),
+    )
+    # The even L5 tap can sit on any axis. Reversing an odd E5 tap flips the sign
+    # of the kernel, so max pooling over both signs takes the absolute response.
+    taps = _laws_kernel("L5E5E5")
+    pooled = np.maximum.reduce([
+        np.abs(_convolve(image, np.moveaxis(taps, 2, axis), padding, constant))
+        for axis in range(3)
+    ])
+    # E5 has zero sum, so the far-field energy extension for constant padding is zero.
+    expected = _convolve(pooled, np.full((7, 7, 7), 1.0 / 7**3), padding).real
+    [(_, actual)] = _production(image, options, window=window)
+    np.testing.assert_allclose(actual, expected[window], rtol=1e-5, atol=2e-6)
+
+
 @pytest.mark.parametrize("planar", [False, True])
 def test_laws_energy_window_mean_is_correctly_rounded(planar: bool) -> None:
     # Integer absolute responses below 2**24 / 15**3 have exact window sums, so the
@@ -540,6 +573,9 @@ def test_laws_energy_extends_the_absolute_response_by_its_far_field(codes: str) 
     ))
     assert np.all(actual >= 0)
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+    window = (slice(0, 3), slice(5, 8))
+    [(_, cropped)] = _production(image, options, window=window)
+    np.testing.assert_allclose(cropped, expected[window], rtol=1e-5, atol=1e-5)
     # A constant image extended by its own value has a constant energy at every border.
     [(_, flat)] = _production(hcc_background((6, 7)) * (-constant / 2048), options)
     np.testing.assert_allclose(flat, far_field, rtol=1e-5, atol=1e-5)
@@ -794,6 +830,31 @@ def test_gabor_three_dimensional_plane_selection_and_averaging() -> None:
     )
     assert planes_name == "gabor-s2mm-l3mm-g1-t0p4-modulus-constant0-planes"
     np.testing.assert_allclose(planes_values, expected_planes, rtol=2e-4, atol=2e-5)
+    window = (slice(2, 6), slice(1, 4), slice(0, 2))
+    [(_, window_values)] = _production(image, average_options, spacing, window=window)
+    np.testing.assert_allclose(window_values, expected_planes[window], rtol=2e-4, atol=2e-5)
+
+
+@pytest.mark.parametrize("padding", list(FilterPadding))
+def test_gabor_roi_window_keeps_full_image_support(padding: FilterPadding) -> None:
+    shape = (10, 9)
+    image = np.random.default_rng(34).normal(size=shape)
+    spacing = (1.0, 0.8)
+    window = (slice(0, 4), slice(3, 7))
+    thetas = (0.4, 0.8)
+    options = TransformSettings(
+        image_types=(ImageType.GABOR,),
+        gabor=GaborSettings(
+            sigma=(3.0,), wavelength=(4.0,), theta=thetas, padding=padding,
+            constant=5.0, pooling=OrientationPooling.AVERAGE,
+        ),
+    )
+    [(_, actual)] = _production(image, options, spacing, window=window)
+    responses = [
+        np.abs(_convolve(image, _gabor_kernel(shape, spacing, 3.0, 4.0, 1.0, theta), padding, 5.0))
+        for theta in thetas
+    ]
+    np.testing.assert_allclose(actual, np.mean(responses, axis=0)[window], rtol=2e-4, atol=2e-5)
 
 
 def test_gabor_ct_fourier_mode_follows_frequency_and_orientation() -> None:

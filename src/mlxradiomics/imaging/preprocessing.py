@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from itertools import product
 from math import floor, frexp
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,10 +23,11 @@ from mlxradiomics.contracts.types import HostArray
 
 @dataclass(frozen=True)
 class PreparedInput:
-    """Validated float64 image and the masks derived from the label.
+    """Validated image and the masks derived from the label.
 
     Attributes:
-        image: Float64 copy of the input, normalized if requested; same shape as the input.
+        image: Input in its source dtype, or float64 after normalization or when the
+            source floating-point dtype is wider than float64.
         roi: Voxels of the selected label that remain after every resegmentation filter
             (the absolute or derived range intersected with any outlier-sigma window).
         shape_roi: Mask used for shape features: the original label mask, or the fully
@@ -34,7 +36,7 @@ class PreparedInput:
             or the whole image in voxel mode with ``masked_kernel=False``.
     """
 
-    image: NDArray[np.float64]
+    image: HostArray
     roi: NDArray[np.bool_]
     shape_roi: NDArray[np.bool_]
     sampling_mask: NDArray[np.bool_]
@@ -94,7 +96,10 @@ def validate_exact_float64(image: HostArray) -> None:
         ValueError: If a 64-bit integer value is not exactly representable in float64.
     """
     values = np.asarray(image)
-    if values.dtype.kind in "iu" and values.dtype.itemsize == 8:
+    if values.dtype.kind in "iu" and values.dtype.itemsize == 8 and values.size:
+        integers = cast(NDArray[np.int64] | NDArray[np.uint64], values)
+        if int(integers.min()) >= -(2**53) and int(integers.max()) <= 2**53:
+            return
         # Reinterpreting bytes is only meaningful in native order: a big-endian array
         # viewed as native uint64 tests unrelated integers. The byte-order cast stays in
         # the integer domain, so it cannot round.
@@ -128,6 +133,13 @@ def exact_float64(image: HostArray) -> NDArray[np.float64]:
     return values.astype(np.float64)
 
 
+def _admit_source(image: HostArray) -> HostArray:
+    """Keep the source grid compact after validating its float64 conversion."""
+    validate_exact_float64(image)
+    # For wider types, round to binary64 before any filter conversion.
+    return image.astype(np.float64) if image.dtype.itemsize > 8 else image
+
+
 def normalize_values(image: HostArray, settings: Settings) -> NDArray[np.float64]:
     """Return a float64 copy of ``image``, normalized over the whole image if requested.
 
@@ -152,25 +164,48 @@ def normalize_values(image: HostArray, settings: Settings) -> NDArray[np.float64
     # exact power of two to unit magnitude (the subtraction cannot overflow near 1e308),
     # and the offsets again (their squares cannot overflow or flush to zero; 1e-162
     # offsets squared otherwise underflow into a wrong but finite deviation).
-    values = _unit_scaled(values)
-    offsets = _unit_scaled(values - values.flat[0])
-    deviation = float(np.std(offsets, ddof=1))
+    _scale_to_unit(values)
+    np.subtract(values, values.flat[0], out=values)
+    _scale_to_unit(values)
+    deviation = float(np.std(values, ddof=1))
     if deviation == 0 or not np.isfinite(deviation):
         raise ValueError("normalization requires nonzero finite whole-image variance")
-    values = (offsets - np.mean(offsets)) / deviation
+    np.subtract(values, np.mean(values), out=values)
+    np.divide(values, deviation, out=values)
     if settings.remove_outliers is not None:
-        values = np.clip(values, -settings.remove_outliers, settings.remove_outliers)
-    return values * settings.normalize_scale
+        np.clip(values, -settings.remove_outliers, settings.remove_outliers, out=values)
+    np.multiply(values, settings.normalize_scale, out=values)
+    return values
 
 
-def _unit_scaled(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Scale ``values`` by the exact power of two that brings their peak into [0.5, 1)."""
-    peak = float(np.max(np.abs(values)))
-    return np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0)
+def _scale_to_unit(values: NDArray[np.float64]) -> None:
+    """Scale finite values in place by a power of two that brings their peak into [0.5, 1)."""
+    peak = max(float(values.max()), -float(values.min()))
+    np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0, out=values)
+
+
+def occupied_window(
+    occupied: NDArray[np.bool_], reach: list[int],
+) -> tuple[slice, ...] | None:
+    """Return occupied bounds with a clipped halo, or ``None`` for an empty mask."""
+    window: list[slice] = []
+    for axis, size in enumerate(occupied.shape):
+        present = np.flatnonzero(np.any(
+            occupied, axis=tuple(i for i in range(occupied.ndim) if i != axis),
+        ))
+        if not present.size:
+            return None
+        low, stop = int(present[0]), int(present[-1]) + 1
+        window.append(slice(max(0, low - reach[axis]), min(size, stop + reach[axis])))
+        # Later projections can ignore the empty bands on axes already bounded.
+        exact = [slice(None)] * occupied.ndim
+        exact[axis] = slice(low, stop)
+        occupied = occupied[tuple(exact)]
+    return tuple(window)
 
 
 def _resegment_samples(
-    values: NDArray[np.float64], roi: NDArray[np.bool_], settings: Settings,
+    values: HostArray, roi: NDArray[np.bool_], settings: Settings,
     *, keep_samples: bool,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64] | None]:
     """Apply the same thresholds in ROI sample order and optionally retain samples.
@@ -182,7 +217,7 @@ def _resegment_samples(
     """
     if settings.resegment_range is None:
         return roi, None
-    selected = values[roi]
+    selected = np.asarray(values[roi], dtype=np.float64)
     if not np.all(np.isfinite(selected)):
         raise ValueError("resegmentation requires finite selected intensities")
     thresholds = np.asarray(settings.resegment_range, dtype=np.float64)
@@ -198,10 +233,12 @@ def _resegment_samples(
         # every or almost no voxel). Inclusive comparisons are unchanged by those
         # rescalings, and all-equal ROI values still give exactly zero spread. Only ROI
         # voxels are centered: the scale is the ROI's, and outside values are discarded.
-        scaled = _unit_scaled(selected)
-        offsets = _unit_scaled(scaled - float(scaled[0]))
-        centered = offsets - float(np.mean(offsets))
-        spread = float(np.std(offsets))
+        centered = selected.copy()
+        _scale_to_unit(centered)
+        np.subtract(centered, centered[0], out=centered)
+        _scale_to_unit(centered)
+        spread = float(np.std(centered))
+        np.subtract(centered, np.mean(centered), out=centered)
     if settings.resegment_mode == "relative":
         thresholds = thresholds * np.max(selected)
     elif settings.resegment_mode == "sigma":
@@ -418,19 +455,27 @@ def prepare_sampled_input(
     if image.dtype.kind not in "iuf" or mask.dtype.kind not in "biu":
         raise ValueError("image must be real numeric and mask must contain integer labels")
     settings.validate(image.ndim)
-    values = normalize_values(image, settings)
+    values = normalize_values(image, settings) if settings.normalize else _admit_source(image)
     roi = mask == settings.label
     if not np.any(roi):
         raise ValueError("selected label is absent from mask")
     original_roi = roi
+    sample_all = voxel and not settings.masked_kernel
     roi, retained_samples = _resegment_samples(
-        values, roi, settings, keep_samples=not (voxel and not settings.masked_kernel),
+        values, roi, settings, keep_samples=not sample_all,
     )
     shape_roi = roi if settings.resegment_shape else original_roi
     if voxel and np.count_nonzero(roi) < 2:
         raise ValueError("voxel extraction requires at least two selected voxels")
-    sampling = np.ones_like(roi) if voxel and not settings.masked_kernel else roi
-    selected = values[sampling] if retained_samples is None else retained_samples
+    sampling = np.ones_like(roi) if sample_all else roi
+    if retained_samples is not None:
+        selected = retained_samples
+    elif sample_all:
+        # A full boolean gather is exactly C-order flattening. Cast and reorder
+        # together, reusing a contiguous float64 source without making a copy.
+        selected = np.asarray(values, dtype=np.float64, order="C").reshape(-1)
+    else:
+        selected = np.asarray(values[sampling], dtype=np.float64)
     if retained_samples is None and not np.all(np.isfinite(selected)):
         raise ValueError("sampled image intensities must be finite")
     return PreparedInput(values, roi, shape_roi, sampling), selected
@@ -443,16 +488,16 @@ def prepare_derived_input(
 
     The pipeline disables normalization and resegmentation for derived images. Its
     original preparation therefore supplies the intensity/sampling/morphology masks,
-    but each derived image still needs its own exact conversion and sampled-value
-    finite check before its independent discretization.
+    but each derived image still needs its own source admission and finite check
+    before its independent float64 discretization.
     """
     image = np.asarray(image)
     if image.shape != original.image.shape:
         raise ValueError("image and mask must share a nonempty 2D or 3D array shape")
     if image.dtype.kind not in "iuf":
         raise ValueError("image must be real numeric and mask must contain integer labels")
-    values = exact_float64(image)
-    selected = values[original.sampling_mask]
+    values = _admit_source(image)
+    selected = np.asarray(values[original.sampling_mask], dtype=np.float64)
     if not np.all(np.isfinite(selected)):
         raise ValueError("sampled image intensities must be finite")
     return (
@@ -496,19 +541,20 @@ def discretize_prepared(
     shape, local intensity and IVH leave ``bins=None`` with the unused-lattice
     sentinel ``gray_levels=1``; IVH constructs its separate lattice later.
     """
+    image = data.image
     assign = any(
         not name.startswith(("shape", "localintensity_", "ivh_", "firstorder_"))
         or name in {"firstorder_Entropy", "firstorder_Uniformity"}
         for name in settings.features
     )
     if not assign:
-        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, None, 1)
-    bins = np.zeros(data.image.shape, dtype=np.int32)
+        return Prepared(image, data.roi, data.shape_roi, data.sampling_mask, None, 1)
+    bins = np.zeros(image.shape, dtype=np.int32)
     if settings.bin_count is not None and selected.min() == selected.max():
         level = 1 if settings.constant_roi_bin == "first" else settings.bin_count // 2 + 1
         _check_gray_levels(level, settings)
         bins[data.sampling_mask] = level
-        return Prepared(data.image, data.roi, data.shape_roi, data.sampling_mask, bins, level)
+        return Prepared(image, data.roi, data.shape_roi, data.sampling_mask, bins, level)
     integer = _integer_fixed_width_bins(selected, settings)
     if integer is not None:
         # Exact integer classification also supplies the source bounds that admit
@@ -523,7 +569,7 @@ def discretize_prepared(
     _check_gray_levels(ng, settings)
     bins[data.sampling_mask] = digitized
     return Prepared(
-        data.image, data.roi, data.shape_roi, data.sampling_mask, bins, ng, integer_bounds,
+        image, data.roi, data.shape_roi, data.sampling_mask, bins, ng, integer_bounds,
     )
 
 
