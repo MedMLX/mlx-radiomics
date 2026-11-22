@@ -484,6 +484,31 @@ def test_laws_energy_is_the_absolute_response_mean_window() -> None:
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("padding", list(FilterPadding))
+def test_pooled_3d_laws_energy_window_uses_original_boundaries(padding: FilterPadding) -> None:
+    image = np.random.default_rng(24).normal(size=(8, 10, 11))
+    window = (slice(0, 3), slice(3, 6), slice(9, 11))
+    constant = -5.0
+    options = TransformSettings(
+        image_types=(ImageType.LAWS,),
+        laws=LawsSettings(
+            kernel="L5E5E5", padding=padding, constant=constant,
+            pooling=OrientationPooling.MAX, energy_distance=3,
+        ),
+    )
+    # The even L5 tap can sit on any axis. Reversing an odd E5 tap flips the sign
+    # of the kernel, so max pooling over both signs takes the absolute response.
+    taps = _laws_kernel("L5E5E5")
+    pooled = np.maximum.reduce([
+        np.abs(_convolve(image, np.moveaxis(taps, 2, axis), padding, constant))
+        for axis in range(3)
+    ])
+    # E5 has zero sum, so the far-field energy extension for constant padding is zero.
+    expected = _convolve(pooled, np.full((7, 7, 7), 1.0 / 7**3), padding).real
+    [(_, actual)] = _production(image, options, window=window)
+    np.testing.assert_allclose(actual, expected[window], rtol=1e-5, atol=2e-6)
+
+
 @pytest.mark.parametrize("planar", [False, True])
 def test_laws_energy_window_mean_is_correctly_rounded(planar: bool) -> None:
     # Integer absolute responses below 2**24 / 15**3 have exact window sums, so the
@@ -527,6 +552,9 @@ def test_laws_energy_extends_the_absolute_response_by_its_far_field(codes: str) 
     ))
     assert np.all(actual >= 0)
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+    window = (slice(0, 3), slice(5, 8))
+    [(_, cropped)] = _production(image, options, window=window)
+    np.testing.assert_allclose(cropped, expected[window], rtol=1e-5, atol=1e-5)
     # A constant image extended by its own value has a constant energy at every border.
     [(_, flat)] = _production(np.full((6, 7), constant), options)
     np.testing.assert_allclose(flat, far_field, rtol=1e-5, atol=1e-5)

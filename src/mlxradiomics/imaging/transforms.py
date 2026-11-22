@@ -31,7 +31,6 @@ from mlxradiomics.filters import (
     FFT_AVAILABLE,
     FFT_DISABLED_REASON,
     gabor_responses,
-    laws_energy,
     laws_response,
     log_response,
     mean_response,
@@ -41,6 +40,7 @@ from mlxradiomics.filters import (
     separable_wavelet_responses,
     simoncelli_response,
 )
+from mlxradiomics.filters.convolution import laws_energy_response
 from mlxradiomics.filters.lbp2d import lbp2d
 from mlxradiomics.filters.riesz_steering import align_riesz, riesz_multi_indices
 from mlxradiomics.numerics.runtime import evaluate, mx
@@ -559,8 +559,8 @@ def feature_images(
             samples at source precision.
         window: Optional bounded ``start:stop`` slices of ``image``; every yielded image
             is cropped to it. Wavelets limit the input where their tap reach allows.
-            Gabor and sampled LoG evaluate the requested output using the full image's
-            filter support and boundaries.
+            Gabor, sampled LoG and Laws energy evaluate the requested output using the
+            full image's filter support and boundaries.
         _finite_input: Internal proof from the extraction pipeline's full float32 host
             validation; avoids repeating that validation and readback on the GPU.
 
@@ -669,14 +669,16 @@ def _feature_images(
             yield FeatureImage(_mean_name(options), values)
             continue
         if kind == ImageType.LAWS:
-            values = laws_response(
-                image, options.laws.kernel, options.laws.padding, options.laws.constant,
-                options.laws.pooling,
-            )
-            if options.laws.energy_distance is not None:
-                values = laws_energy(
-                    values, options.laws.kernel, options.laws.energy_distance,
+            if options.laws.energy_distance is None:
+                values = laws_response(
+                    image, options.laws.kernel, options.laws.padding, options.laws.constant,
+                    options.laws.pooling,
+                )
+            else:
+                values = laws_energy_response(
+                    image, options.laws.kernel, options.laws.energy_distance,
                     options.laws.padding, options.laws.constant,
+                    options.laws.pooling, window=window,
                 )
             evaluate(values)
             yield FeatureImage(_laws_name(options), values)

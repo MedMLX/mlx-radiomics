@@ -491,6 +491,11 @@ def mean_response(
         image, [(half, half) if axis in filtered else (0, 0) for axis in range(image.ndim)],
         padding, constant,
     )
+    return _mean_valid(result, support, filtered)
+
+
+def _mean_valid(result: mx.array, support: int, filtered: range) -> mx.array:
+    """Average valid windows of an already extended input."""
     full = float(support**len(filtered))
     # The padded array already contains the extension constant, so its maximum
     # bounds every value participating in the accumulation.
@@ -530,6 +535,8 @@ def laws_response(
     padding: FilterPadding,
     constant: float,
     pooling: OrientationPooling,
+    *,
+    window: tuple[slice, ...] | None = None,
 ) -> mx.array:
     """Filter an image with a separable Laws kernel (IBSI ``JTXT``).
 
@@ -544,9 +551,10 @@ def laws_response(
         padding: Boundary-extension method.
         constant: Extension value used by :attr:`FilterPadding.CONSTANT`.
         pooling: Pooling over rotated kernel orientations.
+        window: Optional nonempty output window in full image coordinates.
 
     Returns:
-        Float32 response map with the image's shape.
+        Float32 response map on the full image grid or the requested window.
     """
     vectors = _laws_vectors(codes)
     if len(vectors) == 3 and image.ndim != 3:
@@ -554,16 +562,21 @@ def laws_response(
     orientations = (
         [vectors] if pooling is OrientationPooling.NONE else _laws_orientations(codes)
     )
+    convolve = convolve_planes if image.ndim == 3 and len(vectors) == 2 else convolve_nd
+    distinct: dict[tuple[tuple[int, ...], bytes], mx.array] = {}
     responses: list[mx.array] = []
     for orientation in orientations:
         kernel = _kernel_from_vectors(orientation)
-        if image.ndim == 2:
-            responses.append(convolve_nd(image, kernel, padding, constant))
-        elif len(vectors) == 2:
-            responses.append(convolve_planes(image, kernel, padding, constant))
-        else:
-            responses.append(convolve_nd(image, kernel, padding, constant))
+        key = (kernel.shape, kernel.tobytes())
+        if key not in distinct:
+            distinct[key] = convolve(image, kernel, padding, constant, window=window)
+        # Average pooling depends on both the multiplicity and order of the rotations.
+        responses.append(distinct[key])
     return _pool(responses, pooling)
+
+
+def _laws_energy_extension(vectors: tuple[NDArray[np.float64], ...], constant: float) -> float:
+    return abs(constant * prod(float(vector.sum()) for vector in vectors))
 
 
 def laws_energy(
@@ -605,11 +618,69 @@ def laws_energy(
     if distance < 0:
         raise ValueError("Laws energy distance must be nonnegative")
     vectors = _laws_vectors(codes)
-    extension = abs(constant * prod(float(vector.sum()) for vector in vectors))
+    extension = _laws_energy_extension(vectors, constant)
     return mean_response(
         mx.abs(response), 2 * distance + 1, padding, extension,
         planar=len(vectors) == 2 and response.ndim == 3,
     )
+
+
+def laws_energy_response(
+    image: mx.array,
+    codes: str,
+    distance: int,
+    padding: FilterPadding,
+    constant: float,
+    pooling: OrientationPooling,
+    *,
+    window: tuple[slice, ...] | None = None,
+) -> mx.array:
+    """Compute Laws energy on the full grid or within a nonempty output window.
+
+    A window needs the pooled response over one energy radius beyond its edges.
+    Apply the original image boundary at the convolution and again at the
+    absolute response before averaging, as in the full-grid calculation.
+    """
+    if window is None:
+        response = laws_response(image, codes, padding, constant, pooling)
+        return laws_energy(response, codes, distance, padding, constant)
+
+    vectors = _laws_vectors(codes)
+    filtered = range(image.ndim - len(vectors), image.ndim)
+    widths = [distance if axis in filtered else 0 for axis in range(image.ndim)]
+    bounds = [part.indices(size)[:2] for part, size in zip(window, image.shape, strict=True)]
+    halo = [
+        (start - width, stop + width)
+        for (start, stop), width in zip(bounds, widths, strict=True)
+    ]
+    extension = [
+        (max(0, -start), max(0, stop - size))
+        for (start, stop), size in zip(halo, image.shape, strict=True)
+    ]
+    if padding is FilterPadding.PERIODIC and any(before or after for before, after in extension):
+        # Periodic convolution repeats its response. Extend the source far enough
+        # for both filters so wrapping does not force convolution across the gap.
+        radius = max(vector.size // 2 for vector in vectors)
+        reach = [radius if axis in filtered else 0 for axis in range(image.ndim)]
+        combined = [(width + tail, width + tail) for width, tail in zip(widths, reach, strict=True)]
+        source = _convolution_source(
+            image, combined, padding, constant, window,
+        )
+        response_window = tuple(
+            slice(tail, size - tail) for size, tail in zip(source.shape, reach, strict=True)
+        )
+        response = laws_response(source, codes, padding, constant, pooling, window=response_window)
+        absolute = mx.abs(response)
+    else:
+        response_window = tuple(
+            slice(max(0, start), min(stop, size))
+            for (start, stop), size in zip(halo, image.shape, strict=True)
+        )
+        response = laws_response(image, codes, padding, constant, pooling, window=response_window)
+        absolute = pad_image(
+            mx.abs(response), extension, padding, _laws_energy_extension(vectors, constant),
+        )
+    return _mean_valid(absolute, 2 * distance + 1, filtered)
 
 
 def gabor_kernel(
