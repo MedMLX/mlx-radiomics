@@ -160,21 +160,24 @@ def normalize_values(image: HostArray, settings: Settings) -> NDArray[np.float64
     # exact power of two to unit magnitude (the subtraction cannot overflow near 1e308),
     # and the offsets again (their squares cannot overflow or flush to zero; 1e-162
     # offsets squared otherwise underflow into a wrong but finite deviation).
-    values = _unit_scaled(values)
-    offsets = _unit_scaled(values - values.flat[0])
-    deviation = float(np.std(offsets, ddof=1))
+    _scale_to_unit(values)
+    np.subtract(values, values.flat[0], out=values)
+    _scale_to_unit(values)
+    deviation = float(np.std(values, ddof=1))
     if deviation == 0 or not np.isfinite(deviation):
         raise ValueError("normalization requires nonzero finite whole-image variance")
-    values = (offsets - np.mean(offsets)) / deviation
+    np.subtract(values, np.mean(values), out=values)
+    np.divide(values, deviation, out=values)
     if settings.remove_outliers is not None:
-        values = np.clip(values, -settings.remove_outliers, settings.remove_outliers)
-    return values * settings.normalize_scale
+        np.clip(values, -settings.remove_outliers, settings.remove_outliers, out=values)
+    np.multiply(values, settings.normalize_scale, out=values)
+    return values
 
 
-def _unit_scaled(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Scale ``values`` by the exact power of two that brings their peak into [0.5, 1)."""
-    peak = float(np.max(np.abs(values)))
-    return np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0)
+def _scale_to_unit(values: NDArray[np.float64]) -> None:
+    """Scale finite values in place by a power of two that brings their peak into [0.5, 1)."""
+    peak = max(float(values.max()), -float(values.min()))
+    np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0, out=values)
 
 
 def _resegment_samples(
@@ -206,10 +209,12 @@ def _resegment_samples(
         # every or almost no voxel). Inclusive comparisons are unchanged by those
         # rescalings, and all-equal ROI values still give exactly zero spread. Only ROI
         # voxels are centered: the scale is the ROI's, and outside values are discarded.
-        scaled = _unit_scaled(selected)
-        offsets = _unit_scaled(scaled - float(scaled[0]))
-        centered = offsets - float(np.mean(offsets))
-        spread = float(np.std(offsets))
+        centered = selected.copy()
+        _scale_to_unit(centered)
+        np.subtract(centered, centered[0], out=centered)
+        _scale_to_unit(centered)
+        spread = float(np.std(centered))
+        np.subtract(centered, np.mean(centered), out=centered)
     if settings.resegment_mode == "relative":
         thresholds = thresholds * np.max(selected)
     elif settings.resegment_mode == "sigma":
