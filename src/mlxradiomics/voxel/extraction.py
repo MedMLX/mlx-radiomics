@@ -18,7 +18,7 @@ from mlxradiomics.contracts.types import (
     VoxelSink,
 )
 from mlxradiomics.contracts.validity import accumulate_validity
-from mlxradiomics.features.aggregation import aggregated_texture_statistics
+from mlxradiomics.features.aggregation import aggregated_texture_statistics, resolved_aggregations
 from mlxradiomics.features.cooccurrence import aggregate_glcm, pair_slices
 from mlxradiomics.features.first_order import first_order, first_order_histogram, first_order_inputs
 from mlxradiomics.features.first_order_source import FirstOrderAdmission, prepare_first_order_source
@@ -307,7 +307,7 @@ def _sparse_glcm_bytes(
     return working
 
 
-def _explicit_families(settings: Settings) -> frozenset[str]:
+def _explicit_families(settings: Settings, ndim: int) -> frozenset[str]:
     """Selected texture families whose conventions the fused and native kernels lack.
 
     GLCM, GLRLM and GLSZM read none of the neighborhood or NGTDM conventions, so under
@@ -315,11 +315,11 @@ def _explicit_families(settings: Settings) -> frozenset[str]:
     pipeline. Only a non-native aggregation of the family itself, which merges matrices
     before the features, needs the explicit pipeline. GLDM and NGTDM also depend on the
     neighborhood support, NGTDM on its singular cases, and GLDZM has no native route.
+    GLSZM can share GLDZM's zone labels when their spatial domains match.
     """
+    modes = resolved_aggregations(settings, ndim)
     families: set[str] = set()
-    for family in ("glcm", "glrlm", "glszm", "gldzm", "ngtdm", "gldm"):
-        if not any(name.startswith(f"{family}_") for name in settings.features):
-            continue
+    for family in modes:
         if (
             getattr(settings, f"{family}_aggregation") != "native"
             or family == "gldzm"
@@ -327,6 +327,11 @@ def _explicit_families(settings: Settings) -> frozenset[str]:
             or (family == "ngtdm" and settings.ngtdm_singular_cases == "ibsi-caps")
         ):
             families.add(family)
+    zone_mode = modes.get("glszm")
+    if zone_mode is not None and zone_mode == modes.get("gldzm") and (
+        ndim == 2 or zone_mode == "3d"
+    ):
+        families.add("glszm")
     return frozenset(families)
 
 
@@ -344,7 +349,7 @@ def _plan_voxels(data: Prepared, settings: Settings) -> _VoxelPlan:
         name.startswith("intensityhistogram_") for name in settings.features
     )
     explicit = explicit_texture(settings)
-    explicit_families = _explicit_families(settings)
+    explicit_families = _explicit_families(settings, len(shape))
     explicit_names = tuple(
         name for name in settings.features
         if name.partition("_")[0] in explicit_families
