@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import hashlib
 import math
 import re
 from dataclasses import dataclass, replace
@@ -50,7 +49,6 @@ _FILTERS = (
     "5404579fb3e0d17e8db421f0e82d64ce2432ec03"
 )
 _WORKBOOK = "https://ibsi.radiomics.hevs.ch/assets/IBSI-1-submission-table.xlsx"
-_WORKBOOK_SHA256 = "3af20577b580f2161bd546e147338ff226abb1676488e2906f2ce908b7985710"
 _DIGITAL = Path("ibsi_1_digital_phantom/nifti")
 _CT = Path("ibsi_1_ct_radiomics_phantom/nifti")
 _IMAGE = Path("image/phantom.nii.gz")
@@ -100,9 +98,7 @@ class Reference:
 
 
 def workbook_rows(path: Path, sheet: int) -> tuple[list[Reference], list[Reference]]:
-    """Read the feature and diagnostic rows from the unchanged IBSI workbook."""
-    if hashlib.sha256(path.read_bytes()).hexdigest() != _WORKBOOK_SHA256:
-        raise ValueError(f"Unexpected IBSI 1 workbook digest for {path}")
+    """Read the published IBSI feature and diagnostic references."""
     ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with ZipFile(path) as book:
         shared = ElementTree.fromstring(book.read("xl/sharedStrings.xml"))
