@@ -180,6 +180,26 @@ def _scale_to_unit(values: NDArray[np.float64]) -> None:
     np.ldexp(values, -frexp(peak)[1] if peak > 0 else 0, out=values)
 
 
+def occupied_window(
+    occupied: NDArray[np.bool_], reach: list[int],
+) -> tuple[slice, ...] | None:
+    """Return occupied bounds with a clipped halo, or ``None`` for an empty mask."""
+    window: list[slice] = []
+    for axis, size in enumerate(occupied.shape):
+        present = np.flatnonzero(np.any(
+            occupied, axis=tuple(i for i in range(occupied.ndim) if i != axis),
+        ))
+        if not present.size:
+            return None
+        low, stop = int(present[0]), int(present[-1]) + 1
+        window.append(slice(max(0, low - reach[axis]), min(size, stop + reach[axis])))
+        # Later projections can ignore the empty bands on axes already bounded.
+        exact = [slice(None)] * occupied.ndim
+        exact[axis] = slice(low, stop)
+        occupied = occupied[tuple(exact)]
+    return tuple(window)
+
+
 def _resegment_samples(
     values: HostArray, roi: NDArray[np.bool_], settings: Settings,
     *, keep_samples: bool,

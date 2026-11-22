@@ -30,6 +30,7 @@ from mlxradiomics.contracts.types import (
 from mlxradiomics.imaging.io import Volume, read_image, read_mask
 from mlxradiomics.imaging.preprocessing import (
     normalize_values,
+    occupied_window,
     round_intensities,
     validate_exact_float64,
 )
@@ -115,17 +116,20 @@ def _roi_bounds(
     import SimpleITK as sitk
 
     # The ITK mask stays alive throughout this read-only bounds check.
-    locations = np.argwhere(sitk.GetArrayViewFromImage(mask) == label)
-    if not len(locations):
+    bounds = occupied_window(
+        sitk.GetArrayViewFromImage(mask) == label, [0] * mask.GetDimension(),
+    )
+    if bounds is None:
         raise ValueError("selected label is absent from mask")
-    lower, upper = locations.min(axis=0)[::-1], locations.max(axis=0)[::-1] + 1
+    lower = np.array([part.start for part in reversed(bounds)], dtype=np.int64)
+    upper = np.array([part.stop for part in reversed(bounds)], dtype=np.int64)
     corners = product(*zip(lower - 0.5, upper - 0.5, strict=True))
     physical = [mask.TransformContinuousIndexToPhysicalPoint(tuple(map(float, point)))
                 for point in corners]
     indexes = np.asarray([image.TransformPhysicalPointToContinuousIndex(p) for p in physical])
     if np.any(indexes < -0.501) or np.any(indexes > np.asarray(image.GetSize()) - 0.499):
         raise ValueError("mask ROI lies outside the physical image bounds")
-    return lower.astype(np.int64), upper.astype(np.int64)
+    return lower, upper
 
 
 def _require_interpolable_labels(mask: sitk.Image) -> None:
@@ -160,6 +164,7 @@ def _correct_mask(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
 
 def _resample(
     image: sitk.Image, mask: sitk.Image, settings: ImageSettings, label: int,
+    bounds: tuple[NDArray[np.int64], NDArray[np.int64]],
 ) -> tuple[sitk.Image, sitk.Image]:
     """Resample image and mask to ``settings.resampled_spacing`` and crop to the ROI.
 
@@ -174,7 +179,7 @@ def _resample(
     requested = settings.resampled_spacing
     if requested is None or len(requested) != image.GetDimension():
         raise ValueError("resampled_spacing must match the image dimension")
-    lower, upper = _roi_bounds(image, mask, label)
+    lower, upper = bounds
     source_spacing = np.asarray(mask.GetSpacing())
     spacing = np.asarray(requested[::-1])
     spacing = np.where((spacing == 0) | (upper - lower == 1), source_spacing, spacing)
@@ -454,7 +459,7 @@ def load_image_pair(
     image, mask = _itk(source), _itk(labels)
     if image.GetDimension() != mask.GetDimension():
         raise ValueError("image and mask dimensions must match")
-    _roi_bounds(image, mask, options.label)
+    bounds = _roi_bounds(image, mask, options.label)
     if options.normalize:
         normalized = sitk.GetImageFromArray(normalize_values(source.array, options))
         normalized.CopyInformation(image)
@@ -465,7 +470,7 @@ def load_image_pair(
             options.spline_boundary,
         )
     elif spatial.resampled_spacing is not None:
-        image, mask = _resample(image, mask, spatial, options.label)
+        image, mask = _resample(image, mask, spatial, options.label, bounds)
     elif not _same_geometry(image, mask):
         if not spatial.correct_mask:
             raise ValueError("geometry mismatch; explicitly enable correct_mask or resampling")

@@ -28,6 +28,7 @@ from mlxradiomics.features.morphology import require_pairwise_admission
 from mlxradiomics.imaging.preprocessing import (
     PreparedInput,
     discretize_prepared,
+    occupied_window,
     prepare_derived_input,
     prepare_sampled_input,
     validate_exact_float64,
@@ -38,7 +39,7 @@ from mlxradiomics.numerics.runtime import (
     require_retained_capacity,
 )
 from mlxradiomics.voxel.extraction import extract_voxels
-from mlxradiomics.workflows.roi import extract_roi, occupied_window
+from mlxradiomics.workflows.roi import extract_roi
 
 PREPROCESSING_DESCRIPTION = (
     "host normalization, resegmentation and discretization; native Metal image filters/features"
@@ -147,8 +148,6 @@ def input_window(
         if shape.shape != image.shape:
             return None
         occupied = occupied | shape
-    if not np.any(occupied):
-        return None
     reach = [max(*settings.distances, settings.neighborhood_radius)] * image.ndim
     if any(name.startswith("localintensity_") for name in settings.features):
         steps = spacing or (1.0,) * image.ndim

@@ -15,6 +15,7 @@ from mlxradiomics.features.selection import explicit_texture
 from mlxradiomics.features.texture import texture_statistics
 from mlxradiomics.imaging.preprocessing import (
     Prepared,
+    occupied_window,
 )
 from mlxradiomics.numerics.runtime import (
     array_from_bool,
@@ -36,31 +37,9 @@ def _roi_window(data: Prepared, settings: Settings) -> tuple[slice, ...]:
     """
     occupied = data.sampling_mask | data.shape_roi
     reach = max(*settings.distances, settings.neighborhood_radius)
-    return occupied_window(occupied, [reach] * occupied.ndim)
-
-
-def occupied_window(
-    occupied: NDArray[np.bool_],
-    reach: list[int],
-) -> tuple[slice, ...]:
-    """Bound a nonempty mask, narrowing each later reduction to prior exact bounds."""
-    shape = occupied.shape
-    window: list[slice] = []
-    for axis, size in enumerate(shape):
-        present = np.flatnonzero(
-            np.any(
-                occupied,
-                axis=tuple(i for i in range(occupied.ndim) if i != axis),
-            )
-        )
-        low, stop = int(present[0]), int(present[-1]) + 1
-        window.append(slice(max(0, low - reach[axis]), min(size, stop + reach[axis])))
-        # Later axes retain their source coordinates. Narrow only axes already bounded,
-        # without the halo, since it contains no additional occupied voxels.
-        exact = [slice(None)] * occupied.ndim
-        exact[axis] = slice(low, stop)
-        occupied = occupied[tuple(exact)]
-    return tuple(window)
+    window = occupied_window(occupied, [reach] * occupied.ndim)
+    assert window is not None
+    return window
 
 
 def _roi_shapes(
