@@ -460,17 +460,22 @@ def prepare_sampled_input(
     if not np.any(roi):
         raise ValueError("selected label is absent from mask")
     original_roi = roi
+    sample_all = voxel and not settings.masked_kernel
     roi, retained_samples = _resegment_samples(
-        values, roi, settings, keep_samples=not (voxel and not settings.masked_kernel),
+        values, roi, settings, keep_samples=not sample_all,
     )
     shape_roi = roi if settings.resegment_shape else original_roi
     if voxel and np.count_nonzero(roi) < 2:
         raise ValueError("voxel extraction requires at least two selected voxels")
-    sampling = np.ones_like(roi) if voxel and not settings.masked_kernel else roi
-    selected = (
-        np.asarray(values[sampling], dtype=np.float64)
-        if retained_samples is None else retained_samples
-    )
+    sampling = np.ones_like(roi) if sample_all else roi
+    if retained_samples is not None:
+        selected = retained_samples
+    elif sample_all:
+        # A full boolean gather is exactly C-order flattening. Cast and reorder
+        # together, reusing a contiguous float64 source without making a copy.
+        selected = np.asarray(values, dtype=np.float64, order="C").reshape(-1)
+    else:
+        selected = np.asarray(values[sampling], dtype=np.float64)
     if retained_samples is None and not np.all(np.isfinite(selected)):
         raise ValueError("sampled image intensities must be finite")
     return PreparedInput(values, roi, shape_roi, sampling), selected
