@@ -210,7 +210,7 @@ def _recursive_kernel(length: int) -> MetalKernel:
             name="mlxradiomics_recursive_gaussian",
             header=PAIR_HEADER,
             input_names=["image", "coeff_hi", "coeff_lo"],
-            output_names=["causal_hi", "causal_lo", "anticausal_hi", "anticausal_lo", "output"],
+            output_names=["causal_lo", "output"],
             source=f"""
         uint row = thread_position_in_grid.x;
         if (row >= image_shape[0]) return;
@@ -226,43 +226,46 @@ def _recursive_kernel(length: int) -> MetalKernel:
         Pair x0 = Pair{{image[base], 0.0f}};
         Pair xn = Pair{{image[base + {length - 1}], 0.0f}};
         Pair zero = Pair{{0.0f, 0.0f}};
+        Pair history[4] = {{zero, zero, zero, zero}};
 
+        // Each recurrence reads only its four previous states. Keep them local
+        // and retain each causal pair until the reverse pass can sum the result.
         for (int i = 0; i < {length}; i++) {{
             Pair numerator = zero, feedback = zero;
+            #pragma unroll
             for (int k = 0; k < 4; k++) {{
                 Pair sample = Pair{{image[base + max(i - k, 0)], 0.0f}};
                 numerator = add(numerator, multiply(subtract(sample, x0), n[k]));
                 if (i > k) {{
-                    Pair state = Pair{{causal_hi[base + i - k - 1],
-                                       causal_lo[base + i - k - 1]}};
-                    feedback = add(feedback, multiply(state, d[k]));
+                    feedback = add(feedback, multiply(history[k], d[k]));
                 }}
             }}
             Pair value = subtract(numerator, feedback);
-            causal_hi[base + i] = value.hi;
+            history[3] = history[2];
+            history[2] = history[1];
+            history[1] = history[0];
+            history[0] = value;
+            output[base + i] = value.hi;
             causal_lo[base + i] = value.lo;
         }}
 
+        Pair offset = add(multiply(kc, x0), multiply(ka, xn));
         for (int i = {length - 1}; i >= 0; i--) {{
             Pair numerator = zero, feedback = zero;
+            #pragma unroll
             for (int k = 0; k < 4; k++) {{
                 Pair sample = Pair{{image[base + min(i + k + 1, {length - 1})], 0.0f}};
                 numerator = add(numerator, multiply(subtract(sample, xn), m[k]));
                 if (i + k + 1 < {length}) {{
-                    Pair state = Pair{{anticausal_hi[base + i + k + 1],
-                                       anticausal_lo[base + i + k + 1]}};
-                    feedback = add(feedback, multiply(state, d[k]));
+                    feedback = add(feedback, multiply(history[k], d[k]));
                 }}
             }}
-            Pair value = subtract(numerator, feedback);
-            anticausal_hi[base + i] = value.hi;
-            anticausal_lo[base + i] = value.lo;
-        }}
-
-        Pair offset = add(multiply(kc, x0), multiply(ka, xn));
-        for (int i = 0; i < {length}; i++) {{
-            Pair causal = Pair{{causal_hi[base + i], causal_lo[base + i]}};
-            Pair anticausal = Pair{{anticausal_hi[base + i], anticausal_lo[base + i]}};
+            Pair anticausal = subtract(numerator, feedback);
+            history[3] = history[2];
+            history[2] = history[1];
+            history[1] = history[0];
+            history[0] = anticausal;
+            Pair causal = Pair{{output[base + i], causal_lo[base + i]}};
             Pair value = add(add(causal, anticausal), offset);
             output[base + i] = value.hi + value.lo;
         }}
@@ -319,9 +322,9 @@ def recursive_gaussian(
         inputs=[rows, mx.array(high), mx.array(low)],
         grid=(rows.shape[0], 1, 1),
         threadgroup=(64, 1, 1),
-        output_shapes=[rows.shape] * 5,
-        output_dtypes=[mx.float32] * 5,
-    )[4]
+        output_shapes=[rows.shape] * 2,
+        output_dtypes=[mx.float32] * 2,
+    )[1]
     return mx.moveaxis(mx.reshape(output, transposed.shape), -1, axis)
 
 
