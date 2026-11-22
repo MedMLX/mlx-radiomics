@@ -34,11 +34,10 @@ AXIS_FEATURES = ("MajorAxisLength", "MinorAxisLength", "LeastAxisLength", "Elong
                  "Flatness")
 
 
-@pytest.mark.parametrize("shape", [(3, 4, 5), (21, 23, 25)])
+@pytest.mark.parametrize("shape", [(3, 4, 5), (21, 23, 25), (43, 45, 47)])
 def test_cuboid_mesh_diameters_match_face_center_extrema(shape: tuple[int, int, int]) -> None:
     # A cuboid's midpoint mesh reaches a face center by half a voxel at each end.
     # Opposite extreme vertices span n voxels on one axis and n-1 on the others.
-    # The small surface uses one pass; the larger surface has partial pair tiles.
     spacing = (0.75, 1.25, 2.5)
     mask = np.ones(shape, dtype=np.uint8)
     names = ("Maximum3DDiameter", "Maximum2DDiameterSlice",

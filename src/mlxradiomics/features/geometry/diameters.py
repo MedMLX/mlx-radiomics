@@ -3,8 +3,33 @@
 from functools import lru_cache
 from typing import cast
 
+import numpy as np
+from numpy.typing import NDArray
+
+from mlxradiomics.features.geometry.hull import scipy_hull
 from mlxradiomics.numerics.protocols import MetalKernel
-from mlxradiomics.numerics.runtime import mx
+from mlxradiomics.numerics.runtime import evaluate, mx
+
+_DISTANCE = """
+template <int D>
+inline float pair_distance(const device float* points, constant float* spacing,
+                           uint t, uint q) {
+    float component[D];
+    float scale = 0;
+    for (int d = 0; d < D; d++) {
+        component[d] = (points[t * D + d] - points[q * D + d]) * spacing[d];
+        scale = max(scale, fabs(component[d]));
+    }
+    if (isinf(scale)) return INFINITY;
+    if (scale == 0.0f) return 0.0f;
+    float squares = 0;
+    for (int d = 0; d < D; d++) {
+        float normalized = component[d] / scale;
+        squares += normalized * normalized;
+    }
+    return scale * sqrt(squares);
+}
+"""
 
 
 @lru_cache(maxsize=4)
@@ -26,31 +51,13 @@ def _diameter_kernel(ndim: int) -> MetalKernel:
             name="mlxradiomics_diameters",
             input_names=["points", "spacing"],
             output_names=["diameters"],
+            header=_DISTANCE,
             source=f"""
         uint t = thread_position_in_grid.x;
         if (t >= points_shape[0]) return;
         float maximum[4] = {{0, 0, 0, 0}};
         for (uint q = 0; q < t; q++) {{
-            float component[{ndim}];
-            float scale = 0;
-            for (int d = 0; d < {ndim}; d++) {{
-                component[d] = (points[t * {ndim} + d] - points[q * {ndim} + d])
-                               * spacing[d];
-                scale = max(scale, fabs(component[d]));
-            }}
-            float distance;
-            if (isinf(scale)) {{
-                distance = INFINITY;
-            }} else if (scale == 0.0f) {{
-                distance = 0.0f;
-            }} else {{
-                float squares = 0;
-                for (int d = 0; d < {ndim}; d++) {{
-                    float normalized = component[d] / scale;
-                    squares += normalized * normalized;
-                }}
-                distance = scale * sqrt(squares);
-            }}
+            float distance = pair_distance<{ndim}>(points, spacing, t, q);
             maximum[3] = max(maximum[3], distance);
             {planes if ndim == 3 else ""}
         }}
@@ -113,6 +120,7 @@ def _tiled_diameter_kernel(ndim: int) -> MetalKernel:
             name="mlxradiomics_tiled_diameters",
             input_names=["points", "spacing", "limits"],
             output_names=["diameters"],
+            header=_DISTANCE,
             source=f"""
         uint t = thread_position_in_grid.x;
         uint tile = thread_position_in_grid.y;
@@ -123,26 +131,7 @@ def _tiled_diameter_kernel(ndim: int) -> MetalKernel:
         uint end = min(begin + width, t);
         float maximum[4] = {{0, 0, 0, 0}};
         for (uint q = begin; q < end; q++) {{
-            float component[{ndim}];
-            float scale = 0;
-            for (int d = 0; d < {ndim}; d++) {{
-                component[d] = (points[t * {ndim} + d] - points[q * {ndim} + d])
-                               * spacing[d];
-                scale = max(scale, fabs(component[d]));
-            }}
-            float distance;
-            if (isinf(scale)) {{
-                distance = INFINITY;
-            }} else if (scale == 0.0f) {{
-                distance = 0.0f;
-            }} else {{
-                float squares = 0;
-                for (int d = 0; d < {ndim}; d++) {{
-                    float normalized = component[d] / scale;
-                    squares += normalized * normalized;
-                }}
-                distance = scale * sqrt(squares);
-            }}
+            float distance = pair_distance<{ndim}>(points, spacing, t, q);
             maximum[3] = max(maximum[3], distance);
             {planes if ndim == 3 else ""}
         }}
@@ -153,25 +142,18 @@ def _tiled_diameter_kernel(ndim: int) -> MetalKernel:
     )
 
 
-def diameter_maxima(
+def _all_pairs(
     vertices: mx.array,
-    spacing: tuple[float, ...],
+    spacing: mx.array,
     scratch_mib: int,
     ndim: int,
 ) -> mx.array:
-    """Return the overall and per-axis maximum boundary-vertex distances on Metal.
-
-    Every unordered vertex pair is evaluated exactly once with the same scale-safe
-    float32 component norm. A large mesh splits the ``q < t`` range into bounded
-    tiles (``_diameter_tiling``) and reduces the per-tile maxima with a Metal max;
-    the maximum of maxima selects the same float32 distance values as one pass.
-    """
+    """Return the overall and per-plane maxima over every unordered vertex pair."""
     vertex_count = vertices.shape[0]
-    spacing_array = mx.array(spacing, dtype=mx.float32)
     tiling = _diameter_tiling(vertex_count, scratch_mib)
     if tiling is None:
         diameters = _diameter_kernel(ndim)(
-            inputs=[vertices, spacing_array],
+            inputs=[vertices, spacing],
             grid=(vertex_count, 1, 1),
             threadgroup=(256, 1, 1),
             output_shapes=[(vertex_count, _DIAMETER_MAXIMA)],
@@ -180,10 +162,84 @@ def diameter_maxima(
         return mx.max(diameters, axis=0)
     tiles, width = tiling
     diameters = _tiled_diameter_kernel(ndim)(
-        inputs=[vertices, spacing_array, mx.array([width], dtype=mx.int32)],
+        inputs=[vertices, spacing, mx.array([width], dtype=mx.int32)],
         grid=(vertex_count, tiles, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(tiles, vertex_count, _DIAMETER_MAXIMA)],
         output_dtypes=[mx.float32],
     )[0]
     return mx.max(mx.reshape(diameters, (-1, _DIAMETER_MAXIMA)), axis=0)
+
+
+@lru_cache(maxsize=1)
+def _plane_diameter_kernel() -> MetalKernel:
+    """Compile the maximum distance search within each ordered vertex group."""
+    return cast(
+        MetalKernel,
+        mx.fast.metal_kernel(
+            name="mlxradiomics_plane_diameters",
+            input_names=["points", "spacing", "starts"],
+            output_names=["maxima"],
+            header=_DISTANCE,
+            source="""
+        uint t = thread_position_in_grid.x;
+        if (t >= uint(points_shape[0])) return;
+        float maximum = 0;
+        for (uint q = starts[t]; q < t; q++) {
+            maximum = max(maximum, pair_distance<3>(points, spacing, t, q));
+        }
+        maxima[t] = maximum;
+        """,
+        ),
+    )
+
+
+def _plane_maximum(
+    vertices: mx.array, coordinates: NDArray[np.float64], spacing: mx.array, axis: int,
+) -> mx.array:
+    """Compare only vertices that lie on the same half-index plane."""
+    order = np.argsort(coordinates[:, axis], kind="stable")
+    planes = coordinates[order, axis]
+    changes = np.flatnonzero(planes[1:] != planes[:-1]) + 1
+    starts = np.zeros(len(order), dtype=np.uint32)
+    starts[changes] = changes
+    np.maximum.accumulate(starts, out=starts)
+    points = mx.take(vertices, mx.array(order.astype(np.int32)), axis=0)
+    [maxima] = _plane_diameter_kernel()(
+        inputs=[points, spacing, mx.array(starts)],
+        grid=(len(order), 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(len(order),)],
+        output_dtypes=[mx.float32],
+    )
+    return mx.max(maxima)
+
+
+def diameter_maxima(
+    vertices: mx.array, spacing: tuple[float, ...], scratch_mib: int, ndim: int,
+) -> mx.array:
+    """Return the overall and per-plane maximum boundary-vertex distances on Metal.
+
+    Distance from a fixed point is convex, so an overall diameter is attained
+    by hull vertices. Plane diameters need their own vertices and group by
+    equal grid coordinates. Small or scratch-limited meshes use all pairs.
+    """
+    spacing_array = mx.array(spacing, dtype=mx.float32)
+    count = vertices.shape[0]
+    # Bound host hull and plane-ordering work. Small meshes already fit in a
+    # short all-pairs dispatch, avoiding a host topology pass.
+    if count < 8192 or count * 128 > scratch_mib * 1024**2:
+        return _all_pairs(vertices, spacing_array, scratch_mib, ndim)
+
+    coordinates = np.asarray(vertices, dtype=np.float64)
+    hull = scipy_hull(coordinates)
+    hull_vertices = mx.take(vertices, mx.array(hull.vertices), axis=0)
+    overall = _all_pairs(hull_vertices, spacing_array, scratch_mib, ndim)
+    if ndim == 2:
+        return overall
+    planes: list[mx.array] = []
+    for axis in range(3):
+        maximum = _plane_maximum(vertices, coordinates, spacing_array, axis)
+        evaluate(maximum)
+        planes.append(maximum)
+    return mx.stack([*planes, overall[3]])
