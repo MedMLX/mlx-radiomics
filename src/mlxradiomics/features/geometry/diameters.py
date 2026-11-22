@@ -265,6 +265,7 @@ def _plane_maximum(
 
 def _search_maxima(
     vertices: mx.array, spacing: list[mx.array], scratch_mib: int, ndim: int,
+    hull_indices: NDArray[np.int32] | None,
 ) -> mx.array:
     """Return the overall and per-plane maximum boundary-vertex distances on Metal.
 
@@ -279,8 +280,9 @@ def _search_maxima(
         return _all_pairs(vertices, spacing, scratch_mib, ndim)
 
     coordinates = np.asarray(vertices, dtype=np.float64)
-    hull = scipy_hull(coordinates)
-    hull_vertices = mx.take(vertices, mx.array(hull.vertices), axis=0)
+    if hull_indices is None:
+        hull_indices = scipy_hull(coordinates).vertices
+    hull_vertices = mx.take(vertices, mx.array(hull_indices), axis=0)
     overall = _all_pairs(hull_vertices, spacing, scratch_mib, ndim)
     if ndim == 2:
         return overall
@@ -294,12 +296,15 @@ def _search_maxima(
 
 def diameter_maxima(
     vertices: mx.array, spacing: tuple[float, ...], scratch_mib: int, ndim: int,
+    *, hull_indices: NDArray[np.int32] | None = None,
 ) -> mx.array:
-    """Return distances with separate spacing exponents when a component can flush."""
+    """Find diameter maxima, reusing grid-hull vertex indices when already available."""
     # The smallest nonzero grid displacement is half a voxel. Keep it
     # and its contribution to the planar norm even at the float32 normal boundary.
     if min(spacing) >= 2 * np.finfo(np.float32).tiny and max(spacing) <= np.finfo(np.float32).max:
-        return _search_maxima(vertices, [mx.array(spacing, dtype=mx.float32)], scratch_mib, ndim)
+        return _search_maxima(
+            vertices, [mx.array(spacing, dtype=mx.float32)], scratch_mib, ndim, hull_indices,
+        )
     parts = spacing_parts(spacing)
     scales = [mx.array(parts.mantissa, dtype=mx.float32), mx.array(parts.exponent, dtype=mx.int32)]
-    return _search_maxima(vertices, scales, scratch_mib, ndim).view(mx.float32)
+    return _search_maxima(vertices, scales, scratch_mib, ndim, hull_indices).view(mx.float32)

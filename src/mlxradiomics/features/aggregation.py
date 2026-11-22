@@ -11,6 +11,7 @@ from dataclasses import replace
 from math import prod
 
 from mlxradiomics.config.settings import Settings
+from mlxradiomics.features.cooccurrence import batched_roi_glcm
 from mlxradiomics.features.distributions import ngtdm_statistics, size_statistics
 from mlxradiomics.features.glcm import glcm_statistics
 from mlxradiomics.features.matrices import (
@@ -26,6 +27,7 @@ from mlxradiomics.features.matrices import (
 )
 from mlxradiomics.features.sparse_glcm import sparse_glcm_statistics
 from mlxradiomics.features.sparse_size import sparse_size_statistics
+from mlxradiomics.features.texture import run_statistics
 from mlxradiomics.numerics.reduction import CompensatedTotal
 from mlxradiomics.numerics.runtime import evaluate, mx
 
@@ -246,6 +248,25 @@ def aggregated_texture_statistics(
     shared_labels: mx.array | None = None
     neighborhood_users = zone_users = 0
     for family, mode in aggregations.items():
+        whole_roi_average = (
+            not fixed_columns and bins.shape[0] == 1
+            and (mode == "3d_average" or (len(shape) == 2 and mode == "2d_average"))
+        )
+        check_glcm_count = family == "glcm" and _glcm_count_check_needed(shape, settings, mode)
+        if family == "glcm" and whole_roi_average and not check_glcm_count:
+            # Whole-volume directional averaging shares the native ROI counters.
+            batched = batched_roi_glcm(
+                mx.reshape(bins, shape), mx.reshape(mask, shape), ng, settings, mx.float32,
+                compensated_mcc=True,
+            )
+            if batched is not None:
+                output.update(batched)
+                continue
+        if family == "glrlm" and whole_roi_average:
+            output.update(run_statistics(
+                bins, mask, shape, ng, settings, batch_directions=True, compensated=True,
+            ))
+            continue
         neighborhood = None
         labels = None
         # A single-domain preparation is consumed by both matching families and
@@ -259,21 +280,25 @@ def aggregated_texture_statistics(
             if shared_labels is None:
                 shared_labels = prepare_zone_labels(bins, mask, shape, settings)
             labels = shared_labels
-        names = tuple(
+        names: tuple[str, ...] = tuple(
             name.removeprefix(f"{family}_")
             for name in settings.features
             if name.startswith(f"{family}_")
         )
         # Signed features (ClusterShade, Correlation) cancel across matrices; a plain
         # running sum would make the average depend on slice and direction order.
-        totals = {name: CompensatedTotal(bins.shape[0]) for name in names}
+        # A whole-volume zone or neighborhood produces just one matrix. Its
+        # statistic needs the empty-row rule but no directional sum or divisor.
+        single = mode == "3d" and family in {"glszm", "gldzm", "gldm", "ngtdm"}
+        totals: dict[str, CompensatedTotal] = (
+            {} if single else {name: CompensatedTotal(bins.shape[0]) for name in names}
+        )
         ordinary = tuple(name for name in names if name != "MCC")
         denominators = (
             {"ordinary": mx.zeros((bins.shape[0],), dtype=mx.int32)} if ordinary else {}
         )
         if "MCC" in names:
             denominators["MCC"] = mx.zeros((bins.shape[0],), dtype=mx.int32)
-        check_glcm_count = family == "glcm" and _glcm_count_check_needed(shape, settings, mode)
         for matrix in _groups(
             family, bins, mask, morphological, shape, ng, settings, mode, histogram_method,
             fixed_columns, neighborhood, labels,
@@ -323,6 +348,12 @@ def aggregated_texture_statistics(
                         voxel_count=matrix.voxels, total_count=count,
                     )
                 active = count > 0
+            if single:
+                result = {f"{family}_{name}": mx.where(active, 0.0 + features[name], float("nan"))
+                          for name in names}
+                evaluate(*result.values())
+                output.update(result)
+                continue
             if ordinary:
                 denominators["ordinary"] = denominators["ordinary"] + active.astype(mx.int32)
             mcc_defined = active

@@ -71,27 +71,28 @@ def _ombb_candidate_axes(
         dtype=np.int64,
     )
     tolerance = max(float(np.max(np.linalg.norm(edges, axis=1))), 1.0) * 1e-12
+    # Coplanar faces with identical outward normals describe the same projected
+    # hull. Preserve each dot product's evaluation order at silhouette boundaries.
+    face_normals = np.unique(normals, axis=0)
+    left, right = normals[first], normals[second]
     candidates: list[NDArray[np.float64]] = []
-    for normal in normals:
-        # One adjacency dot product is zero when the edge lies in a face parallel to
-        # the candidate direction; opposite signs select the usual silhouette.
-        silhouette: NDArray[np.bool_] = (normals[first] @ normal) * (normals[second] @ normal) <= 0
-        if not bool(np.any(silhouette)):
-            continue
-        selected: NDArray[np.float64] = edges[silhouette]
-        projected: NDArray[np.float64] = selected @ normal
-        perpendicular: NDArray[np.float64] = selected - projected[:, None] * normal[None, :]
-        perpendicular_lengths: NDArray[np.float64] = np.linalg.norm(
-            perpendicular,
-            axis=1,
-        )
-        usable: NDArray[np.bool_] = perpendicular_lengths > tolerance
-        if not bool(np.any(usable)):
-            continue
-        v: NDArray[np.float64] = perpendicular[usable] / perpendicular_lengths[usable, None]
-        u: NDArray[np.float64] = np.broadcast_to(normal, v.shape)
-        w: NDArray[np.float64] = np.cross(u, v)
-        candidates.append(np.stack((u, v, w), axis=1))
+    # Bound the normal-by-edge membership matrix as the number of hull faces grows.
+    block = max(1, min(32, _OMBB_BLOCK_ELEMENTS // (16 * len(edges))))
+    for start in range(0, len(face_normals), block):
+        block_normals = face_normals[start : start + block]
+        columns = block_normals[:, :, None]
+        silhouette = ((left @ columns)[..., 0] * (right @ columns)[..., 0]) <= 0
+        faces, indexes = np.nonzero(silhouette)
+        u = block_normals[faces]
+        chosen = edges[indexes]
+        projected: NDArray[np.float64] = np.vecdot(chosen, u)
+        perpendicular: NDArray[np.float64] = chosen - projected[:, None] * u
+        magnitudes: NDArray[np.float64] = np.linalg.norm(perpendicular, axis=1)
+        usable = magnitudes > tolerance
+        if np.any(usable):
+            u = u[usable]
+            v = perpendicular[usable] / magnitudes[usable, None]
+            candidates.append(np.stack((u, v, np.cross(u, v)), axis=1))
     if not candidates:
         raise RuntimeError("convex hull has no face-flush box orientations")
     return np.concatenate(candidates, axis=0)

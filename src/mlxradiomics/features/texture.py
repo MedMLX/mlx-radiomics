@@ -312,7 +312,7 @@ def run_kernel(shape: tuple[int, ...], offset: tuple[int, ...]) -> MetalKernel:
 
 def run_statistics(
     bins: mx.array, mask: mx.array, shape: tuple[int, ...], ng: int, settings: Settings,
-    *, batch_directions: bool = False,
+    *, batch_directions: bool = False, compensated: bool = False,
 ) -> dict[str, mx.array]:
     """Compute selected GLRLM features, averaged over directions.
 
@@ -323,6 +323,8 @@ def run_statistics(
     A direction contributes to a
     row whenever at least one run starts in it, so an isolated masked voxel is not
     discarded. Rows with no run in any direction have undefined features and return NaN.
+    A single ROI can batch directions and preserve the explicit aggregation's
+    compensated mean or the native aggregation's ordinary mean.
 
     Returns:
         Selected ``glrlm_*`` arrays ``(batch,)``.
@@ -335,7 +337,7 @@ def run_statistics(
     # kernel apply the actual image bounds. Explicit force-2D restrictions still apply.
     offsets = directions(tuple(max(size, 2) for size in shape), replace(settings, distances=(1,)))
     if batch_directions and bins.shape[0] == 1:
-        return _roi_run_statistics(bins, mask, shape, ng, settings, offsets, selected)
+        return _roi_run_statistics(bins, mask, shape, ng, settings, offsets, selected, compensated)
     totals: dict[str, mx.array] = {}
     active_count = mx.zeros((bins.shape[0],), dtype=mx.int32)
     for offset in offsets:
@@ -401,7 +403,7 @@ def _roi_run_counts_kernel(
 
 def _roi_run_statistics(
     bins: mx.array, mask: mx.array, shape: tuple[int, ...], ng: int, settings: Settings,
-    offsets: tuple[tuple[int, ...], ...], selected: set[str],
+    offsets: tuple[tuple[int, ...], ...], selected: set[str], compensated: bool,
 ) -> dict[str, mx.array]:
     """Evaluate directional matrices together and average them in direction order."""
     columns = max(shape)
@@ -421,16 +423,11 @@ def _roi_run_statistics(
         group = max(1, min(len(offsets), (settings.scratch_mib * 1024**2 - count_bytes)
                            // max(1, ng * columns * 256)))
     blocks: list[mx.array] = []
-    all_active: list[mx.array] = []
     names: tuple[str, ...] = ()
     for start in range(0, len(offsets), group):
         matrices: list[mx.array] = []
-        active_rows: list[mx.array] = []
         if direct_counts is not None:
-            block_counts = direct_counts[start:start + group]
-            active = mx.any(block_counts > 0, axis=(1, 2))
-            active_rows.extend(active[index:index + 1] for index in range(block_counts.shape[0]))
-            matrices.append(block_counts)
+            matrices.append(direct_counts[start:start + group])
         else:
             for offset in offsets[start:start + group]:
                 lengths, starts = run_kernel(shape, offset)(
@@ -438,10 +435,8 @@ def _roi_run_statistics(
                     output_shapes=[bins.shape] * 2, output_dtypes=[mx.int32, mx.bool_],
                 )
                 counts = count_matrix(bins, lengths, starts, ng, columns)
-                active = mx.any(starts, axis=1)
-                evaluate(counts, active)
+                evaluate(counts)
                 matrices.append(counts)
-                active_rows.append(active)
                 del lengths, starts
         trim_cache()
         values = size_statistics(mx.concatenate(matrices, axis=0), "glrlm", selected)
@@ -449,9 +444,10 @@ def _roi_run_statistics(
         block = mx.stack(list(values.values()))
         evaluate(block)
         blocks.append(block)
-        all_active.extend(active_rows)
+    # Each direction partitions the same mask into runs, including singleton runs.
+    active = mx.broadcast_to(mx.any(mask), (len(offsets),))
     means = directional_mean(
-        mx.concatenate(blocks, axis=1), mx.concatenate(all_active), compensated=False,
+        mx.concatenate(blocks, axis=1), active, compensated=compensated,
     )
     return {f"glrlm_{name}": means[index:index + 1] for index, name in enumerate(names)}
 

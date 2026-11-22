@@ -148,6 +148,16 @@ def input_window(
         or labels.dtype.kind not in "biu"
     ):
         return None
+    first_plane = 0
+    if shape_mask is None and labels.size >= 1024**2 and settings.label > 0:
+        # A plane whose maximum is below the label cannot contain the ROI.
+        # Scan the original integers before allocating an image-sized equality mask.
+        plane_max: HostArray = np.maximum.reduce(labels, axis=tuple(range(1, labels.ndim)))
+        possible = np.flatnonzero(np.greater_equal(plane_max, settings.label))
+        if not possible.size:
+            return None
+        first_plane = int(possible[0])
+        labels = labels[first_plane:int(possible[-1]) + 1]
     occupied = labels == settings.label
     if shape_mask is not None:
         shape = np.asarray(shape_mask, dtype=np.bool_)
@@ -161,7 +171,14 @@ def input_window(
             return None
         radius = (3000 / (4 * np.pi)) ** (1 / 3)
         reach = [max(value, floor(radius / step)) for value, step in zip(reach, steps, strict=True)]
-    return occupied_window(occupied, reach)
+    if labels.shape[0] == image.shape[0]:
+        return occupied_window(occupied, reach)
+    window = occupied_window(occupied, [0, *reach[1:]])
+    if window is None:
+        return None
+    first = window[0]
+    return (slice(max(0, first_plane + first.start - reach[0]),
+                  min(image.shape[0], first_plane + first.stop + reach[0])), *window[1:])
 
 
 def extract_with_shape_mask(

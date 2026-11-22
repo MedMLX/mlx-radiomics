@@ -17,7 +17,7 @@ pair once in a tiled Metal kernel without storing a pair matrix. Row outputs are
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from functools import lru_cache
-from math import frexp, isfinite
+from math import frexp, isfinite, prod
 from typing import cast
 
 import numpy as np
@@ -216,7 +216,7 @@ def _integrated_intensity(
 
 
 # Pair tiles staged in threadgroup memory; one thread per row voxel in a threadgroup.
-_PAIR_TILE = 256
+_PAIR_TILE = 64
 # Rows per dispatch keep each command buffer short on large ROIs.
 _PAIR_ROWS = 1 << 16
 
@@ -226,8 +226,25 @@ _PAIR_ROWS = 1 << 16
 _UNSCALED_UNIT_FLOOR = 2.0**-63
 
 
-@lru_cache(maxsize=2)
-def _pair_kernel(scaled: bool) -> MetalKernel:
+@lru_cache(maxsize=1)
+def _weight_table_kernel() -> MetalKernel:
+    """Tabulate the direct kernel's float32 weight for each absolute grid displacement."""
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_distance_weights", input_names=["unit", "shape"],
+        output_names=["weights"],
+        header="\n#pragma clang fp contract(off)\n#pragma clang fp reassociate(off)\n",
+        source="""
+            uint3 d = thread_position_in_grid;
+            float x = float(d.z) * unit[0], y = float(d.y) * unit[1], z = float(d.x) * unit[2];
+            uint index = (d.z * shape[1] + d.y) * shape[2] + d.x;
+            float distance = metal::precise::sqrt(x*x + y*y + z*z);
+            weights[index] = index ? metal::precise::divide(1.0f, distance) : 0;
+        """,
+    ))
+
+
+@lru_cache(maxsize=3)
+def _pair_kernel(scaled: bool, lookup: bool) -> MetalKernel:
     """Tiled unordered-pair kernel for the inverse-distance weight and both numerators.
 
     Each thread owns row voxel ``i`` and visits only column voxels ``j > i`` through
@@ -257,9 +274,19 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
         if scaled else
         "float distance = metal::precise::sqrt(qx*qx + qy*qy + qz*qz);"
     )
+    weight = (
+        """uint at = (abs(dx) * metric_shape[1] + abs(dy)) * metric_shape[2] + abs(dz);
+           float w = metric[at];"""
+        if lookup else
+        f"""float qx = float(dx) * metric[0], qy = float(dy) * metric[1];
+            float qz = float(dz) * metric[2];
+            {distance}
+            float w = metal::precise::divide(1.0f, distance);"""
+    )
+    mode = "lookup" if lookup else "scaled" if scaled else "direct"
     return cast(MetalKernel, mx.fast.metal_kernel(
-        name=f"mlxradiomics_spatial_pairs_{'scaled' if scaled else 'direct'}",
-        input_names=["coords", "values", "unit", "params"],
+        name=f"mlxradiomics_spatial_pairs_{mode}",
+        input_names=["coords", "values", "metric", "params"],
         output_names=["sums"],
         header="""
             #pragma clang fp contract(off)
@@ -281,7 +308,6 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
             uint first = start + threadgroup_position_in_grid.x * {_PAIR_TILE};
             int ix = coords[3 * i], iy = coords[3 * i + 1], iz = coords[3 * i + 2];
             float vi = values[i];
-            float ux = unit[0], uy = unit[1], uz = unit[2];
             float ws = 0, wc = 0, ms = 0, mc = 0, gs = 0, gc = 0;
             threadgroup int tx[{_PAIR_TILE}];
             threadgroup int ty[{_PAIR_TILE}];
@@ -300,9 +326,7 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
                 if (active) {{
                     for (uint k = k0; k < count; ++k) {{
                         int dx = tx[k] - ix, dy = ty[k] - iy, dz = tz[k] - iz;
-                        float qx = float(dx) * ux, qy = float(dy) * uy, qz = float(dz) * uz;
-                        {distance}
-                        float w = metal::precise::divide(1.0f, distance);
+                        {weight}
                         float vj = tv[k];
                         float diff = vi - vj;
                         two_sum_add(ws, wc, w);
@@ -324,17 +348,29 @@ def _pair_kernel(scaled: bool) -> MetalKernel:
 
 def _pair_sums(
     coordinates: mx.array, centered: mx.array, unit: mx.array, count: int, scratch_mib: int,
-    scaled: bool,
+    scaled: bool, shape: tuple[int, ...],
 ) -> tuple[mx.array, mx.array, mx.array]:
     """Sum ordered pairs with bounded row outputs and compensated chunk totals."""
     rows_per_dispatch = min(_PAIR_ROWS, max(1, scratch_mib * 1024**2 // 64))
+    # Keep the original row partitions and their summation order. Reuse a
+    # table only for compact domains with space beyond the row working set.
+    cells = prod(shape)
+    lookup = (not scaled and count >= 4096 and cells <= 8 * count
+              and cells * 4 + 64 * min(count, rows_per_dispatch) <= scratch_mib * 1024**2)
+    metric = unit
+    if lookup:
+        metric = _weight_table_kernel()(
+            inputs=[unit, mx.array(shape, dtype=mx.uint32)], grid=(shape[2], shape[1], shape[0]),
+            threadgroup=(32, 4, 1),
+            output_shapes=[shape], output_dtypes=[mx.float32],
+        )[0]
     accumulator = CompensatedTotal(6)
     for start in range(0, count, rows_per_dispatch):
         rows = min(rows_per_dispatch, count - start)
         params = mx.array([count, start, rows], dtype=mx.uint32)
         threads = ((rows + _PAIR_TILE - 1) // _PAIR_TILE) * _PAIR_TILE
-        partial = _pair_kernel(scaled)(
-            inputs=[coordinates, centered, unit, params], grid=(threads, 1, 1),
+        partial = _pair_kernel(scaled, lookup)(
+            inputs=[coordinates, centered, metric, params], grid=(threads, 1, 1),
             threadgroup=(_PAIR_TILE, 1, 1), output_shapes=[(rows * 6,)],
             output_dtypes=[mx.float32],
         )[0]
@@ -396,6 +432,7 @@ def _spatial_autocorrelation(
                  for axis, used in enumerate(active))
     total_weight, moran_numerator, geary_numerator = _pair_sums(
         mx.reshape(coordinates_mx, (-1,)), centered, unit, count, scratch_mib, scaled,
+        source.mask.shape,
     )
     evaluate(total_weight, moran_numerator, geary_numerator)
     # Every valid weight is positive, so any non-finite weight, including from a distance

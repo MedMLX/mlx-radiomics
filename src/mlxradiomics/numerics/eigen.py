@@ -256,7 +256,7 @@ def symmetric_eigenvalues(matrix: mx.array) -> mx.array:
     return mx.sort(values, axis=1)
 
 
-def maximal_correlation(counts: mx.array) -> mx.array:
+def maximal_correlation(counts: mx.array, *, single_matrix_products: bool = False) -> mx.array:
     """Compute the GLCM Maximal Correlation Coefficient for one direction per batch row.
 
     For a contingency table with joint probability ``p`` and marginals ``px``, ``py``,
@@ -276,6 +276,9 @@ def maximal_correlation(counts: mx.array) -> mx.array:
         counts: GLCM counts ``(batch, Ng, Ng)`` for a single direction. ``Ng`` is the
             global gray-level count; validity uses only the occupied entries of each
             matrix.
+        single_matrix_products: Form each Gram product with the single-matrix
+            Metal dispatch used by explicit directional aggregation. Batched
+            matrix multiplication can select a different float32 accumulation order.
 
     Returns:
         Float32 array ``(batch,)``. Entries whose matrix has fewer than two occupied row
@@ -303,6 +306,12 @@ def maximal_correlation(counts: mx.array) -> mx.array:
     normalized = mx.where(
         valid, numerator.astype(mx.float32) / mx.where(valid, denominator, 1), 0
     )
-    gram = normalized @ mx.swapaxes(normalized, 1, 2)
+    transposed = mx.swapaxes(normalized, 1, 2)
+    if single_matrix_products and normalized.shape[0] > 1:
+        gram = mx.concatenate([
+            normalized[i:i + 1] @ transposed[i:i + 1] for i in range(normalized.shape[0])
+        ])
+    else:
+        gram = normalized @ transposed
     mcc = mx.sqrt(mx.maximum(symmetric_eigenvalues(gram)[:, -1], 0))
     return mx.where(defined, mcc, float("nan"))

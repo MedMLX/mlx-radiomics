@@ -7,6 +7,7 @@ mask for 8/26-connected equal-level zones. Both calculations run on Metal.
 
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from math import prod
 from typing import cast
 
@@ -22,7 +23,7 @@ from mlxradiomics.features.texture import (
 )
 from mlxradiomics.imaging.preprocessing import directions
 from mlxradiomics.numerics.histogram import histogram
-from mlxradiomics.numerics.protocols import IndexedAddition, IndexedMinimum
+from mlxradiomics.numerics.protocols import IndexedAddition, IndexedMinimum, MetalKernel
 from mlxradiomics.numerics.runtime import evaluate, mx
 from mlxradiomics.numerics.sparse_counts import coordinate_counts, merge_counts
 
@@ -162,14 +163,36 @@ def neighborhood_matrix(
     )
 
 
+@lru_cache(maxsize=128)
+def _bounded_distance_axis(size: int, stride: int) -> MetalKernel:
+    """Minimize the previous distance plus axis displacement up to the best known cost."""
+    return cast(MetalKernel, mx.fast.metal_kernel(
+        name="mlxradiomics_bounded_distance_axis", input_names=["distance"],
+        output_names=["minimum"],
+        source=f"""
+        uint t = thread_position_in_grid.x;
+        uint x = (t / {stride}u) % {size}u;
+        int best = min(distance[t], int(min(x + 1u, {size}u - x)));
+        // A nonnegative neighbor cost cannot improve best once its offset reaches best.
+        for (uint offset = 1; offset < uint(best); ++offset) {{
+            if (offset <= x)
+                best = min(best, distance[t - offset * {stride}u] + int(offset));
+            if (x + offset < {size}u)
+                best = min(best, distance[t + offset * {stride}u] + int(offset));
+        }}
+        minimum[t] = best;
+        """,
+    ))
+
+
 def boundary_distances(mask: mx.array, shape: tuple[int, ...], axis: int | None) -> mx.array:
     """Exact integer Manhattan distance to background and active image faces.
 
     ``mask`` contains flattened spatial domains, one per batch row. ``axis`` is
     excluded for force-2D distances; slices never exchange distances along it.
-    For each active axis, prefix/suffix minima of ``d[i] - i`` / ``d[i] + i``
-    give ``min_j(d[j] + abs(i-j))``. Native Metal scans avoid convergence checks
-    and remain parallel on long, thin domains. Boundary voxels have distance one.
+    Each active axis minimizes ``d[j] + abs(i-j)``. A short distance bound permits
+    direct parallel searches. Longer bounds use prefix/suffix minima of
+    ``d[i] - i`` and ``d[i] + i``. Boundary voxels have distance one.
     """
     axes = tuple(i for i in range(len(shape)) if i != axis)
     # The nearest pair of active image faces bounds every final distance. A
@@ -182,6 +205,13 @@ def boundary_distances(mask: mx.array, shape: tuple[int, ...], axis: int | None)
     )
     for dimension in axes:
         size = shape[dimension]
+        if bound <= 16:
+            stride = prod(shape[dimension + 1:])
+            distance = _bounded_distance_axis(size, stride)(
+                inputs=[distance], grid=(distance.size, 1, 1), threadgroup=(256, 1, 1),
+                output_shapes=[distance.shape], output_dtypes=[mx.int32],
+            )[0]
+            continue
         position = mx.reshape(
             mx.arange(size, dtype=mx.int32),
             (1,) * (dimension + 1) + (size,) + (1,) * (len(shape) - dimension - 1),

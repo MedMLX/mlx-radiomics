@@ -77,18 +77,26 @@ _MVEE_ACCUMULATE = r"""
             acc_lo[k][tid] = accumulator[k].y;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint stride = 128; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                for (uint k = 0; k < 10; k++) {
-                    float2 value = ds_add(
-                        float2(acc_hi[k][tid], acc_lo[k][tid]),
-                        float2(acc_hi[k][tid + stride], acc_lo[k][tid + stride]));
-                    acc_hi[k][tid] = value.x;
-                    acc_lo[k][tid] = value.y;
-                }
+        // A SIMD group reduces one moment. The 128, 64 and 32 strides
+        // are performed within each lane before the final shuffle tree.
+        uint lane = tid % 32;
+        for (uint k = tid / 32; k < 10; k += 8) {
+            float2 part[4];
+            for (uint i = 0; i < 4; ++i) {
+                uint j = lane + 32 * i;
+                part[i] = ds_add(float2(acc_hi[k][j], acc_lo[k][j]),
+                                 float2(acc_hi[k][j + 128], acc_lo[k][j + 128]));
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float2 value = ds_add(ds_add(part[0], part[2]), ds_add(part[1], part[3]));
+            for (uint stride = 16; stride > 0; stride >>= 1) {
+                value = ds_add(value, simd_shuffle_down(value, stride));
+            }
+            if (lane == 0) {
+                acc_hi[k][0] = value.x;
+                acc_lo[k][0] = value.y;
+            }
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 """
 
 
@@ -135,7 +143,7 @@ def _mvee_ascent_kernel() -> MetalKernel:
         threadgroup float change_hi[256];
         threadgroup float change_lo[256];
         threadgroup int status;
-        threadgroup bool finite_flags[256];
+        threadgroup bool finite_flags[8];
         threadgroup int stop;
         for (uint i = tid; i < n; i += 256) {
             new_weights_hi[i] = weights_hi[i];
@@ -274,7 +282,8 @@ def _mvee_ascent_kernel() -> MetalKernel:
             }
             change_hi[tid] = change.x;
             change_lo[tid] = change.y;
-            finite_flags[tid] = finite_weights;
+            bool group_finite = simd_all(finite_weights);
+            if ((tid % 32) == 0) finite_flags[tid / 32] = group_finite;
             threadgroup_barrier(mem_flags::mem_threadgroup);
             for (uint stride = 128; stride > 0; stride >>= 1) {
                 if (tid < stride) {
@@ -288,7 +297,7 @@ def _mvee_ascent_kernel() -> MetalKernel:
             }
             if (tid == 0) {
                 bool all_finite = true;
-                for (uint k = 0; k < 256; k++) {
+                for (uint k = 0; k < 8; k++) {
                     all_finite = all_finite && finite_flags[k];
                 }
                 // A non-finite weight takes precedence over convergence.

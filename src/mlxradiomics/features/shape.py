@@ -209,6 +209,7 @@ def shape_statistics(
         include_vertices=needs_diameter or bool(requested & _HULL_GEOMETRY_FEATURES),
     ) if needs_mesh or needs_diameter else None)
     values: dict[str, mx.array] = {}
+    grid_hull_indices: NDArray[np.int32] | None = None
     if "VoxelVolume" in requested or "PixelSurface" in requested:
         count = mx.sum(array_from_bool(mask).astype(mx.int32))
         physical = scale_pow2(
@@ -289,6 +290,7 @@ def shape_statistics(
                 grid = np.asarray(geometry.vertices, dtype=np.float64)
                 if requested & _HULL_FEATURES:
                     hull = scipy_hull(grid)
+                    grid_hull_indices = hull.vertices
                     hull_area, hull_volume = hull_measures(
                         hull, geometry.vertices, parts,
                     )
@@ -387,7 +389,9 @@ def shape_statistics(
     if needs_diameter:
         if geometry is None:
             raise RuntimeError("diameter features require mesh boundary vertices")
-        maximum = diameter_maxima(geometry.vertices, spacing, scratch_mib, ndim)
+        maximum = diameter_maxima(
+            geometry.vertices, spacing, scratch_mib, ndim, hull_indices=grid_hull_indices,
+        )
         evaluate(maximum)
         maximum_host = np.asarray(maximum, dtype=np.float32)
         if not np.all(np.isfinite(maximum_host)):

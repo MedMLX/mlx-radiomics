@@ -78,6 +78,8 @@ def scale_pow2(value: mx.array, exponent: int | mx.array) -> mx.array:
     combined with a small mantissa (or the reverse) reaches its representable result
     instead of producing ``inf``, ``0`` or ``nan`` during the scaling itself.
     """
+    if isinstance(exponent, int) and -126 <= exponent <= 127:
+        return value * ldexp(1.0, exponent)
     powers = exponent if isinstance(exponent, mx.array) else mx.array(exponent, dtype=mx.int32)
     powers = powers.astype(mx.int32)
     table = _pow2_table()
@@ -104,22 +106,24 @@ def scaled_ratio(
 # an exactly collinear one at coordinates near 4096. Products are expanded with an FMA
 # residual and sums carry a low word, so cancellation in the covariance and Jacobi
 # rotations retains about 48 significant bits on Metal.
+# Keep the error-free transforms in registers. MLX's safe Metal math mode and
+# the two pragmas below preserve the individual rounded products and sums.
 DS_HEADER = r"""
 #include <metal_stdlib>
 #pragma clang fp contract(off)
 #pragma clang fp reassociate(off)
 inline float2 ds_add(float2 a, float2 b) {
-    volatile float s = a.x + b.x;
-    volatile float v = s - a.x;
+    float s = a.x + b.x;
+    float v = s - a.x;
     float e = (a.x - (s - v)) + (b.x - v);
     float t = e + (a.y + b.y);
-    volatile float h = s + t;
+    float h = s + t;
     return float2(h, t - (h - s));
 }
 inline float2 ds_neg(float2 a) { return float2(-a.x, -a.y); }
 inline float2 ds_sub(float2 a, float2 b) { return ds_add(a, ds_neg(b)); }
 inline float2 ds_mul(float2 a, float2 b) {
-    volatile float p = a.x * b.x;
+    float p = a.x * b.x;
     float e = fma(a.x, b.x, -p);
     e += a.x * b.y + a.y * b.x;
     e += a.y * b.y;

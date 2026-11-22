@@ -133,11 +133,27 @@ def aggregate_roi_glcm(
     dtype: mx.Dtype,
     method: str,
 ) -> dict[str, mx.array]:
-    """Batch ordinary ROI directions from exact resident-grid counts.
+    """Average ROI GLCM features using the resident grid when admitted."""
+    batched = batched_roi_glcm(bins, mask, ng, settings, dtype, compensated_mcc=False)
+    if batched is not None:
+        return batched
+    return aggregate_glcm(roi_pairs(bins, mask, settings), ng, settings, dtype, 1, method)
 
-    Count storage and the statistics' conservative working-set estimate must fit
-    the scratch budget; larger selections use the directional pair route. Directional
-    feature sums and the MCC grouping are taken in direction order.
+
+def batched_roi_glcm(
+    bins: mx.array,
+    mask: mx.array,
+    ng: int,
+    settings: Settings,
+    dtype: mx.Dtype,
+    *,
+    compensated_mcc: bool,
+) -> dict[str, mx.array] | None:
+    """Batch directional ROI counts and features when their storage fits.
+
+    None leaves sparse and over-budget cases to the caller's matrix path.
+    The explicit matrix path compensates its MCC sum in direction order.
+    Native aggregation retains its group sum. Both omit undefined MCCs.
     """
     offsets = directions(tuple(bins.shape), settings)
     count_bytes = len(offsets) * ng * ng * 4
@@ -150,7 +166,7 @@ def aggregate_roi_glcm(
         or count_bytes > 64 * 1024**2
         or 2 * count_bytes + per_direction > budget
     ):
-        return aggregate_glcm(roi_pairs(bins, mask, settings), ng, settings, dtype, 1, method)
+        return None
     group = min(len(offsets), max(1, (budget - 2 * count_bytes) // per_direction))
     counts = roi_histograms(bins, mask, offsets, ng)
     if settings.symmetrical_glcm:
@@ -160,6 +176,7 @@ def aggregate_roi_glcm(
     )
     ordinary = tuple(name for name in names if name != "MCC")
     blocks: list[mx.array] = []
+    correlations: list[mx.array] = []
     active_rows: list[mx.array] = []
     for start in range(0, len(offsets), group):
         stop = min(start + group, len(offsets))
@@ -171,24 +188,35 @@ def aggregate_roi_glcm(
             blocks.append(feature_block)
         else:
             active = mx.sum(block.astype(dtype), axis=(1, 2)) > 0
-        active_rows.extend(active[index : index + 1] for index in range(stop - start))
+        if "MCC" in names and compensated_mcc:
+            correlation = maximal_correlation(block, single_matrix_products=True)
+            evaluate(correlation)
+            correlations.append(correlation)
+        active_rows.append(active)
     output: dict[str, mx.array] = {}
+    active = mx.concatenate(active_rows)
     if ordinary:
         means = directional_mean(
             mx.concatenate(blocks, axis=1),
-            mx.concatenate(active_rows),
+            active,
             compensated=True,
         )
         output.update(
             {f"glcm_{name}": means[index : index + 1] for index, name in enumerate(ordinary)}
         )
-    if "MCC" in names:
-        total, defined = _mcc_group(
-            [counts[index : index + 1] for index in range(len(offsets))],
-            active_rows,
-            1,
+    if correlations:
+        mcc = mx.concatenate(correlations)
+        output["glcm_MCC"] = directional_mean(
+            mcc[None, :], active & ~mx.isnan(mcc), compensated=True,
         )
-        output["glcm_MCC"] = mx.where(defined > 0, total / defined, float("nan"))
+    elif "MCC" in names:
+        # Native aggregation has always used a single batched Gram product
+        # and a direction-axis sum, independent of the ordinary statistics budget.
+        mcc = maximal_correlation(counts)[:, None]
+        defined = active[:, None] & ~mx.isnan(mcc)
+        total = mx.sum(mx.where(defined, mcc, 0), axis=0)
+        n = mx.sum(defined.astype(mx.int32), axis=0)
+        output["glcm_MCC"] = mx.where(n > 0, total / n, float("nan"))
     return output
 
 
