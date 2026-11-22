@@ -12,7 +12,7 @@ interpolated float32 binary ROI mask binarized at a partial-volume threshold.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import product
 from math import ceil
@@ -28,10 +28,23 @@ from mlxradiomics.contracts.types import (
     ImageGeometryPayload,
 )
 from mlxradiomics.imaging.io import Volume, read_image, read_mask
-from mlxradiomics.imaging.preprocessing import exact_float64, normalize_values, round_intensities
+from mlxradiomics.imaging.preprocessing import (
+    normalize_values,
+    round_intensities,
+    validate_exact_float64,
+)
 
 if TYPE_CHECKING:
     import SimpleITK as sitk
+
+
+def _coincident_grid(image: Volume, mask: Volume) -> bool:
+    return (
+        image.array.shape == mask.array.shape
+        and image.spacing == mask.spacing
+        and image.origin == mask.origin
+        and image.direction == mask.direction
+    )
 
 
 @dataclass(frozen=True)
@@ -44,10 +57,7 @@ class ImagePair:
 
     def __post_init__(self) -> None:
         """Reject an image and mask that differ in shape or physical geometry."""
-        if self.image.array.shape != self.mask.array.shape or (
-            self.image.spacing != self.mask.spacing or self.image.origin != self.mask.origin
-            or self.image.direction != self.mask.direction
-        ):
+        if not _coincident_grid(self.image, self.mask):
             raise ValueError("aligned image and mask must share geometry")
 
 
@@ -415,11 +425,7 @@ def load_image_pair(
     options, spatial = settings or Settings(), image_settings or ImageSettings()
     source, labels = read_image(image_path), read_mask(mask_path)
     options.validate(source.array.ndim)
-    # Only 64-bit integers can lose source identity when converted to float64.
-    # Validate them before resampling/rounding; other dtypes need no throwaway
-    # full-volume float64 conversion here.
-    if source.array.dtype.kind in "iu" and source.array.dtype.itemsize == 8:
-        exact_float64(source.array)
+    validate_exact_float64(source.array)
     if options.normalize and spatial.ibsi_interpolation is not None and (
         spatial.ibsi_interpolation.round_intensities
     ):
@@ -429,6 +435,22 @@ def load_image_pair(
             "normalize=True cannot be combined with IBSI interpolation rounding; "
             "set IbsiInterpolation(round_intensities=False)"
         )
+    source_geometry: ImageGeometryPayload = {
+        "shape": source.array.shape, "spacing": source.spacing,
+        "origin": source.origin, "direction": source.direction,
+    }
+    if (
+        spatial.ibsi_interpolation is None
+        and spatial.resampled_spacing is None
+        and _coincident_grid(source, labels)
+    ):
+        # On exactly the same grid, every label voxel already lies in image bounds.
+        if not np.any(labels.array == options.label):
+            raise ValueError("selected label is absent from mask")
+        if options.normalize:
+            source = replace(source, array=normalize_values(source.array, options))
+        return ImagePair(source, labels, source_geometry)
+
     image, mask = _itk(source), _itk(labels)
     if image.GetDimension() != mask.GetDimension():
         raise ValueError("image and mask dimensions must match")
@@ -452,7 +474,4 @@ def load_image_pair(
         mask.CopyInformation(image)
     if not np.any(sitk.GetArrayViewFromImage(mask) == options.label):
         raise ValueError("spatial preprocessing removed the selected label")
-    return ImagePair(_volume(image), _volume(mask), {
-        "shape": source.array.shape, "spacing": source.spacing,
-        "origin": source.origin, "direction": source.direction,
-    })
+    return ImagePair(_volume(image), _volume(mask), source_geometry)
