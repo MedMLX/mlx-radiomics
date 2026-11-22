@@ -162,8 +162,7 @@ def test_moran_and_geary_handle_anisotropic_distance_weights() -> None:
 
 @pytest.mark.parametrize("dense", [True, False])
 def test_tiled_spatial_autocorrelation_matches_all_pairs(dense: bool) -> None:
-    # 792 voxels fill the box (dense) or about 60% of it with holes (sparse); the pair
-    # kernel spans several 256-voxel threadgroup tiles.
+    # Both the dense and perforated masks span several pair tiles.
     rng = np.random.default_rng(4)
     shape = (9, 11, 8)
     mask = np.ones(shape, dtype=np.bool_) if dense else rng.random(shape) < 0.6
@@ -175,6 +174,20 @@ def test_tiled_spatial_autocorrelation_matches_all_pairs(dense: bool) -> None:
                 for name, value in computed.items()}
     assert observed["shape_MoransI"] == pytest.approx(moran, rel=2e-6)
     assert observed["shape_GearysC"] == pytest.approx(geary, rel=2e-6)
+
+
+def test_spatial_autocorrelation_is_identical_across_weight_table_budgets() -> None:
+    rng = np.random.default_rng(927)
+    shape = (32, 42, 40)
+    image = rng.standard_normal(shape, dtype=np.float32)
+    mask = np.zeros(shape, dtype=np.bool_)
+    mask.ravel()[rng.choice(mask.size, 8192, replace=False)] = True
+    names = ("shape_MoransI", "shape_GearysC")
+    # The absolute displacement table fits at 1 MiB and the signed table at 2 MiB.
+    results = [extract(image, mask, spacing=(2.0, 0.7, 0.9),
+                       settings=Settings(features=names, scratch_mib=budget)).features
+               for budget in (1, 2)]
+    assert results[0] == results[1]
 
 
 def test_pairwise_autocorrelation_refuses_oversized_roi(

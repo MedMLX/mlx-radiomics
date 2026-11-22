@@ -25,6 +25,24 @@ _MVEE_MAX_ITERATIONS = 100_000
 _MVEE_STEPS_PER_LAUNCH = 1024
 
 
+_MVEE_HEADER = DS_HEADER + r"""
+// One SIMD group reproduces the 256-lane reduction at strides 128, 64, ..., 1.
+// Keeping the addition order preserves the high and low words at convergence.
+inline float2 mvee_sum_256(threadgroup const float2* values, uint lane) {
+    float2 partial[4];
+    for (uint k = 0; k < 4; ++k) {
+        uint j = lane + 32 * k;
+        partial[k] = ds_add(values[j], values[j + 128]);
+    }
+    float2 sum = ds_add(ds_add(partial[0], partial[2]), ds_add(partial[1], partial[3]));
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        sum = ds_add(sum, simd_shuffle_down(sum, stride));
+    }
+    return sum;
+}
+"""
+
+
 # Weighted center and second moments of a hull point cloud. Both the Khachiyan step and
 # the final covariance use this reduction: a bare float32 covariance rounds the small
 # eigenvalue of a thin shape away, and the cofactor inverse then accepts percent-level
@@ -33,8 +51,7 @@ _MVEE_STEPS_PER_LAUNCH = 1024
 # threadgroup accumulators (_MVEE_ACCUMULATORS) at kernel scope and binds the read-only
 # weight words to ``w_hi``/``w_lo``, so the ascent kernel can repeat this body in a loop.
 _MVEE_ACCUMULATORS = r"""
-        threadgroup float acc_hi[10][256];
-        threadgroup float acc_lo[10][256];
+        threadgroup float2 acc[10][256];
 """
 
 
@@ -73,27 +90,16 @@ _MVEE_ACCUMULATE = r"""
         accumulator[8] = m12;
         accumulator[9] = m22;
         for (uint k = 0; k < 10; k++) {
-            acc_hi[k][tid] = accumulator[k].x;
-            acc_lo[k][tid] = accumulator[k].y;
+            acc[k][tid] = accumulator[k];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         // A SIMD group reduces one moment. The 128, 64 and 32 strides
         // are performed within each lane before the final shuffle tree.
         uint lane = tid % 32;
         for (uint k = tid / 32; k < 10; k += 8) {
-            float2 part[4];
-            for (uint i = 0; i < 4; ++i) {
-                uint j = lane + 32 * i;
-                part[i] = ds_add(float2(acc_hi[k][j], acc_lo[k][j]),
-                                 float2(acc_hi[k][j + 128], acc_lo[k][j + 128]));
-            }
-            float2 value = ds_add(ds_add(part[0], part[2]), ds_add(part[1], part[3]));
-            for (uint stride = 16; stride > 0; stride >>= 1) {
-                value = ds_add(value, simd_shuffle_down(value, stride));
-            }
+            float2 value = mvee_sum_256(acc[k], lane);
             if (lane == 0) {
-                acc_hi[k][0] = value.x;
-                acc_lo[k][0] = value.y;
+                acc[k][0] = value;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -110,9 +116,9 @@ def _mvee_ascent_kernel() -> MetalKernel:
     weights. One threadgroup runs the steps in sequence, so the loop needs no host
     synchronization; it stops after the first step whose update norm is at most the
     tolerance, or after a step that loses positive definiteness or produces a non-finite
-    weight. Every thread reads and writes only its own strided weight indices, and all
-    cross-thread values pass through threadgroup memory behind barriers, so the returned
-    weights are those of the first converged step.
+    weight. Every thread reads and writes only its own strided weight indices, and
+    SIMD groups exchange partial results through threadgroup memory behind barriers.
+    The returned weights are those of the first converged step.
 
     ``state[0]`` is 0 when the limit was reached without stopping, 1 when converged,
     2 when the covariance lost positive definiteness (weights then hold the previous
@@ -123,7 +129,7 @@ def _mvee_ascent_kernel() -> MetalKernel:
         MetalKernel,
         mx.fast.metal_kernel(
             name="mlxradiomics_mvee_ascent",
-            header=DS_HEADER,
+            header=_MVEE_HEADER,
             input_names=["points_hi", "points_lo", "weights_hi", "weights_lo", "limit"],
             output_names=["new_weights_hi", "new_weights_lo", "state"],
             source=r"""
@@ -133,15 +139,11 @@ def _mvee_ascent_kernel() -> MetalKernel:
         """
             + _MVEE_ACCUMULATORS
             + r"""
-        threadgroup float center_hi[3];
-        threadgroup float center_lo[3];
-        threadgroup float inverse_hi[6];
-        threadgroup float inverse_lo[6];
-        threadgroup float max_hi[256];
-        threadgroup float max_lo[256];
-        threadgroup uint max_index[256];
-        threadgroup float change_hi[256];
-        threadgroup float change_lo[256];
+        threadgroup float2 center[3];
+        threadgroup float2 inverse[6];
+        threadgroup float2 maxima[256];
+        threadgroup uint indexes[256];
+        threadgroup float2 changes[256];
         threadgroup int status;
         threadgroup bool finite_flags[8];
         threadgroup int stop;
@@ -149,83 +151,58 @@ def _mvee_ascent_kernel() -> MetalKernel:
             new_weights_hi[i] = weights_hi[i];
             new_weights_lo[i] = weights_lo[i];
         }
-        if (tid == 0) {
-            state[0] = 0;
-            state[1] = 0;
-        }
+        int result = 0;
+        uint executed = steps;
         const device float* w_hi = new_weights_hi;
         const device float* w_lo = new_weights_lo;
         for (uint iteration = 0; iteration < steps; iteration++) {
         """
             + _MVEE_ACCUMULATE
             + r"""
-            if (tid == 0) {
-                float2 total = float2(acc_hi[0][0], acc_lo[0][0]);
-                float2 c0 = ds_ratio(float2(acc_hi[1][0], acc_lo[1][0]), total);
-                float2 c1 = ds_ratio(float2(acc_hi[2][0], acc_lo[2][0]), total);
-                float2 c2 = ds_ratio(float2(acc_hi[3][0], acc_lo[3][0]), total);
-                center_hi[0] = c0.x; center_lo[0] = c0.y;
-                center_hi[1] = c1.x; center_lo[1] = c1.y;
-                center_hi[2] = c2.x; center_lo[2] = c2.y;
-                float2 a = ds_sub(ds_ratio(float2(acc_hi[4][0], acc_lo[4][0]), total),
-                                  ds_mul(c0, c0));
-                float2 b = ds_sub(ds_ratio(float2(acc_hi[5][0], acc_lo[5][0]), total),
-                                  ds_mul(c0, c1));
-                float2 c = ds_sub(ds_ratio(float2(acc_hi[6][0], acc_lo[6][0]), total),
-                                  ds_mul(c0, c2));
-                float2 d = ds_sub(ds_ratio(float2(acc_hi[7][0], acc_lo[7][0]), total),
-                                  ds_mul(c1, c1));
-                float2 e = ds_sub(ds_ratio(float2(acc_hi[8][0], acc_lo[8][0]), total),
-                                  ds_mul(c1, c2));
-                float2 f = ds_sub(ds_ratio(float2(acc_hi[9][0], acc_lo[9][0]), total),
-                                  ds_mul(c2, c2));
-                float2 co00 = ds_sub(ds_mul(d, f), ds_mul(e, e));
-                float2 co01 = ds_sub(ds_mul(c, e), ds_mul(b, f));
-                float2 co02 = ds_sub(ds_mul(b, e), ds_mul(c, d));
-                float2 co11 = ds_sub(ds_mul(a, f), ds_mul(c, c));
-                float2 co12 = ds_sub(ds_mul(b, c), ds_mul(a, e));
-                float2 co22 = ds_sub(ds_mul(a, d), ds_mul(b, b));
-                float2 determinant = ds_add(
-                    ds_mul(a, co00), ds_add(ds_mul(b, co01), ds_mul(c, co02)));
-                bool positive = ds_gt(determinant, float2(0.0f, 0.0f));
-                bool finite = ds_finite(determinant) && ds_finite(co00) && ds_finite(co01)
-                    && ds_finite(co02) && ds_finite(co11) && ds_finite(co12)
-                    && ds_finite(co22);
-                if (positive && finite) {
-                    float2 i00 = ds_ratio(co00, determinant);
-                    float2 i01 = ds_ratio(co01, determinant);
-                    float2 i02 = ds_ratio(co02, determinant);
-                    float2 i11 = ds_ratio(co11, determinant);
-                    float2 i12 = ds_ratio(co12, determinant);
-                    float2 i22 = ds_ratio(co22, determinant);
-                    inverse_hi[0] = i00.x; inverse_lo[0] = i00.y;
-                    inverse_hi[1] = i01.x; inverse_lo[1] = i01.y;
-                    inverse_hi[2] = i02.x; inverse_lo[2] = i02.y;
-                    inverse_hi[3] = i11.x; inverse_lo[3] = i11.y;
-                    inverse_hi[4] = i12.x; inverse_lo[4] = i12.y;
-                    inverse_hi[5] = i22.x; inverse_lo[5] = i22.y;
-                    status = 1;
-                } else {
-                    status = 0;
+            if (tid < 32) {
+                // Six lanes form the independent entries of the symmetric inverse.
+                // Cofactors (00, 01, 02, 11, 12, 22) retain the scalar product order.
+                uint k = min(tid, 5u);
+                constexpr ushort rows[6] = {0, 0, 0, 1, 1, 2};
+                constexpr ushort cols[6] = {0, 1, 2, 1, 2, 2};
+                constexpr ushort4 products[6] = {
+                    ushort4(3, 5, 4, 4), ushort4(2, 4, 1, 5), ushort4(1, 4, 2, 3),
+                    ushort4(0, 5, 2, 2), ushort4(1, 2, 0, 4), ushort4(0, 3, 1, 1)};
+                float2 total = acc[0][0];
+                uint h = min(k, 2u) + 1;
+                float2 centroid = ds_ratio(acc[h][0], total);
+                if (tid < 3) { center[tid] = centroid; }
+                float2 moment = ds_ratio(acc[4 + k][0], total);
+                float2 cov = ds_sub(moment, ds_mul(simd_shuffle(centroid, rows[k]),
+                                                   simd_shuffle(centroid, cols[k])));
+                ushort4 p = products[k];
+                float2 co = ds_sub(ds_mul(simd_shuffle(cov, p.x), simd_shuffle(cov, p.y)),
+                                   ds_mul(simd_shuffle(cov, p.z), simd_shuffle(cov, p.w)));
+                float2 term = ds_mul(cov, co);
+                float2 det = ds_add(simd_broadcast(term, 0),
+                                    ds_add(simd_broadcast(term, 1), simd_broadcast(term, 2)));
+                bool valid = simd_all(ds_finite(co)) && ds_finite(det)
+                             && ds_gt(det, float2(0.0f));
+                if (valid && tid < 6) {
+                    inverse[tid] = ds_ratio(co, det);
                 }
+                if (tid == 0) status = int(valid);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (status == 0) {
-                if (tid == 0) {
-                    state[0] = 2;
-                    state[1] = int(iteration + 1);
-                }
+                result = 2;
+                executed = iteration + 1;
                 break;
             }
-            float2 c0 = float2(center_hi[0], center_lo[0]);
-            float2 c1 = float2(center_hi[1], center_lo[1]);
-            float2 c2 = float2(center_hi[2], center_lo[2]);
-            float2 i00 = float2(inverse_hi[0], inverse_lo[0]);
-            float2 i01 = float2(inverse_hi[1], inverse_lo[1]);
-            float2 i02 = float2(inverse_hi[2], inverse_lo[2]);
-            float2 i11 = float2(inverse_hi[3], inverse_lo[3]);
-            float2 i12 = float2(inverse_hi[4], inverse_lo[4]);
-            float2 i22 = float2(inverse_hi[5], inverse_lo[5]);
+            float2 c0 = center[0];
+            float2 c1 = center[1];
+            float2 c2 = center[2];
+            float2 i00 = inverse[0];
+            float2 i01 = inverse[1];
+            float2 i02 = inverse[2];
+            float2 i11 = inverse[3];
+            float2 i12 = inverse[4];
+            float2 i22 = inverse[5];
             float2 local_max = float2(0.0f, 0.0f);
             uint local_index = 0;
             for (uint i = tid; i < n; i += 256) {
@@ -242,24 +219,39 @@ def _mvee_ascent_kernel() -> MetalKernel:
                     local_index = i;
                 }
             }
-            max_hi[tid] = local_max.x;
-            max_lo[tid] = local_max.y;
-            max_index[tid] = local_index;
+            maxima[tid] = local_max;
+            indexes[tid] = local_index;
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = 128; stride > 0; stride >>= 1) {
-                if (tid < stride) {
-                    float2 other = float2(max_hi[tid + stride], max_lo[tid + stride]);
-                    float2 current = float2(max_hi[tid], max_lo[tid]);
-                    if (ds_gt(other, current)) {
-                        max_hi[tid] = other.x;
-                        max_lo[tid] = other.y;
-                        max_index[tid] = max_index[tid + stride];
+            if (tid < 32) {
+                // Preserve the strict comparison and the 128-to-1 tie order.
+                float2 scores[4];
+                uint winners[4];
+                for (uint k = 0; k < 4; ++k) {
+                    uint left = tid + 32 * k, right = left + 128;
+                    uint best = ds_gt(maxima[right], maxima[left]) ? right : left;
+                    scores[k] = maxima[best];
+                    winners[k] = indexes[best];
+                }
+                for (uint d = 2; d > 0; d >>= 1) {
+                    for (uint k = 0; k < d; ++k) {
+                        if (ds_gt(scores[k + d], scores[k])) {
+                            scores[k] = scores[k + d];
+                            winners[k] = winners[k + d];
+                        }
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                float2 peak = scores[0];
+                uint winner = winners[0];
+                for (uint d = 16; d > 0; d >>= 1) {
+                    float2 other = simd_shuffle_down(peak, d);
+                    uint other_index = simd_shuffle_down(winner, d);
+                    if (ds_gt(other, peak)) { peak = other; winner = other_index; }
+                }
+                if (tid == 0) { maxima[0] = peak; indexes[0] = winner; }
             }
-            float2 maximum = float2(max_hi[0], max_lo[0]);
-            uint index = max_index[0];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float2 maximum = maxima[0];
+            uint index = indexes[0];
             // Khachiyan's lifted value is M = 1 + values, so the step
             // (M - d - 1) / ((d + 1) (M - 1)) becomes (values - d) / ((d + 1) values).
             bool improve = ds_gt(maximum, float2(3.0f, 0.0f));
@@ -280,20 +272,12 @@ def _mvee_ascent_kernel() -> MetalKernel:
                 float2 delta = ds_sub(updated, old);
                 change = ds_add(change, ds_mul(delta, delta));
             }
-            change_hi[tid] = change.x;
-            change_lo[tid] = change.y;
+            changes[tid] = change;
             bool group_finite = simd_all(finite_weights);
             if ((tid % 32) == 0) finite_flags[tid / 32] = group_finite;
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = 128; stride > 0; stride >>= 1) {
-                if (tid < stride) {
-                    float2 value = ds_add(float2(change_hi[tid], change_lo[tid]),
-                                          float2(change_hi[tid + stride],
-                                                 change_lo[tid + stride]));
-                    change_hi[tid] = value.x;
-                    change_lo[tid] = value.y;
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (tid < 32) {
+                change = mvee_sum_256(changes, tid);
             }
             if (tid == 0) {
                 bool all_finite = true;
@@ -302,18 +286,22 @@ def _mvee_ascent_kernel() -> MetalKernel:
                 }
                 // A non-finite weight takes precedence over convergence.
                 int code = !all_finite ? 3
-                    : (ds_le(ds_sqrt(float2(change_hi[0], change_lo[0])),
+                    : (ds_le(ds_sqrt(change),
                              float2("""
             + tolerance
             + r""", 0.0f)) ? 1 : 0);
                 stop = code;
-                state[0] = code;
-                state[1] = int(iteration + 1);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (stop != 0) {
+                result = stop;
+                executed = iteration + 1;
                 break;
             }
+        }
+        if (tid == 0) {
+            state[0] = result;
+            state[1] = int(executed);
         }
         """,
         ),
@@ -332,7 +320,7 @@ def _mvee_covariance_kernel() -> MetalKernel:
         MetalKernel,
         mx.fast.metal_kernel(
             name="mlxradiomics_mvee_covariance",
-            header=DS_HEADER,
+            header=_MVEE_HEADER,
             input_names=["points_hi", "points_lo", "weights_hi", "weights_lo"],
             output_names=["covariance_hi", "covariance_lo"],
             source=r"""
@@ -346,21 +334,21 @@ def _mvee_covariance_kernel() -> MetalKernel:
             + _MVEE_ACCUMULATE
             + r"""
         if (tid == 0) {
-            float2 total = float2(acc_hi[0][0], acc_lo[0][0]);
-            float2 c0 = ds_ratio(float2(acc_hi[1][0], acc_lo[1][0]), total);
-            float2 c1 = ds_ratio(float2(acc_hi[2][0], acc_lo[2][0]), total);
-            float2 c2 = ds_ratio(float2(acc_hi[3][0], acc_lo[3][0]), total);
-            float2 cov00 = ds_sub(ds_ratio(float2(acc_hi[4][0], acc_lo[4][0]), total),
+            float2 total = acc[0][0];
+            float2 c0 = ds_ratio(acc[1][0], total);
+            float2 c1 = ds_ratio(acc[2][0], total);
+            float2 c2 = ds_ratio(acc[3][0], total);
+            float2 cov00 = ds_sub(ds_ratio(acc[4][0], total),
                                   ds_mul(c0, c0));
-            float2 cov01 = ds_sub(ds_ratio(float2(acc_hi[5][0], acc_lo[5][0]), total),
+            float2 cov01 = ds_sub(ds_ratio(acc[5][0], total),
                                   ds_mul(c0, c1));
-            float2 cov02 = ds_sub(ds_ratio(float2(acc_hi[6][0], acc_lo[6][0]), total),
+            float2 cov02 = ds_sub(ds_ratio(acc[6][0], total),
                                   ds_mul(c0, c2));
-            float2 cov11 = ds_sub(ds_ratio(float2(acc_hi[7][0], acc_lo[7][0]), total),
+            float2 cov11 = ds_sub(ds_ratio(acc[7][0], total),
                                   ds_mul(c1, c1));
-            float2 cov12 = ds_sub(ds_ratio(float2(acc_hi[8][0], acc_lo[8][0]), total),
+            float2 cov12 = ds_sub(ds_ratio(acc[8][0], total),
                                   ds_mul(c1, c2));
-            float2 cov22 = ds_sub(ds_ratio(float2(acc_hi[9][0], acc_lo[9][0]), total),
+            float2 cov22 = ds_sub(ds_ratio(acc[9][0], total),
                                   ds_mul(c2, c2));
             covariance_hi[0] = cov00.x; covariance_lo[0] = cov00.y;
             covariance_hi[1] = cov01.x; covariance_lo[1] = cov01.y;

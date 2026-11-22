@@ -288,11 +288,11 @@ def shape_statistics(
             if requested & _HULL_GEOMETRY_FEATURES:
                 evaluate(geometry.vertices)
                 grid = np.asarray(geometry.vertices, dtype=np.float64)
-                if requested & _HULL_FEATURES:
-                    hull = scipy_hull(grid)
-                    grid_hull_indices = hull.vertices
+                grid_hull = scipy_hull(grid) if requested & _HULL_FEATURES else None
+                if grid_hull is not None:
+                    grid_hull_indices = grid_hull.vertices
                     hull_area, hull_volume = hull_measures(
-                        hull, geometry.vertices, parts,
+                        grid_hull, geometry.vertices, parts,
                     )
                     mesh_values["VolumeDensityConvexHull"] = (
                         geometry.grid_enclosed / (6 * hull_volume)
@@ -305,13 +305,16 @@ def shape_statistics(
                     # by the largest spacing, which keeps float32 projections near unit
                     # scale; the exact binary scale is restored in the density ratio.
                     physical_scale = max(spacing)
-                    normalized = grid * (
-                        np.asarray(spacing, dtype=np.float64) / physical_scale
-                    )
-                    hull = scipy_hull(normalized)
+                    if min(spacing) == physical_scale:
+                        # The normalized physical coordinates equal the grid exactly.
+                        normalized = grid
+                        hull = grid_hull if grid_hull is not None else scipy_hull(grid)
+                    else:
+                        normalized = grid * (np.asarray(spacing, dtype=np.float64) / physical_scale)
+                        hull = scipy_hull(normalized)
                     hull_points = normalized[hull.vertices]
-                    centered = hull_points - hull_points.mean(axis=0)
                     if requested & _OMBB_FEATURES:
+                        centered = hull_points - hull_points.mean(axis=0)
                         volume, area = ombb_measures(centered, hull)
                         volume_density, area_density = enclosing_densities(
                             geometry, volume, area, physical_scale,
