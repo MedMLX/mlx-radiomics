@@ -409,8 +409,14 @@ def extract_voxels(
     sink: VoxelSink | None,
     validity: dict[str, FeatureValidity],
     ivh: IVHLattice | None,
+    *,
+    source_shape: tuple[int, ...],
+    window: tuple[slice, ...],
 ) -> tuple[dict[str, FloatArray], VoxelMemory]:
     """Compute feature maps by batches of ROI voxels, each the center of a local kernel.
+
+    ``data`` holds the compact ``window`` for masked kernels and the full image
+    for unmasked kernels. Both deliver center coordinates on ``source_shape``.
 
     Return float64 maps (0 outside the ROI), or send evaluated float32 batches to ``sink``
     and return no maps. Both routes use the same feature arithmetic and batch schedule.
@@ -421,31 +427,25 @@ def extract_voxels(
     Raises:
         ValueError: If one center's working set exceeds the scratch budget.
     """
-    shape = data.image.shape
+    shape = source_shape
     schedule = _plan_voxels(data, settings)
     centers = schedule.centers
     memory = schedule.memory
     batch_size = memory["batch_size"]
     first_batch_size = memory.get("first_order_batch_size", 0)
-    # Every selected map reads only these centers plus the kernel's exact reach.
-    # Validation/binning have already seen the complete source. Keep their global
-    # lattice and the original output coordinates while bounding resident storage.
-    reach = np.array(
-        [0 if settings.force2d_axis == i else settings.kernel_radius for i in range(len(shape))],
-        dtype=np.int64,
-    )
-    lower = np.maximum(centers.min(axis=0).astype(np.int64) - reach, 0)
-    upper = np.minimum(centers.max(axis=0).astype(np.int64) + reach + 1, shape)
-    window = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper, strict=True))
-    resident_centers = centers - lower.astype(np.int32) if np.any(lower) else centers
-    data = replace(
-        data,
-        image=data.image[window],
-        roi=data.roi[window],
-        bins=data.bins[window],
-        sampling_mask=data.sampling_mask[window],
-        shape_roi=data.shape_roi[window],
-    )
+    lower = np.array([part.start for part in window], dtype=np.int32)
+    if settings.masked_kernel:
+        # Discretization already used the compact grid. Delivery uses source coordinates.
+        resident_centers = centers
+        centers = centers + lower if np.any(lower) else centers
+    else:
+        # Unmasked discretization sees the entire image. Only keep the required
+        # support on Metal once its global lattice is fixed.
+        resident_centers = centers - lower if np.any(lower) else centers
+        data = replace(
+            data, image=data.image[window], roi=data.roi[window], bins=data.bins[window],
+            sampling_mask=data.sampling_mask[window], shape_roi=data.shape_roi[window],
+        )
     resident_shape = data.image.shape
     local = np.array(list(product(*schedule.kernel_axes)), dtype=np.int32)
     offsets = mx.array(local, dtype=mx.int32)
@@ -465,7 +465,10 @@ def extract_voxels(
     # Proven zero words stay implicit; unused bits/errors never cross the device boundary.
     source_resident: _FirstOrderResidents | None = None
     source_admission: FirstOrderAdmission | None = None
-    ivh_resident = mx.reshape(mx.array(ivh.bins[window]), (-1,)) if ivh is not None else None
+    ivh_resident = None
+    if ivh is not None:
+        ivh_bins = ivh.bins if settings.masked_kernel else ivh.bins[window]
+        ivh_resident = mx.reshape(mx.array(ivh_bins), (-1,))
     morphological_resident = (
         mx.reshape(array_from_bool(data.shape_roi), (-1,))
         if any(name.startswith("gldzm_") for name in settings.features)

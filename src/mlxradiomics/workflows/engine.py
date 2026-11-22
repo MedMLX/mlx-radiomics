@@ -231,17 +231,36 @@ def extract_with_shape_mask(
         prepared, sampled = prepare_sampled_input(
             preparation_image, preparation_mask, settings, voxel=voxel,
         )
-    data = discretize_prepared(prepared, sampled, settings)
     if shape_mask is not None:
         shape_mask = np.asarray(shape_mask, dtype=np.bool_)
         # Direct preparation cropped the source, but shape_mask still covers the source
         # array the caller passed. Other routes prepare the caller's image in full.
-        expected_shape = source_shape if preparation_window is not None else data.image.shape
+        expected_shape = source_shape if preparation_window is not None else prepared.image.shape
         if shape_mask.shape != expected_shape:
             raise ValueError("shape_mask must match the image shape")
         if preparation_window is not None:
             shape_mask = shape_mask[preparation_window]
-        data = replace(data, shape_roi=shape_mask)
+        prepared = replace(prepared, shape_roi=shape_mask)
+    voxel_window: tuple[slice, ...] | None = None
+    if voxel:
+        reach = [
+            0 if settings.force2d_axis == axis else settings.kernel_radius
+            for axis in range(prepared.image.ndim)
+        ]
+        voxel_window = occupied_window(prepared.roi, reach)
+        assert voxel_window is not None
+        if settings.masked_kernel:
+            roi = prepared.roi[voxel_window]
+            if roi.shape != prepared.roi.shape:
+                # Every masked sample lies in this window. Compact before creating
+                # bins, while keeping the full-grid coordinates for delivery.
+                same_shape_mask = prepared.shape_roi is prepared.roi
+                roi = roi.copy()
+                prepared = replace(
+                    prepared, image=prepared.image[voxel_window], roi=roi, sampling_mask=roi,
+                    shape_roi=roi if same_shape_mask else prepared.shape_roi[voxel_window].copy(),
+                )
+    data = discretize_prepared(prepared, sampled, settings)
     spacing = spacing or (1.0,) * data.image.ndim
     if len(spacing) != data.image.ndim or any(not np.isfinite(v) or v <= 0 for v in spacing):
         raise ValueError("spacing must contain one finite positive value per array axis")
@@ -304,8 +323,10 @@ def extract_with_shape_mask(
             # ROI statistics reuse these host samples. Voxel neighborhoods gather
             # their own values, so release the full sampled vector before batching.
             del sampled
+            assert voxel_window is not None
             features, memory = extract_voxels(
-                data, settings, dtype, prod(spacing), histogram_method, voxel_sink, validity, ivh
+                data, settings, dtype, prod(spacing), histogram_method, voxel_sink, validity, ivh,
+                source_shape=source_shape, window=voxel_window,
             )
             metadata.update(
                 batch_size=memory["batch_size"],
