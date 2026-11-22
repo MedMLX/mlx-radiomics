@@ -17,8 +17,12 @@ from numpy.typing import NDArray
 from skimage.measure import marching_cubes
 from trimesh.convex import convex_hull
 
-from mlxradiomics.features.geometry.boxes import oriented_bounding_box_measures
+from mlxradiomics.features.geometry.boxes import (
+    _ombb_candidate_axes,  # pyright: ignore[reportPrivateUsage]
+    oriented_bounding_box_measures,
+)
 from mlxradiomics.features.geometry.ellipsoids import minimum_volume_ellipsoid_axes
+from mlxradiomics.features.geometry.hull import hull_vertex_simplices, scipy_hull
 from mlxradiomics.numerics.runtime import mx
 
 GEOMETRY_NAMES = (
@@ -368,3 +372,62 @@ def test_mvee_axes_are_scale_equivariant_far_from_unit_scale() -> None:
         semi = _mvee_checked(points * 2.0**exponent)
         np.testing.assert_allclose(semi, expected * 2.0**exponent, rtol=1e-5)
 
+
+
+def _per_face_candidate_axes(
+    points: NDArray[np.float64], simplices: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    """Face-flush OMBB orientations enumerated one hull face at a time."""
+    triangles = points[simplices]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    normals = normals / np.linalg.norm(normals, axis=1)[:, None]
+    inward = np.einsum("ij,ij->i", normals, triangles.mean(axis=1) - points.mean(axis=0)) < 0
+    normals[inward] *= -1
+    edge_faces: dict[tuple[int, int], list[int]] = {}
+    for face, (a, b, c) in enumerate(simplices.tolist()):
+        for start, end in ((b, c), (c, a), (a, b)):
+            edge_faces.setdefault((min(start, end), max(start, end)), []).append(face)
+    keys = np.asarray(list(edge_faces), dtype=np.int64)
+    first = np.asarray([faces[0] for faces in edge_faces.values()], dtype=np.int64)
+    second = np.asarray([faces[1] for faces in edge_faces.values()], dtype=np.int64)
+    edges = points[keys[:, 1]] - points[keys[:, 0]]
+    tolerance = max(float(np.max(np.linalg.norm(edges, axis=1))), 1.0) * 1e-12
+    candidates: list[NDArray[np.float64]] = []
+    for normal in normals:
+        keep: NDArray[np.bool_] = (normals[first] @ normal) * (normals[second] @ normal) <= 0
+        selected: NDArray[np.float64] = edges[keep]
+        projected: NDArray[np.float64] = selected @ normal
+        perpendicular: NDArray[np.float64] = selected - projected[:, None] * normal[None, :]
+        lengths: NDArray[np.float64] = np.linalg.norm(perpendicular, axis=1)
+        usable: NDArray[np.bool_] = lengths > tolerance
+        v: NDArray[np.float64] = perpendicular[usable] / lengths[usable, None]
+        u: NDArray[np.float64] = np.broadcast_to(normal, v.shape)
+        candidates.append(np.stack((u, v, np.cross(u, v)), axis=1))
+    return np.concatenate(candidates, axis=0)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "voxel-sphere", "voxel-box"])
+def test_ombb_candidates_match_one_pass_per_face_bit_for_bit(kind: str) -> None:
+    """Blocked candidate enumeration keeps every value and the per-face order.
+
+    Voxel hulls have many coplanar faces, so their silhouette products include exact
+    zeros whose sign and value decide which edges are kept.
+    """
+    rng = np.random.default_rng(7)
+    if kind == "gaussian":
+        cloud = rng.standard_normal((400, 3)) * np.array([3.0, 1.0, 0.2])
+    else:
+        grid = np.indices((12, 11, 9)).reshape(3, -1).T.astype(np.float64)
+        scaled = (grid - np.array([5.5, 5.0, 4.0])) / np.array([5.0, 4.0, 3.0])
+        inside = (
+            np.sum(scaled**2, axis=1) <= 1
+            if kind == "voxel-sphere" else np.all((grid >= 2) & (grid <= 6), axis=1)
+        )
+        cloud = grid[inside] * np.array([0.859375, 0.859375, 2.5])
+    hull = scipy_hull(cloud)
+    points = cloud[hull.vertices] - cloud[hull.vertices].mean(axis=0)
+    simplices = hull_vertex_simplices(hull)
+    expected = _per_face_candidate_axes(points, simplices)
+    actual = _ombb_candidate_axes(points, simplices)
+    assert actual.shape == expected.shape
+    assert np.array_equal(actual.view(np.int64), expected.view(np.int64))
