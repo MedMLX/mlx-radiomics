@@ -198,3 +198,48 @@ def test_resident_roi_counts_preserve_masked_signed_offsets() -> None:
     with mx.stream(mx.gpu):
         actual = roi_histograms(mx.array(bins), mx.array(mask), offsets, levels)
         np.testing.assert_array_equal(np.asarray(actual, dtype=np.uint32), expected)
+
+
+@pytest.mark.parametrize("shape", [(5, 7, 9), (1, 8, 6), (6, 1, 4), (3, 4), (1, 9)])
+def test_resident_run_counts_match_walked_runs(shape: tuple[int, ...]) -> None:
+    """One dispatch counts each direction's maximal same-level runs, singleton axes included.
+
+    The reference walks every run from its start voxel in NumPy. Offsets come from a grid
+    with each axis at least 2, so a length-one axis still has its singleton-run directions.
+    """
+    from dataclasses import replace
+    from math import prod
+
+    from mlxradiomics.features.texture import resident_run_kernel
+    from mlxradiomics.imaging.preprocessing import directions
+
+    rng = np.random.default_rng(31)
+    levels = 4
+    bins = rng.integers(1, levels + 1, shape).astype(np.int32)
+    mask = rng.random(shape) < 0.85
+    offsets = directions(tuple(max(s, 2) for s in shape), replace(Settings(), distances=(1,)))
+    columns = max(shape)
+    expected = np.zeros((len(offsets), levels, columns), dtype=np.uint32)
+
+    def same(index: NDArray[np.int64], level: int) -> bool:
+        inside = bool(np.all(index >= 0) and np.all(index < np.asarray(shape)))
+        return inside and bool(mask[tuple(index)]) and int(bins[tuple(index)]) == level
+
+    for direction, offset in enumerate(offsets):
+        step = np.asarray(offset, dtype=np.int64)
+        for voxel in np.argwhere(mask):
+            level = int(bins[tuple(voxel)])
+            if same(voxel - step, level):
+                continue
+            length, cursor = 1, voxel + step
+            while same(cursor, level):
+                length, cursor = length + 1, cursor + step
+            expected[direction, level - 1, length - 1] += 1
+    with mx.stream(mx.gpu):
+        actual = resident_run_kernel(shape, offsets, levels)(
+            inputs=[mx.array(bins.reshape(-1)), array_from_bool(mask.reshape(-1))],
+            grid=(prod(shape), 1, 1), threadgroup=(256, 1, 1),
+            output_shapes=[(len(offsets), levels, columns)], output_dtypes=[mx.uint32],
+            init_value=0,
+        )[0]
+        np.testing.assert_array_equal(np.asarray(actual, dtype=np.uint32), expected)

@@ -26,7 +26,7 @@ from mlxradiomics.features.matrices import (
 )
 from mlxradiomics.features.sparse_glcm import sparse_glcm_statistics
 from mlxradiomics.features.sparse_size import sparse_size_statistics
-from mlxradiomics.numerics.reduction import CompensatedTotal
+from mlxradiomics.numerics.reduction import CompensatedTotal, directional_mean
 from mlxradiomics.numerics.runtime import evaluate, mx
 
 
@@ -194,6 +194,140 @@ def _groups(
     yield from by_direction
 
 
+# Bytes of dense GLCM statistic intermediates per count cell, about 32 MiB for one
+# 512-level matrix (see ``sparse_glcm.use_sparse_glcm``). GLRLM batches use the same
+# allowance, which exceeds its run-length statistic intermediates.
+_STATISTIC_CELL_SCRATCH = 128
+
+
+def _run_statistics(
+    counts: mx.array, voxels: mx.array, names: tuple[str, ...],
+) -> tuple[dict[str, mx.array], mx.array]:
+    """Return dense GLRLM statistics and the rows that contain runs."""
+    count = mx.sum(counts.astype(mx.int64), axis=tuple(range(1, counts.ndim)))
+    features = size_statistics(counts, "glrlm", names, voxel_count=voxels, total_count=count)
+    return features, count > 0
+
+
+def _single_row_means(
+    family: str,
+    names: tuple[str, ...],
+    columns: list[mx.array],
+    active_rows: list[mx.array],
+    mcc_rows: list[mx.array],
+) -> dict[str, mx.array]:
+    """Average one row's per-matrix features over its matrices, as CompensatedTotal does.
+
+    ``columns`` holds one ``(features, 1)`` column per matrix in aggregation order.
+    Ordinary features average the active matrices; MCC averages those where it is also
+    defined. ``directional_mean`` repeats the running two-sum additions, the final
+    non-finite rule and the division by the active count, so values are unchanged.
+    """
+    if not columns:
+        return {f"{family}_{name}": mx.full((1,), float("nan")) for name in names}
+    values = mx.concatenate(columns, axis=1)
+    active = mx.concatenate(active_rows)
+    means = directional_mean(values, active, compensated=True)
+    output = {f"{family}_{name}": means[index : index + 1] for index, name in enumerate(names)}
+    if "MCC" in names:
+        index = names.index("MCC")
+        output[f"{family}_MCC"] = directional_mean(
+            values[index : index + 1], mx.concatenate(mcc_rows), compensated=True,
+        )
+    return output
+
+
+def _batched_results(
+    family: str,
+    matrices: Iterator[TextureMatrix],
+    ng: int,
+    names: tuple[str, ...],
+    settings: Settings,
+    check_count: bool,
+) -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
+    """Compute GLCM or GLRLM statistics for consecutive dense matrices in shared batches.
+
+    Consecutive dense matrices of one shape are stacked while their estimated statistic
+    intermediates, ``_STATISTIC_CELL_SCRATCH`` bytes per count cell, fit
+    ``scratch_mib``; a single matrix always runs. One batch pays the kernel dispatches
+    of one direction. Every value equals a separate call's: the statistics reduce each
+    row on its own, and GLCM MCC forms each direction's Gram matrices in a separate
+    product. Each matrix's counts are evaluated as they arrive, so a batch holds count
+    matrices rather than the ROI-window arrays that produced them. Sparse matrices run
+    alone. Results are yielded per matrix in input order with a flag on the last
+    matrix of each batch, after which the caller evaluates its totals.
+    """
+    budget = settings.scratch_mib * 1024**2
+    pending: list[TextureMatrix] = []
+
+    def statistics(
+        counts: mx.array, voxels: mx.array, group: int | None,
+    ) -> tuple[dict[str, mx.array], mx.array]:
+        if family == "glcm":
+            return glcm_statistics(counts, mx.float32, names, group=group)
+        return _run_statistics(counts, voxels, names)
+
+    def flush() -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
+        batch = list(pending)
+        pending.clear()
+        if len(batch) == 1:
+            values, active = statistics(batch[0].counts, batch[0].voxels, None)
+            yield batch[0], values, active, True
+            return
+        rows = batch[0].counts.shape[0]
+        values, active = statistics(
+            mx.concatenate([matrix.counts for matrix in batch]),
+            mx.concatenate([matrix.voxels for matrix in batch]),
+            rows,
+        )
+        for index, matrix in enumerate(batch):
+            part = slice(index * rows, (index + 1) * rows)
+            yield (
+                matrix, {name: value[part] for name, value in values.items()}, active[part],
+                index == len(batch) - 1,
+            )
+
+    for matrix in matrices:
+        if check_count:
+            count = mx.sum(
+                matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
+            )
+            if bool(mx.any(count >= 2**31).item()):
+                raise ValueError("merged GLCM count must be below 2**31")
+        if matrix.cell_keys is not None:
+            if pending:
+                yield from flush()
+            if family == "glcm":
+                values, active = sparse_glcm_statistics(
+                    matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
+                )
+            else:
+                assert matrix.column_count is not None
+                count = mx.sum(
+                    matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
+                )
+                values = sparse_size_statistics(
+                    matrix.cell_keys, matrix.counts, matrix.column_count, family, names,
+                    voxel_count=matrix.voxels, total_count=count, coalesced=True,
+                )
+                active = count > 0
+            yield matrix, values, active, True
+            continue
+        scratch = _STATISTIC_CELL_SCRATCH * matrix.counts.size
+        if pending and (
+            pending[0].counts.shape != matrix.counts.shape
+            or pending[0].counts.dtype != matrix.counts.dtype
+            or (len(pending) + 1) * scratch > budget
+        ):
+            yield from flush()
+        if not matrix.resident:
+            # Counting reads ROI-window arrays; evaluating here releases them.
+            evaluate(matrix.counts, matrix.voxels)
+        pending.append(matrix)
+    if pending:
+        yield from flush()
+
+
 def _glcm_count_check_needed(shape: tuple[int, ...], settings: Settings, mode: str) -> bool:
     """Whether geometry alone fails to prove the merged GLCM population below 2**31.
 
@@ -259,7 +393,7 @@ def aggregated_texture_statistics(
             if shared_labels is None:
                 shared_labels = prepare_zone_labels(bins, mask, shape, settings)
             labels = shared_labels
-        names = tuple(
+        names: tuple[str, ...] = tuple(
             name.removeprefix(f"{family}_")
             for name in settings.features
             if name.startswith(f"{family}_")
@@ -274,23 +408,26 @@ def aggregated_texture_statistics(
         if "MCC" in names:
             denominators["MCC"] = mx.zeros((bins.shape[0],), dtype=mx.int32)
         check_glcm_count = family == "glcm" and _glcm_count_check_needed(shape, settings, mode)
-        for matrix in _groups(
+        matrices = _groups(
             family, bins, mask, morphological, shape, ng, settings, mode, histogram_method,
             fixed_columns, neighborhood, labels,
-        ):
-            if family == "glcm":
-                if check_glcm_count:
-                    count = mx.sum(
-                        matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
-                    )
-                    if bool(mx.any(count >= 2**31).item()):
-                        raise ValueError("merged GLCM count must be below 2**31")
-                if matrix.cell_keys is None:
-                    features, active = glcm_statistics(matrix.counts, mx.float32, names)
-                else:
-                    features, active = sparse_glcm_statistics(
-                        matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
-                    )
+        )
+        stream: Iterator[tuple[TextureMatrix, dict[str, mx.array] | None, mx.array | None, bool]]
+        if family in {"glcm", "glrlm"}:
+            stream = _batched_results(family, matrices, ng, names, settings, check_glcm_count)
+        else:
+            stream = ((matrix, None, None, True) for matrix in matrices)
+        # A single spatial row averages its matrices in one directional_mean dispatch
+        # instead of a scalar graph per matrix and feature.
+        single_row = bins.shape[0] == 1
+        columns: list[mx.array] = []
+        active_rows: list[mx.array] = []
+        mcc_rows: list[mx.array] = []
+        pending_columns = 0
+        for matrix, batch_features, batch_active, batch_end in stream:
+            if batch_features is not None:
+                assert batch_active is not None
+                features, active = batch_features, batch_active
             elif family == "ngtdm":
                 assert matrix.differences is not None
                 features = ngtdm_statistics(
@@ -320,26 +457,42 @@ def aggregated_texture_statistics(
                     assert matrix.column_count is not None
                     features = sparse_size_statistics(
                         matrix.cell_keys, matrix.counts, matrix.column_count, family, names,
-                        voxel_count=matrix.voxels, total_count=count,
+                        voxel_count=matrix.voxels, total_count=count, coalesced=True,
                     )
                 active = count > 0
-            if ordinary:
-                denominators["ordinary"] = denominators["ordinary"] + active.astype(mx.int32)
             mcc_defined = active
             if "MCC" in names:
                 mcc_defined = active & ~mx.isnan(features["MCC"])
+            if single_row:
+                # One matrix's feature column; directional_mean adds the columns in
+                # matrix order with CompensatedTotal's operations.
+                columns.append(mx.stack([features[name] for name in names]))
+                active_rows.append(active)
+                mcc_rows.append(mcc_defined)
+                if batch_end:
+                    evaluate(*columns[pending_columns:], *active_rows[pending_columns:],
+                             *mcc_rows[pending_columns:])
+                    pending_columns = len(columns)
+                continue
+            if ordinary:
+                denominators["ordinary"] = denominators["ordinary"] + active.astype(mx.int32)
+            if "MCC" in names:
                 denominators["MCC"] = denominators["MCC"] + mcc_defined.astype(mx.int32)
             for name in names:
                 # Ordinary NaN values still count an active matrix. Only
                 # MCC excludes matrices whose second eigenvalue is undefined.
                 defined = mcc_defined if name == "MCC" else active
                 totals[name].add(mx.where(defined, features[name], 0))
-            evaluate(*(a for t in totals.values() for a in t.arrays()), *denominators.values())
-        for name, total in totals.items():
-            denominator = denominators["MCC" if name == "MCC" else "ordinary"]
-            output[f"{family}_{name}"] = mx.where(
-                denominator > 0, total.value() / denominator, float("nan"),
-            )
+            if batch_end:
+                evaluate(*(a for t in totals.values() for a in t.arrays()), *denominators.values())
+        if single_row:
+            output.update(_single_row_means(family, names, columns, active_rows, mcc_rows))
+        else:
+            for name, total in totals.items():
+                denominator = denominators["MCC" if name == "MCC" else "ordinary"]
+                output[f"{family}_{name}"] = mx.where(
+                    denominator > 0, total.value() / denominator, float("nan"),
+                )
         if neighborhood is not None:
             neighborhood_users += 1
             if neighborhood_users == 2:

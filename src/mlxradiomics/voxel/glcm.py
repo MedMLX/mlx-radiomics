@@ -22,8 +22,9 @@ Arithmetic contracts of the dense path are retained or tightened:
   information keeps the Pearson-series/direct split of ``_mutual_information_bits``.
 * Float sums use two-sum compensation; direction averages use the same two-sum order
   as ``CompensatedTotal``.
-* MCC uses the same centered standardized residual and the same cyclic Jacobi
-  rotations and convergence rule as :mod:`mlxradiomics.numerics.eigen`, on the occupied levels
+* MCC uses the same centered standardized residual as the ROI path, and the cyclic
+  Jacobi rotations and convergence rule of
+  :func:`mlxradiomics.numerics.eigen.symmetric_eigenvalues`, on the occupied levels
   only. Unoccupied levels have zero rows and columns, which the rotation rule never
   touches. A symmetric GLCM has a symmetric residual, whose largest absolute
   eigenvalue is the largest singular value; the Gram square is formed only for

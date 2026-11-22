@@ -17,11 +17,12 @@ from mlxradiomics.features.texture import (
     count_matrix,
     neighborhood_arrays,
     ngtdm_level_reductions,
+    resident_run_kernel,
     run_kernel,
     zone_labels,
 )
 from mlxradiomics.imaging.preprocessing import directions
-from mlxradiomics.numerics.histogram import histogram
+from mlxradiomics.numerics.histogram import histogram, roi_histograms
 from mlxradiomics.numerics.protocols import IndexedAddition, IndexedMinimum
 from mlxradiomics.numerics.runtime import evaluate, mx
 from mlxradiomics.numerics.sparse_counts import coordinate_counts, merge_counts
@@ -29,13 +30,23 @@ from mlxradiomics.numerics.sparse_counts import coordinate_counts, merge_counts
 
 @dataclass(frozen=True)
 class TextureMatrix:
-    """Counts and associated sample count; NGTDM also carries difference sums."""
+    """Counts and associated sample count; NGTDM also carries difference sums.
+
+    ``resident`` marks counts computed directly from resident bins and masks, which
+    hold no per-direction intermediates that evaluating them early would release.
+    """
 
     counts: mx.array
     voxels: mx.array
     differences: mx.array | None = None
     cell_keys: mx.array | None = None
     column_count: int | None = None
+    resident: bool = False
+
+
+# Direction count storage admitted for one-dispatch ROI GLCM and run counting, as in
+# ``cooccurrence.aggregate_roi_glcm``.
+_RESIDENT_COUNT_BYTES = 64 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -54,11 +65,31 @@ def glcm_matrices(
     settings: Settings,
     method: str,
 ) -> Iterator[TextureMatrix]:
-    """Yield one optionally symmetric GLCM for each admitted direction."""
+    """Yield one optionally symmetric GLCM for each admitted direction.
+
+    A single spatial domain with dense counts is counted for every direction in one
+    Metal dispatch from its resident bins and mask (``histogram.roi_histograms``),
+    without voxel-pair arrays. The integer counts equal those of the per-direction
+    pair route, which serves batched domains and sparse lattices.
+    """
     spatial_bins = mx.reshape(bins, (bins.shape[0], *shape))
     spatial_mask = mx.reshape(mask, (bins.shape[0], *shape))
     voxels = mx.sum(mask.astype(mx.int64), axis=1)
-    for delta in directions(shape, settings):
+    offsets = directions(shape, settings)
+    if (
+        bins.shape[0] == 1
+        and offsets
+        and not use_sparse_glcm(ng)
+        and len(offsets) * ng * ng * 4 <= _RESIDENT_COUNT_BYTES
+        and prod(shape) < 2**30
+    ):
+        counts = roi_histograms(spatial_bins[0], spatial_mask[0], offsets, ng)
+        if settings.symmetrical_glcm:
+            counts = counts + mx.swapaxes(counts, 1, 2)
+        for index in range(len(offsets)):
+            yield TextureMatrix(counts[index : index + 1], voxels, resident=True)
+        return
+    for delta in offsets:
         left = (
             slice(None),
             *(slice(max(0, -v), min(s, s - v)) for s, v in zip(shape, delta, strict=True)),
@@ -95,9 +126,30 @@ def run_matrices(
     ng: int,
     settings: Settings,
 ) -> Iterator[TextureMatrix]:
-    """Yield unit-direction run matrices, including valid singleton-only directions."""
+    """Yield unit-direction run matrices, including valid singleton-only directions.
+
+    A single spatial domain counts the runs of every direction in one Metal dispatch
+    (``texture.resident_run_kernel``) without per-voxel length and start arrays. Its
+    integer counts equal the per-direction route, which serves batched domains.
+    """
     offsets = directions(tuple(max(s, 2) for s in shape), replace(settings, distances=(1,)))
     voxels = mx.sum(mask.astype(mx.int64), axis=1)
+    columns = max(shape)
+    if (
+        bins.shape[0] == 1
+        and offsets
+        and 0 < prod(shape) < 2**30
+        and len(offsets) * ng * columns * 4 <= _RESIDENT_COUNT_BYTES
+    ):
+        counts = resident_run_kernel(shape, offsets, ng)(
+            inputs=[mx.reshape(bins, (-1,)), mx.reshape(mask, (-1,))],
+            grid=(prod(shape), 1, 1), threadgroup=(256, 1, 1),
+            output_shapes=[(len(offsets), ng, columns)], output_dtypes=[mx.uint32],
+            init_value=0,
+        )[0]
+        for index in range(len(offsets)):
+            yield TextureMatrix(counts[index : index + 1], voxels, resident=True)
+        return
     for offset in offsets:
         lengths, starts = run_kernel(shape, offset)(
             inputs=[bins, mask],

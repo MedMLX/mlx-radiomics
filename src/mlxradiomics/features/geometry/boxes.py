@@ -13,6 +13,22 @@ from mlxradiomics.numerics.runtime import evaluate, mx
 _OMBB_BLOCK_ELEMENTS = 4 * 1024**2
 
 
+# Float64 silhouette products retained per OMBB face block (8 MiB per product).
+_OMBB_SILHOUETTE_ELEMENTS = 1024**2
+
+
+def _row_dots(left: NDArray[np.float64], right: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return broadcast 3-vector dot products summed in index order from ``+0.0``.
+
+    This is the per-row arithmetic of NumPy's ``(n, 3) @ (3,)`` matrix-vector product
+    with this BLAS, including the sign of exact zeros, so batching the per-normal
+    products over many normals does not change a silhouette decision or a candidate.
+    """
+    total = 0.0 + left[..., 0] * right[..., 0]
+    total = total + left[..., 1] * right[..., 1]
+    return total + left[..., 2] * right[..., 2]
+
+
 def _ombb_candidate_axes(
     points: NDArray[np.float64],
     simplices: NDArray[np.int64],
@@ -45,56 +61,58 @@ def _ombb_candidate_axes(
     interior = points.mean(axis=0)
     inward = np.einsum("ij,ij->i", normals, centroids - interior) < 0
     normals[inward] *= -1
-    edge_faces: dict[tuple[int, int], list[int]] = {}
-    for face, triangle in enumerate(simplices):
-        a, b, c = (int(value) for value in triangle)
-        for start, end in ((b, c), (c, a), (a, b)):
-            key = (start, end) if start < end else (end, start)
-            edge_faces.setdefault(key, []).append(face)
-    keys: list[tuple[int, int]] = []
-    adjacency: list[tuple[int, int]] = []
-    for key, faces in edge_faces.items():
-        if len(faces) != 2:
-            raise RuntimeError("convex hull is not a closed two-manifold")
-        keys.append(key)
-        adjacency.append((faces[0], faces[1]))
-    if not keys:
+    # Edge keys in first-occurrence order over faces and their (b, c), (c, a), (a, b)
+    # edges, with the faces of the first and second occurrence.
+    starts = simplices[:, [1, 2, 0]].reshape(-1)
+    ends = simplices[:, [2, 0, 1]].reshape(-1)
+    owners = np.repeat(np.arange(simplices.shape[0], dtype=np.int64), 3)
+    ordered = np.stack((np.minimum(starts, ends), np.maximum(starts, ends)), axis=1)
+    unique_keys, first_seen, inverse, counts = np.unique(
+        ordered, axis=0, return_index=True, return_inverse=True, return_counts=True,
+    )
+    if unique_keys.shape[0] == 0:
         raise RuntimeError("convex hull has no edges")
-    key_array: NDArray[np.int64] = np.asarray(keys, dtype=np.int64)
+    if np.any(counts != 2):
+        raise RuntimeError("convex hull is not a closed two-manifold")
+    occurrences = np.argsort(inverse.reshape(-1), kind="stable")
+    insertion = np.argsort(first_seen, kind="stable")
+    key_array: NDArray[np.int64] = unique_keys[insertion].astype(np.int64, copy=False)
+    first: NDArray[np.int64] = owners[occurrences[0::2]][insertion]
+    second: NDArray[np.int64] = owners[occurrences[1::2]][insertion]
     edges = points[key_array[:, 1]] - points[key_array[:, 0]]
-    first: NDArray[np.int64] = np.asarray(
-        [pair[0] for pair in adjacency],
-        dtype=np.int64,
-    )
-    second: NDArray[np.int64] = np.asarray(
-        [pair[1] for pair in adjacency],
-        dtype=np.int64,
-    )
     tolerance = max(float(np.max(np.linalg.norm(edges, axis=1))), 1.0) * 1e-12
-    candidates: list[NDArray[np.float64]] = []
-    for normal in normals:
+    first_normals = normals[first]
+    second_normals = normals[second]
+    # Face blocks bound the (faces, edges) silhouette products. Candidates keep the
+    # face-major, edge-minor order of one pass per face normal.
+    block = max(1, _OMBB_SILHOUETTE_ELEMENTS // edges.shape[0])
+    face_parts: list[NDArray[np.int64]] = []
+    edge_parts: list[NDArray[np.int64]] = []
+    for begin in range(0, normals.shape[0], block):
+        face_normals = normals[begin:begin + block, None, :]
         # One adjacency dot product is zero when the edge lies in a face parallel to
         # the candidate direction; opposite signs select the usual silhouette.
-        silhouette: NDArray[np.bool_] = (normals[first] @ normal) * (normals[second] @ normal) <= 0
-        if not bool(np.any(silhouette)):
-            continue
-        selected: NDArray[np.float64] = edges[silhouette]
-        projected: NDArray[np.float64] = selected @ normal
-        perpendicular: NDArray[np.float64] = selected - projected[:, None] * normal[None, :]
-        perpendicular_lengths: NDArray[np.float64] = np.linalg.norm(
-            perpendicular,
-            axis=1,
-        )
-        usable: NDArray[np.bool_] = perpendicular_lengths > tolerance
-        if not bool(np.any(usable)):
-            continue
-        v: NDArray[np.float64] = perpendicular[usable] / perpendicular_lengths[usable, None]
-        u: NDArray[np.float64] = np.broadcast_to(normal, v.shape)
-        w: NDArray[np.float64] = np.cross(u, v)
-        candidates.append(np.stack((u, v, w), axis=1))
-    if not candidates:
+        silhouette = (
+            _row_dots(first_normals[None, :, :], face_normals)
+            * _row_dots(second_normals[None, :, :], face_normals)
+        ) <= 0
+        faces, edge_indexes = np.nonzero(silhouette)
+        face_parts.append(faces + begin)
+        edge_parts.append(edge_indexes)
+    candidate_faces = np.concatenate(face_parts)
+    selected: NDArray[np.float64] = edges[np.concatenate(edge_parts)]
+    normal: NDArray[np.float64] = normals[candidate_faces]
+    projected: NDArray[np.float64] = _row_dots(selected, normal)
+    perpendicular: NDArray[np.float64] = selected - projected[:, None] * normal
+    perpendicular_lengths: NDArray[np.float64] = np.linalg.norm(perpendicular, axis=1)
+    # Edges whose projection on the face plane vanishes cannot define v.
+    usable: NDArray[np.bool_] = perpendicular_lengths > tolerance
+    if not bool(np.any(usable)):
         raise RuntimeError("convex hull has no face-flush box orientations")
-    return np.concatenate(candidates, axis=0)
+    v: NDArray[np.float64] = perpendicular[usable] / perpendicular_lengths[usable, None]
+    u: NDArray[np.float64] = normal[usable]
+    w: NDArray[np.float64] = np.cross(u, v)
+    return np.stack((u, v, w), axis=1)
 
 
 def _ombb_volume_error(

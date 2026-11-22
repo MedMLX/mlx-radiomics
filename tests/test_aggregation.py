@@ -19,6 +19,8 @@ from mlxradiomics.config.settings import (
     DirectionalAggregation,
     MatrixAggregation,
 )
+from mlxradiomics.features.aggregation import aggregated_texture_statistics
+from mlxradiomics.numerics.runtime import array_from_bool, mx
 from mlxradiomics.voxel.storage import voxel_map_store
 from mlxradiomics.workflows.engine import extract as extract_original
 from mlxradiomics.workflows.extraction import extract
@@ -452,3 +454,68 @@ def test_neighborhood_aggregation_against_independent_domains(
             result.features[f"original_{name}"], target, rtol=2e-5, atol=2e-6,
             equal_nan=True, err_msg=name,
         )
+
+
+@pytest.mark.parametrize(
+    "mode", ["native", "2d_average", "2.5d_direction_merge", "3d_average"],
+)
+def test_glrlm_direction_batches_do_not_change_values(mode: DirectionalAggregation) -> None:
+    """Stacked run-length matrices give each direction's separate statistics exactly.
+
+    A 1 MiB budget runs every 400-level, 300-column matrix alone; the default budget
+    stacks the directions of each aggregation domain.
+    """
+    rng = np.random.default_rng(11)
+    image = rng.integers(0, 400, (4, 9, 300)).astype(np.float64)
+    image[:, :, 100:180] = 17
+    mask = np.ones(image.shape, dtype=np.uint8)
+    mask[0, :3, :40] = 0
+    names = tuple(f"glrlm_{name}" for name in FAMILIES["glrlm"])
+    settings = Settings(features=names, bin_width=1, glrlm_aggregation=mode)
+    spacing = (1.0, 1.0, 1.0)
+    batched = extract_original(image, mask, settings=settings, spacing=spacing).features
+    single = extract_original(
+        image, mask, settings=Settings(
+            features=names, bin_width=1, glrlm_aggregation=mode, scratch_mib=1,
+        ), spacing=spacing,
+    ).features
+    for name in names:
+        left = np.asarray(batched[f"original_{name}"], dtype=np.float64)
+        right = np.asarray(single[f"original_{name}"], dtype=np.float64)
+        np.testing.assert_array_equal(left.view(np.uint64), right.view(np.uint64), err_msg=name)
+
+
+@pytest.mark.parametrize(
+    "mode", ["native", "2d_average", "2d_slice_merge", "2.5d_direction_merge", "3d_average"],
+)
+def test_single_row_texture_route_matches_batched_route(mode: DirectionalAggregation) -> None:
+    """One spatial row gives the values of the same row inside a two-row batch, bit for bit.
+
+    A single row counts GLCM directions in one resident-grid dispatch and averages each
+    family's matrices in one ``directional_mean`` dispatch. A two-row batch uses the
+    per-direction pair route and running ``CompensatedTotal`` sums. Both rows hold the
+    same image, so every size axis matches.
+    """
+    rng = np.random.default_rng(23)
+    shape = (5, 7, 9)
+    ng = 6
+    bins_np = rng.integers(1, ng + 1, shape).astype(np.int32)
+    bins_np[1:4, 2:5, 3:7] = 2
+    mask_np = rng.random(shape) < 0.8
+    mask_np[0] = False
+    names = tuple(
+        f"{family}_{name}"
+        for family in ("glcm", "glrlm")
+        for name in FAMILIES[family]
+    )
+    settings = Settings(features=names, glcm_aggregation=mode, glrlm_aggregation=mode)
+    bins = mx.array(bins_np.reshape(1, -1))
+    mask = array_from_bool(mask_np.reshape(1, -1))
+    single = aggregated_texture_statistics(bins, mask, shape, ng, settings)
+    batched = aggregated_texture_statistics(
+        mx.concatenate([bins, bins]), mx.concatenate([mask, mask]), shape, ng, settings,
+    )
+    for name in names:
+        left = np.asarray(single[name], dtype=np.float32)
+        right = np.asarray(batched[name][:1], dtype=np.float32)
+        np.testing.assert_array_equal(left.view(np.uint32), right.view(np.uint32), err_msg=name)

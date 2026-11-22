@@ -1,15 +1,26 @@
 """Occupied integer matrix cells counted and merged on Metal, with original indices."""
 
+from dataclasses import dataclass
 from typing import cast
 
 from mlxradiomics.numerics.protocols import IndexedAddition
 from mlxradiomics.numerics.runtime import evaluate, mx
 
 
-def coalesce(keys: mx.array, weights: mx.array | None = None) -> tuple[mx.array, mx.array]:
-    """Sort and sum integer cells without truncating unique keys or transferring data."""
+@dataclass(frozen=True)
+class PendingCells:
+    """Sorted unique cells of one input before compaction, with device-side bounds."""
+
+    keys: mx.array
+    counts: mx.array
+    occupied: mx.array
+    first: mx.array
+
+
+def pending_cells(keys: mx.array, weights: mx.array | None = None) -> PendingCells | None:
+    """Sort and sum integer cells on Metal without waiting; None for an empty input."""
     if not keys.size:
-        return mx.zeros((1,), dtype=mx.int64), mx.zeros((1,), dtype=mx.int32)
+        return None
     values, inverse, occurrences = cast(
         tuple[mx.array, mx.array, mx.array],
         mx.unique(
@@ -28,11 +39,31 @@ def coalesce(keys: mx.array, weights: mx.array | None = None) -> tuple[mx.array,
     # The -1 sentinel sorts first. All padded keys also have -1 but zero counts.
     occupied = mx.sum(((values >= 0) & (occurrences > 0)).astype(mx.int32))
     first = (values[0] < 0).astype(mx.int32)
-    evaluate(occupied, first, values, counts)
-    size, start = int(cast(int, occupied.item())), int(cast(int, first.item()))
-    if not size:
-        return mx.zeros((1,), dtype=mx.int64), mx.zeros((1,), dtype=mx.int32)
-    return values[start : start + size], counts[start : start + size]
+    return PendingCells(values, counts, occupied, first)
+
+
+def compact_cells(pending: list[PendingCells | None]) -> list[tuple[mx.array, mx.array]]:
+    """Wait once for all pending inputs, then return each one's occupied keys and counts.
+
+    An empty or unoccupied input becomes one zero key with zero count.
+    """
+    present = [cells for cells in pending if cells is not None]
+    if present:
+        evaluate(*(a for c in present for a in (c.occupied, c.first, c.keys, c.counts)))
+    output: list[tuple[mx.array, mx.array]] = []
+    for cells in pending:
+        size = 0 if cells is None else int(cast(int, cells.occupied.item()))
+        if cells is None or not size:
+            output.append((mx.zeros((1,), dtype=mx.int64), mx.zeros((1,), dtype=mx.int32)))
+            continue
+        start = int(cast(int, cells.first.item()))
+        output.append((cells.keys[start : start + size], cells.counts[start : start + size]))
+    return output
+
+
+def coalesce(keys: mx.array, weights: mx.array | None = None) -> tuple[mx.array, mx.array]:
+    """Sort and sum integer cells without truncating unique keys or transferring data."""
+    return compact_cells([pending_cells(keys, weights)])[0]
 
 
 def _pad_rows(rows: list[tuple[mx.array, mx.array]]) -> tuple[mx.array, mx.array]:

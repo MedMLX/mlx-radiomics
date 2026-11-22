@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from mlx.core import Dtype, array
+    from mlx.core import Dtype, Stream, array
 
 
 class Evaluate(Protocol):
@@ -14,6 +14,23 @@ class Evaluate(Protocol):
 
     def __call__(self, *arrays: array) -> None:
         """Evaluate ``arrays`` and block until they are computed."""
+        ...
+
+
+class StartEvaluation(Protocol):
+    """``mx.async_eval``: schedule the given arrays without waiting for them."""
+
+    def __call__(self, *arrays: array) -> None:
+        """Start evaluating ``arrays`` and return before they are computed."""
+        ...
+
+
+class AsyncEvaluationRuntime(Protocol):
+    """A module exposing ``async_eval``, such as ``mlx.core``."""
+
+    @property
+    def async_eval(self) -> StartEvaluation:
+        """Return the scheduling function."""
         ...
 
 
@@ -54,6 +71,7 @@ class MetalKernel(Protocol):
         output_shapes: Sequence[tuple[int, ...]],
         output_dtypes: Sequence[Dtype],
         init_value: float | None = None,
+        stream: Stream | None = None,
     ) -> list[array]:
         """Dispatch the kernel over ``grid`` and return its outputs."""
         ...
