@@ -195,42 +195,62 @@ def _groups(
 
 
 # Bytes of dense GLCM statistic intermediates per count cell, about 32 MiB for one
-# 512-level matrix (see ``sparse_glcm.use_sparse_glcm``).
-_GLCM_CELL_SCRATCH = 128
+# 512-level matrix (see ``sparse_glcm.use_sparse_glcm``). GLRLM batches use the same
+# allowance, which exceeds its run-length statistic intermediates.
+_STATISTIC_CELL_SCRATCH = 128
 
 
-def _glcm_results(
+def _run_statistics(
+    counts: mx.array, voxels: mx.array, names: tuple[str, ...],
+) -> tuple[dict[str, mx.array], mx.array]:
+    """Return dense GLRLM statistics and the rows that contain runs."""
+    count = mx.sum(counts.astype(mx.int64), axis=tuple(range(1, counts.ndim)))
+    features = size_statistics(counts, "glrlm", names, voxel_count=voxels, total_count=count)
+    return features, count > 0
+
+
+def _batched_results(
+    family: str,
     matrices: Iterator[TextureMatrix],
     ng: int,
     names: tuple[str, ...],
     settings: Settings,
     check_count: bool,
 ) -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
-    """Compute GLCM statistics for consecutive dense matrices in shared batches.
+    """Compute GLCM or GLRLM statistics for consecutive dense matrices in shared batches.
 
     Consecutive dense matrices of one shape are stacked while their estimated statistic
-    intermediates, ``_GLCM_CELL_SCRATCH`` bytes per count cell, fit ``scratch_mib``; a
-    single matrix always runs. One batch pays the kernel dispatches of one direction.
-    Every value equals a separate call's: the compiled statistics reduce each row on
-    its own, and MCC forms each direction's Gram matrices in a separate product. Each
-    matrix's counts are evaluated as they arrive, so a batch holds count matrices
-    rather than the ROI-window pair arrays that produced them. Sparse matrices run
-    alone. Results are yielded per matrix in input order with a flag on
-    the last matrix of each batch, after which the caller evaluates its totals.
+    intermediates, ``_STATISTIC_CELL_SCRATCH`` bytes per count cell, fit
+    ``scratch_mib``; a single matrix always runs. One batch pays the kernel dispatches
+    of one direction. Every value equals a separate call's: the statistics reduce each
+    row on its own, and GLCM MCC forms each direction's Gram matrices in a separate
+    product. Each matrix's counts are evaluated as they arrive, so a batch holds count
+    matrices rather than the ROI-window arrays that produced them. Sparse matrices run
+    alone. Results are yielded per matrix in input order with a flag on the last
+    matrix of each batch, after which the caller evaluates its totals.
     """
     budget = settings.scratch_mib * 1024**2
     pending: list[TextureMatrix] = []
+
+    def statistics(
+        counts: mx.array, voxels: mx.array, group: int | None,
+    ) -> tuple[dict[str, mx.array], mx.array]:
+        if family == "glcm":
+            return glcm_statistics(counts, mx.float32, names, group=group)
+        return _run_statistics(counts, voxels, names)
 
     def flush() -> Iterator[tuple[TextureMatrix, dict[str, mx.array], mx.array, bool]]:
         batch = list(pending)
         pending.clear()
         if len(batch) == 1:
-            values, active = glcm_statistics(batch[0].counts, mx.float32, names)
+            values, active = statistics(batch[0].counts, batch[0].voxels, None)
             yield batch[0], values, active, True
             return
         rows = batch[0].counts.shape[0]
-        values, active = glcm_statistics(
-            mx.concatenate([matrix.counts for matrix in batch]), mx.float32, names, group=rows,
+        values, active = statistics(
+            mx.concatenate([matrix.counts for matrix in batch]),
+            mx.concatenate([matrix.voxels for matrix in batch]),
+            rows,
         )
         for index, matrix in enumerate(batch):
             part = slice(index * rows, (index + 1) * rows)
@@ -249,19 +269,30 @@ def _glcm_results(
         if matrix.cell_keys is not None:
             if pending:
                 yield from flush()
-            values, active = sparse_glcm_statistics(
-                matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
-            )
+            if family == "glcm":
+                values, active = sparse_glcm_statistics(
+                    matrix.cell_keys, matrix.counts, ng, names, settings.scratch_mib,
+                )
+            else:
+                assert matrix.column_count is not None
+                count = mx.sum(
+                    matrix.counts.astype(mx.int64), axis=tuple(range(1, matrix.counts.ndim)),
+                )
+                values = sparse_size_statistics(
+                    matrix.cell_keys, matrix.counts, matrix.column_count, family, names,
+                    voxel_count=matrix.voxels, total_count=count,
+                )
+                active = count > 0
             yield matrix, values, active, True
             continue
-        scratch = _GLCM_CELL_SCRATCH * matrix.counts.size
+        scratch = _STATISTIC_CELL_SCRATCH * matrix.counts.size
         if pending and (
             pending[0].counts.shape != matrix.counts.shape
             or pending[0].counts.dtype != matrix.counts.dtype
             or (len(pending) + 1) * scratch > budget
         ):
             yield from flush()
-        # Counting reads ROI-window pair arrays; evaluating here releases them.
+        # Counting reads ROI-window arrays; evaluating here releases them.
         evaluate(matrix.counts, matrix.voxels)
         pending.append(matrix)
     if pending:
@@ -353,14 +384,14 @@ def aggregated_texture_statistics(
             fixed_columns, neighborhood, labels,
         )
         stream: Iterator[tuple[TextureMatrix, dict[str, mx.array] | None, mx.array | None, bool]]
-        if family == "glcm":
-            stream = _glcm_results(matrices, ng, names, settings, check_glcm_count)
+        if family in {"glcm", "glrlm"}:
+            stream = _batched_results(family, matrices, ng, names, settings, check_glcm_count)
         else:
             stream = ((matrix, None, None, True) for matrix in matrices)
-        for matrix, glcm_features, glcm_active, batch_end in stream:
-            if family == "glcm":
-                assert glcm_features is not None and glcm_active is not None
-                features, active = glcm_features, glcm_active
+        for matrix, batch_features, batch_active, batch_end in stream:
+            if batch_features is not None:
+                assert batch_active is not None
+                features, active = batch_features, batch_active
             elif family == "ngtdm":
                 assert matrix.differences is not None
                 features = ngtdm_statistics(

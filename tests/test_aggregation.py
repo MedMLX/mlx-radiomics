@@ -452,3 +452,32 @@ def test_neighborhood_aggregation_against_independent_domains(
             result.features[f"original_{name}"], target, rtol=2e-5, atol=2e-6,
             equal_nan=True, err_msg=name,
         )
+
+
+@pytest.mark.parametrize(
+    "mode", ["native", "2d_average", "2.5d_direction_merge", "3d_average"],
+)
+def test_glrlm_direction_batches_do_not_change_values(mode: DirectionalAggregation) -> None:
+    """Stacked run-length matrices give each direction's separate statistics exactly.
+
+    A 1 MiB budget runs every 400-level, 300-column matrix alone; the default budget
+    stacks the directions of each aggregation domain.
+    """
+    rng = np.random.default_rng(11)
+    image = rng.integers(0, 400, (4, 9, 300)).astype(np.float64)
+    image[:, :, 100:180] = 17
+    mask = np.ones(image.shape, dtype=np.uint8)
+    mask[0, :3, :40] = 0
+    names = tuple(f"glrlm_{name}" for name in FAMILIES["glrlm"])
+    settings = Settings(features=names, bin_width=1, glrlm_aggregation=mode)
+    spacing = (1.0, 1.0, 1.0)
+    batched = extract_original(image, mask, settings=settings, spacing=spacing).features
+    single = extract_original(
+        image, mask, settings=Settings(
+            features=names, bin_width=1, glrlm_aggregation=mode, scratch_mib=1,
+        ), spacing=spacing,
+    ).features
+    for name in names:
+        left = np.asarray(batched[f"original_{name}"], dtype=np.float64)
+        right = np.asarray(single[f"original_{name}"], dtype=np.float64)
+        np.testing.assert_array_equal(left.view(np.uint64), right.view(np.uint64), err_msg=name)
