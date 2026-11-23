@@ -1,4 +1,4 @@
-"""Typed interfaces for MLX evaluation, indexed updates and custom Metal kernels."""
+"""Typed interfaces for indexed updates and custom Metal kernels."""
 
 from __future__ import annotations
 
@@ -7,40 +7,6 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from mlx.core import Dtype, Stream, array
-
-
-class Evaluate(Protocol):
-    """``mx.eval``: evaluate the given arrays."""
-
-    def __call__(self, *arrays: array) -> None:
-        """Evaluate ``arrays`` and block until they are computed."""
-        ...
-
-
-class StartEvaluation(Protocol):
-    """``mx.async_eval``: schedule the given arrays without waiting for them."""
-
-    def __call__(self, *arrays: array) -> None:
-        """Start evaluating ``arrays`` and return before they are computed."""
-        ...
-
-
-class AsyncEvaluationRuntime(Protocol):
-    """A module exposing ``async_eval``, such as ``mlx.core``."""
-
-    @property
-    def async_eval(self) -> StartEvaluation:
-        """Return the scheduling function."""
-        ...
-
-
-class EvaluationRuntime(Protocol):
-    """A module exposing ``eval``, such as ``mlx.core``."""
-
-    @property
-    def eval(self) -> Evaluate:
-        """Return the evaluation function."""
-        ...
 
 
 class IndexedAddition(Protocol):

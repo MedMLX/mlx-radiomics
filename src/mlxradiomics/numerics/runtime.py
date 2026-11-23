@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from medmlx_core import MissingDependencyError, import_mlx
+from medmlx_core.typing import MlxRuntime
 from numpy.typing import NDArray
 
 from mlxradiomics.contracts.types import MapDtype
-from mlxradiomics.numerics.protocols import AsyncEvaluationRuntime, EvaluationRuntime
 
 if TYPE_CHECKING:
     import mlx.core as mx
@@ -36,8 +36,8 @@ __all__ = [
 
 # MLX accepts NumPy bool arrays; its DLPack constructor annotation omits them.
 array_from_bool = cast(Callable[[NDArray[np.bool_]], mx.array], mx.array)
-evaluate = cast(EvaluationRuntime, mx).eval
-evaluate_async = cast(AsyncEvaluationRuntime, mx).async_eval
+evaluate = cast(MlxRuntime, mx).eval
+evaluate_async = cast(MlxRuntime, mx).async_eval
 
 
 def trim_cache() -> None:
