@@ -21,7 +21,7 @@ Extract radiomics features and voxel maps on the Apple Silicon GPU with native M
 | Aligned image + integer label mask | ROI features (JSON/CSV) or one float32 NIfTI map per feature |
 
 PyRadiomics feature names and parameter files, with configurable IBSI conventions. No
-model weights to download. Requires Apple Silicon with Metal.
+model weights to download.
 
 ## Install
 
