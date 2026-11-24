@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from mlxradiomics import __version__
-from mlxradiomics.config.settings import Settings
+from mlxradiomics.config.settings import MORPHOLOGY_PREFIXES, Settings
 from mlxradiomics.contracts.metadata import dependency_version
 from mlxradiomics.contracts.results import Result
 from mlxradiomics.contracts.types import (
@@ -218,6 +218,8 @@ def extract_with_shape_mask(
         raise ValueError("shape features are unavailable in voxel mode")
     if voxel and any(name.startswith("localintensity_") for name in settings.features):
         raise ValueError("physical local-intensity peak features are unavailable in voxel mode")
+    if voxel and any(name.startswith("momentinvariant_") for name in settings.features):
+        raise ValueError("moment-invariant features are unavailable in voxel mode")
     if voxel and voxel_sink is None:
         require_retained_capacity(image.size, len(settings.features), map_dtype)
     source_shape = tuple(int(size) for size in np.shape(image))
@@ -296,7 +298,10 @@ def extract_with_shape_mask(
         raise ValueError("image exceeds supported integer indexing/count range")
     if (
         not voxel and preparation_window is None
-        and any(name.startswith(("shape", "localintensity_")) for name in settings.features)
+        and any(
+            name.startswith((*MORPHOLOGY_PREFIXES, "localintensity_"))
+            for name in settings.features
+        )
     ):
         # Prepared inputs may still cover the caller's full grid; crop them after the
         # settings, source and shape errors above. Direct preparation already used this

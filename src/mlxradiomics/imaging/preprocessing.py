@@ -17,7 +17,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from mlxradiomics.config.settings import Settings
+from mlxradiomics.config.settings import MORPHOLOGY_PREFIXES, Settings
 from mlxradiomics.contracts.types import HostArray
 
 
@@ -538,12 +538,12 @@ def discretize_prepared(
     """Discretize validated samples without repeating source or mask preparation.
 
     Only selections that read bins construct a lattice. Raw intensity statistics,
-    shape, local intensity and IVH leave ``bins=None`` with the unused-lattice
+    shape, moment invariants, local intensity and IVH leave ``bins=None`` with the unused-lattice
     sentinel ``gray_levels=1``; IVH constructs its separate lattice later.
     """
     image = data.image
     assign = any(
-        not name.startswith(("shape", "localintensity_", "ivh_", "firstorder_"))
+        not name.startswith((*MORPHOLOGY_PREFIXES, "localintensity_", "ivh_", "firstorder_"))
         or name in {"firstorder_Entropy", "firstorder_Uniformity"}
         for name in settings.features
     )

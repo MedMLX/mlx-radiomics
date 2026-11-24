@@ -102,12 +102,21 @@ SHAPE = _PYRADIOMICS_SHAPE + (
     "VolumeDensityConvexHull", "AreaDensityConvexHull", "CentreOfMassShift",
     "IntegratedIntensity", "MoransI", "GearysC",
 )
+# Invariants of the intensity density, then of the shape, in PySERA order.
+MOMENT_INVARIANT = (
+    "IntensityI1", "IntensityF2", "IntensityI2", "IntensityI3", "IntensityF3",
+    "ShapeI1", "ShapeF2", "ShapeI2", "ShapeI3", "ShapeF3",
+)
 FAMILIES: dict[str, tuple[str, ...]] = {
     "firstorder": FIRST_ORDER, "glcm": GLCM, "gldm": GLDM, "ngtdm": NGTDM,
     "glrlm": GLRLM, "glszm": GLSZM, "shape": SHAPE, "shape2D": SHAPE2D,
     "gldzm": GLDZM, "intensityhistogram": INTENSITY_HISTOGRAM,
     "localintensity": LOCAL_INTENSITY, "ivh": IVH,
+    "momentinvariant": MOMENT_INVARIANT,
 }
+# Families evaluated once on the original image from the masks' own voxels: they have no
+# voxel maps and no derived-image variants, and they never read the gray-level lattice.
+MORPHOLOGY_PREFIXES = ("shape", "momentinvariant_")
 # Selectable feature names, "<family>_<Name>"; result keys add an image-type prefix.
 FEATURES = tuple(f"{family}_{name}" for family, names in FAMILIES.items() for name in names)
 
@@ -120,8 +129,9 @@ def list_features(
     """List selectable names, optionally restricted to families, mode and dimension.
 
     With no families, list the full catalog, not the 93-feature default selection.
-    Unknown families raise ``ValueError``. Voxel mode excludes shape and local intensity.
-    ``ndim=2`` excludes 3-D shape and local intensity; ``ndim=3`` excludes shape2D,
+    Unknown families raise ``ValueError``. Voxel mode excludes shape, local intensity and
+    moment invariants. ``ndim=2`` excludes 3-D shape, local intensity and moment
+    invariants; ``ndim=3`` excludes shape2D,
     whose single-slice 3-D use requires explicit selection and ``force2d_axis``.
     The returned tuple can be passed directly to ``Settings(features=...)``.
     Names retain catalog order and occur once even when a family is repeated.
@@ -137,9 +147,9 @@ def list_features(
         )
     selected = set(families) if families else set(FAMILIES)
     if mode == "voxel":
-        selected -= {"shape", "shape2D", "localintensity"}
+        selected -= {"shape", "shape2D", "localintensity", "momentinvariant"}
     if ndim == 2:
-        selected -= {"shape", "localintensity"}
+        selected -= {"shape", "localintensity", "momentinvariant"}
     elif ndim == 3:
         selected.discard("shape2D")
     return tuple(name for name in FEATURES if name.split("_", 1)[0] in selected)

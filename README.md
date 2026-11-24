@@ -148,7 +148,7 @@ Use `list_features("firstorder", "glcm")` to select whole families, or
 Pass its result as `Settings(features=...)`. Selecting a family does not change
 binning or numerical conventions.
 
-`mlxradiomics.FEATURES` lists all 190 names, including all 116 non-deprecated
+`mlxradiomics.FEATURES` lists all 200 names, including all 116 non-deprecated
 PyRadiomics features. Without a `features` selection, extraction returns the 93
 PyRadiomics intensity and texture features; request shape and the other families
 by name.
@@ -166,6 +166,7 @@ by name.
 | `ivh` | 7 | ROI, voxel |
 | `localintensity` | 2 | 3D ROI |
 | `shape` | 32 | 3D ROI |
+| `momentinvariant` | 10 | 3D ROI |
 | `shape2D` | 9 | 2D ROI, or one slice of a 3D ROI |
 
 Calculation conventions such as kurtosis, shape covariance divisor, NGTDM
@@ -216,7 +217,8 @@ for all arguments, report fields, geometry and error handling.
 
 ## Limits
 
-- Shape and local intensity are ROI-only; local intensity needs 3D input.
+- Shape, local intensity and moment invariants are ROI-only; local intensity and moment
+  invariants need 3D input.
 - Simoncelli and Riesz filters are unavailable on this release; see the limits guide.
 - Feature arithmetic is float32. Undefined values are NaN; overflow is infinity.
 - Read voxel maps with NiBabel; SimpleITK reads stored NaN voxels as zero.

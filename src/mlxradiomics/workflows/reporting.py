@@ -63,13 +63,15 @@ def _map_layout(
 ) -> dict[str, tuple[str, ...]]:
     """Return the prefixed map names of each derived image, in output order.
 
-    Shape and local-intensity peak features are refused because they have no voxel
-    maps; names must be nonempty and unique.
+    Shape, local-intensity peak and moment-invariant features are refused because they
+    have no voxel maps; names must be nonempty and unique.
     """
     if any(name.startswith("shape") for name in settings.features):
         raise ValueError("shape features are unavailable in voxel mode")
     if any(name.startswith("localintensity_") for name in settings.features):
         raise ValueError("physical local-intensity peak features are unavailable in voxel mode")
+    if any(name.startswith("momentinvariant_") for name in settings.features):
+        raise ValueError("moment-invariant features are unavailable in voxel mode")
     image_names = feature_image_names(
         reference.array.shape,
         reference.spacing,

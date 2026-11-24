@@ -1,7 +1,7 @@
 # Limits
 
-**Modes.** Shape and local-intensity features are ROI-only. Local intensity and
-intensity-dependent morphology need 3D input. `shape2D` on 3D input needs
+**Modes.** Shape, local-intensity and moment-invariant features are ROI-only. Local
+intensity, intensity-dependent morphology and moment invariants need 3D input. `shape2D` on 3D input needs
 `force2d_axis` (a NumPy axis) and an ROI in one slice on that axis. Voxel mode
 needs at least two ROI voxels.
 

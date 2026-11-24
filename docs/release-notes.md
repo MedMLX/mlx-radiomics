@@ -1,7 +1,11 @@
 # Release notes
 
 ## Unreleased
-"
+
+### New
+
+**Moment invariants.** The new `momentinvariant` family adds ten 3D ROI features: five moments of the ROI shape and five of its intensity that do not change under translation, rotation or uniform scaling, as defined in PySERA. `mlxradiomics.FEATURES` now lists 200 names.
+
 ## 1.2.0
 
 ### Fixes

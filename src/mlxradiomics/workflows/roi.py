@@ -5,7 +5,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from mlxradiomics.config.settings import Settings
+from mlxradiomics.config.settings import MORPHOLOGY_PREFIXES, Settings
 from mlxradiomics.features.aggregation import aggregated_texture_statistics
 from mlxradiomics.features.cooccurrence import aggregate_roi_glcm
 from mlxradiomics.features.first_order import first_order, first_order_histogram, first_order_inputs
@@ -48,7 +48,7 @@ def _roi_shapes(
     settings: Settings,
     spacing: tuple[float, ...],
 ) -> dict[str, mx.array]:
-    """Evaluate shape selections without constructing intensity-grid residents."""
+    """Evaluate shape and moment-invariant selections without intensity-grid residents."""
     values: dict[str, mx.array] = {}
     if any(name.startswith("shape") for name in settings.features):
         from mlxradiomics.features.geometry.mesh import MeshGeometryContext
@@ -121,6 +121,21 @@ def _roi_shapes(
                     ellipsoid_area=settings.ellipsoid_area,
                 )
             )
+    invariant_names = tuple(
+        name.removeprefix("momentinvariant_")
+        for name in settings.features
+        if name.startswith("momentinvariant_")
+    )
+    if invariant_names:
+        from mlxradiomics.features.moment_invariants import moment_invariant_statistics
+
+        if data.roi.ndim != 3:
+            raise ValueError("moment invariants require a three-dimensional mask")
+        values.update(
+            moment_invariant_statistics(
+                data.image, data.roi, data.shape_roi, spacing, invariant_names,
+            )
+        )
     return values
 
 
@@ -230,7 +245,8 @@ def _roi_intensity(
             trim_cache()
         values.update({f"firstorder_{k}": v for k, v in first.items()})
     if all(
-        name.startswith(("firstorder_", "shape", "localintensity_")) for name in settings.features
+        name.startswith(("firstorder_", *MORPHOLOGY_PREFIXES, "localintensity_"))
+        for name in settings.features
     ):
         return values
     assert window is not None
@@ -318,7 +334,7 @@ def extract_roi(
 ) -> dict[str, float]:
     """Complete selected ROI arithmetic and transfer only requested scalars."""
     spatial = any(
-        not name.startswith(("firstorder_", "shape", "localintensity_"))
+        not name.startswith(("firstorder_", *MORPHOLOGY_PREFIXES, "localintensity_"))
         for name in settings.features
     )
     window = _roi_window(data, settings) if spatial else None

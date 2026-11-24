@@ -32,7 +32,7 @@ result.metadata["feature_validity"]           # finite / NaN / infinity counts p
 ```
 
 Feature keys are `<image>_<family>_<name>`, such as `original_glcm_Contrast` or
-`wavelet-HHL_glcm_Contrast`. `mlxradiomics.FEATURES` lists all 190 selectable
+`wavelet-HHL_glcm_Contrast`. `mlxradiomics.FEATURES` lists all 200 selectable
 names; see [Features](features.md).
 
 ## Arrays instead of files

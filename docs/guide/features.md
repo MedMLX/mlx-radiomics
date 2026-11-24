@@ -1,6 +1,6 @@
 # Features
 
-`mlxradiomics.FEATURES` lists all 190 selectable names, including all 116
+`mlxradiomics.FEATURES` lists all 200 selectable names, including all 116
 non-deprecated PyRadiomics features. Without a `features` selection, extraction
 returns the 93 PyRadiomics intensity and texture features marked as defaults
 below. Shape and the other families must be requested by name.
@@ -18,6 +18,7 @@ below. Shape and the other families must be requested by name.
 | `ivh` | 7 | ROI, voxel |
 | `localintensity` | 2 | 3D ROI |
 | `shape` | 32 | 3D ROI |
+| `momentinvariant` | 10 | 3D ROI |
 | `shape2D` | 9 | 2D ROI, or one slice of a 3D ROI |
 
 Select features with their family prefix:
@@ -39,6 +40,33 @@ marks a PyRadiomics feature or extension without an IBSI definition.
 
 ```{include} ../_generated/feature-catalog.md
 ```
+
+## Moment invariants
+
+`momentinvariant` holds five invariants of the ROI shape and the same five of its
+intensity, as defined in PySERA. They are dimensionless and do not change when the ROI
+is moved, rotated or uniformly scaled.
+
+Each set is computed from a density at the voxel centers. The shape density is 1 on the
+morphological mask. The intensity density is `(I - min) / (mean - min)` on the intensity
+mask, so the intensity invariants also ignore an intensity offset or positive gain, and
+they are NaN for a constant ROI. With mass `m000` and central moments `mu_pqr`, the
+normalized moments are `eta_pqr = mu_pqr / m000^((p + q + r) / 3 + 1)`.
+
+| Suffix | Definition |
+| --- | --- |
+| `I1` | Trace of the second-order tensor, `eta200 + eta020 + eta002` |
+| `F2` | Sum of the squared elements of the second-order tensor |
+| `I2` | Second principal invariant of the second-order tensor, `eta200 eta020 + eta200 eta002 + eta020 eta002 - eta110^2 - eta101^2 - eta011^2` |
+| `I3` | Determinant of the second-order tensor |
+| `F3` | Sum of the squared elements of the third-order tensor |
+
+Names are `momentinvariant_Shape<suffix>` and `momentinvariant_Intensity<suffix>`, such
+as `momentinvariant_ShapeI1`. Moments use physical coordinates, so anisotropic spacing
+is honored. PySERA uses voxel indices, and the two agree on an isotropic grid. On an HCC
+tumor at 1 mm spacing, all ten values match PySERA 2.1.5 within 5e-8 relative. PySERA
+reports each connected lesion of a mask separately, and here the whole mask is one ROI.
+Like shape, the family is computed once on the original image.
 
 ## Select families in Python
 

@@ -9,7 +9,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from mlxradiomics.config.settings import Settings
+from mlxradiomics.config.settings import MORPHOLOGY_PREFIXES, Settings
 from mlxradiomics.config.transforms import ImageType, TransformSettings
 from mlxradiomics.contracts.results import Result
 from mlxradiomics.contracts.types import Features, HostArray, MapDtype, VoxelArray, VoxelSink
@@ -40,7 +40,9 @@ def prepare_derived_inputs(
     voxel: bool,
 ) -> DerivedInputs:
     """Preserve intensity and morphology support while preparing the derived-image window."""
-    intensity_names = tuple(name for name in settings.features if not name.startswith("shape"))
+    intensity_names = tuple(
+        name for name in settings.features if not name.startswith(MORPHOLOGY_PREFIXES)
+    )
     derived_settings = replace(
         settings,
         features=intensity_names,

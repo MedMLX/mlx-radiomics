@@ -75,9 +75,10 @@ voxel_names = list_features(mode="voxel", ndim=3)
 
 `list_features` returns catalog names filtered by family, mode and optional
 dimension; it does not change the 93-feature default. Unknown family names raise
-`ValueError`. Shape and local intensity are excluded from voxel selections;
-3-D discovery excludes `shape2D` because its 3-D use requires a single slice and
-explicit `force2d_axis`. Inspect the returned names before using a large selection.
+`ValueError`. Shape, local intensity and moment invariants are excluded from voxel
+selections; 3-D discovery excludes `shape2D` because its 3-D use requires a single
+slice and explicit `force2d_axis`. Inspect the returned names before using a large
+selection.
 
 `export` and `export_files` always write voxel maps, not ROI scalar reports.
 Use `mlxradiomics.medmlx.run` for ROI JSON/CSV, or consume `Result.features` in

@@ -13,7 +13,7 @@ from typing import Literal, cast, overload
 import numpy as np
 from numpy.typing import NDArray
 
-from mlxradiomics.config.settings import Settings
+from mlxradiomics.config.settings import MORPHOLOGY_PREFIXES, Settings
 from mlxradiomics.config.spatial import ImageSettings
 from mlxradiomics.config.transforms import ImageType, TransformSettings
 from mlxradiomics.contracts.metadata import dependency_version, file_metadata, transform_payload
@@ -223,8 +223,10 @@ def extract(
     histogram_method = "mlx"
     streaming = sink is not None or sink_factory is not None
     settings, transforms = settings or Settings(), transforms or TransformSettings()
-    shape_names = tuple(n for n in settings.features if n.startswith("shape"))
-    intensity_names = tuple(n for n in settings.features if not n.startswith("shape"))
+    shape_names = tuple(n for n in settings.features if n.startswith(MORPHOLOGY_PREFIXES))
+    intensity_names = tuple(
+        n for n in settings.features if not n.startswith(MORPHOLOGY_PREFIXES)
+    )
     if not voxel and transforms.image_types == (ImageType.ORIGINAL,):
         # The original-only ROI route needs no filtered-image preparation. The
         # engine already validates, normalizes and resegments the complete source.
