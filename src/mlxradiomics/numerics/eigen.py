@@ -273,6 +273,16 @@ def _largest_local(size: int, lanes: int) -> bool:
     return size * size + 2 * size + lanes + lanes // 32 + 4 <= _THREADGROUP_FLOATS
 
 
+def _largest_vectors_local(size: int, lanes: int) -> bool:
+    """Whether the two Householder vectors and the lane scratch fit in threadgroup memory."""
+    return 2 * size + lanes + lanes // 32 + 4 <= _THREADGROUP_FLOATS
+
+
+def _largest_workspace(size: int, lanes: int) -> int:
+    """Device floats per matrix: the matrix, plus both vectors when they do not fit."""
+    return size * size + (0 if _largest_vectors_local(size, lanes) else 2 * size)
+
+
 @lru_cache(maxsize=32)
 def _largest_kernel(size: int, lanes: int) -> MetalKernel:
     """Compile the largest-eigenvalue kernel for ``size`` x ``size`` symmetric matrices."""
@@ -293,7 +303,14 @@ def _largest_kernel(size: int, lanes: int) -> MetalKernel:
     local = _largest_local(size, lanes)
     storage = (
         f"threadgroup float work[{elements}];" if local
-        else "device float* work = workspace + base;"
+        else f"device float* work = workspace + row * {_largest_workspace(size, lanes)};"
+    )
+    # From 3965 levels the vectors alone exceed threadgroup memory; they then follow
+    # the matrix into the device workspace, under the same device barriers.
+    vectors = (
+        "threadgroup float v[N];\n        threadgroup float w[N];"
+        if _largest_vectors_local(size, lanes)
+        else f"device float* v = work + {elements};\n        device float* w = v + N;"
     )
     memory = "mem_flags::mem_threadgroup" if local else (
         "mem_flags::mem_threadgroup | mem_flags::mem_device"
@@ -313,8 +330,7 @@ def _largest_kernel(size: int, lanes: int) -> MetalKernel:
         uint simd_id = simdgroup_index_in_threadgroup;
         uint base = row * {elements};
         {storage}
-        threadgroup float v[N];
-        threadgroup float w[N];
+        {vectors}
         threadgroup float partial[{simd_groups}];
         threadgroup int reached[L];
 
@@ -470,7 +486,7 @@ def largest_symmetric_eigenvalue(matrix: mx.array) -> mx.array:
     shapes: list[tuple[int, ...]] = [(matrix.shape[0],)]
     dtypes = [mx.float32]
     if not _largest_local(size, lanes):
-        shapes.insert(0, matrix.shape)
+        shapes.insert(0, (matrix.shape[0], _largest_workspace(size, lanes)))
         dtypes.insert(0, mx.float32)
     *_, largest = _largest_kernel(size, lanes)(
         inputs=[matrix],
