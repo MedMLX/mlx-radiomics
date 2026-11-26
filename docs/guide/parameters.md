@@ -61,5 +61,6 @@ under every setting:
 | GLRLM on an ROI one voxel thick | All 13 directions (4 in 2D), as IBSI defines them | Drops directions along the thin axis, so every GLRLM feature differs when a run is longer than one voxel |
 | `Wavelet` with `level: 2` or `start_level: 1` | Stationary transform with filters dilated per level, as `pywt.swtn(level=2)` | Applies the level-1 filters again without dilation; `wavelet2-*` values differ, level 1 agrees |
 | `MeshVolume`, `SurfaceArea` and features derived from them | Closed marching-cubes mesh | Mesh left open at some voxel configurations; values differed by up to 0.2% on the ROIs tested, more on ROIs of a few voxels |
+| GLCM `MCC` with one occupied gray level | NaN, like other undefined features | 1 |
 | Resampled integer images | Resampled intensities stay floating point | Cast back to the input pixel type, which truncates an int16 CT |
 | LoG image names | `sigma: [1]` names the image `log-sigma-1-0-mm-3D` | `log-sigma-1-mm-3D`; `sigma: [1.0]` gives the same name in both |
