@@ -127,7 +127,7 @@ def first_order_histogram(
         output["Entropy"] = count_entropy(level_counts, count, dtype)
     if "Uniformity" in requested:
         p = level_counts.astype(dtype) / count[:, None]
-        output["Uniformity"] = _sum_rows(p**2)
+        output["Uniformity"] = _sum_rows(mx.square(p))
     return output
 
 
@@ -303,12 +303,12 @@ class _FirstOrderTerms:
     @cached_property
     def second(self) -> mx.array:
         """Second central moment of the amplitude-normalized samples."""
-        return _sum_rows(self.centered[1]**2) / self.count
+        return _sum_rows(mx.square(self.centered[1])) / self.count
 
     @cached_property
     def variance(self) -> mx.array:
         """Population variance in source intensity units squared."""
-        return (self.second * self.amplitude) * self.amplitude / self.centering_scale**2
+        return (self.second * self.amplitude) * self.amplitude / mx.square(self.centering_scale)
 
     @cached_property
     def deviation(self) -> mx.array:
@@ -366,7 +366,7 @@ class _FirstOrderTerms:
         fourth = _sum_rows(self.centered[1]**4) / self.count
         constant = 0 if self.zero_variance_moments == "zero" else float("nan")
         offset = 3 if self.kurtosis_convention == "excess" else 0
-        return mx.where(second > 0, fourth / second**2 - offset, constant)
+        return mx.where(second > 0, fourth / mx.square(second) - offset, constant)
 
     @cached_property
     def mean_deviation(self) -> mx.array:
@@ -592,7 +592,7 @@ class _FirstOrderTerms:
         """Sum of squared shifted samples after division by ``rms_scale``."""
         # Energy can overflow even when RMS is representable. Normalize before squaring
         # and restore the intensity scale only after the square root.
-        return _sum_rows(mx.where(self.valid, (self.shifted / self.rms_scale[:, None])**2, 0))
+        return _sum_rows(mx.where(self.valid, mx.square(self.shifted / self.rms_scale[:, None]), 0))
 
     @cached_property
     def rms(self) -> mx.array:
@@ -604,9 +604,10 @@ class _FirstOrderTerms:
         """Sum of squared shifted samples (PyRadiomics ``Energy``)."""
         # A square below 2**-126 is flushed on Metal even when Energy itself is normal.
         # Only rows holding such a value restore the amplitude after the normalized
-        # reduction; the others keep the direct sum, exact for small integer squares.
+        # reduction; the others keep the direct sum, exact for small integer squares
+        # because mx.square multiplies (an eager float32 ``**`` is inexact Metal ``pow``).
         shifted = self.shifted
-        direct = _sum_rows(mx.where(self.valid, shifted**2, 0))
+        direct = _sum_rows(mx.where(self.valid, mx.square(shifted), 0))
         if self.integer_source and self.shift == 0:
             # Every nonzero integer has a normal square.
             return direct

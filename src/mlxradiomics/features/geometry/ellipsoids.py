@@ -629,7 +629,7 @@ def ellipsoid_area_normalized(a: mx.array, b: mx.array, c: mx.array) -> mx.array
     if av == cv:
         return 4 * pi * a * a
     if bv == cv:
-        eccentricity = mx.sqrt(1 - (b / a) ** 2)
+        eccentricity = mx.sqrt(1 - mx.square(b / a))
         return 2 * pi * b * (b + a * mx.arcsin(eccentricity) / eccentricity)
     if av == bv:
         ratio = c / a

@@ -184,7 +184,9 @@ def histogram_statistics(
         mean_scaled = mean_offset / amplitude_scale
         centered = scaled - mean_scaled[:, None]
         if requested & {"Variance", "Skewness", "Kurtosis", "CoefficientOfVariation"}:
-            second = sum_rows(counts_f * centered**2) / total_f
+            # mx.square, not ``**``: eager float32 ``**`` is Metal ``pow``, not correctly
+            # rounded on every Apple GPU.
+            second = sum_rows(counts_f * mx.square(centered)) / total_f
             if "Variance" in requested:
                 output["Variance"] = (second * amplitude) * amplitude
             if "Skewness" in requested:
@@ -192,7 +194,7 @@ def histogram_statistics(
                 output["Skewness"] = mx.where(second > 0, third / (second * mx.sqrt(second)), 0)
             if "Kurtosis" in requested:
                 fourth = sum_rows(counts_f * centered**4) / total_f
-                output["Kurtosis"] = mx.where(second > 0, fourth / second**2 - 3, 0)
+                output["Kurtosis"] = mx.where(second > 0, fourth / mx.square(second) - 3, 0)
             if "CoefficientOfVariation" in requested:
                 assert mean is not None
                 output["CoefficientOfVariation"] = mx.sqrt(second) * amplitude / mean
@@ -302,7 +304,9 @@ def histogram_statistics(
     if "Entropy" in requested:
         output["Entropy"] = count_entropy(counts, total, mx.float32)
     if "Uniformity" in requested:
-        output["Uniformity"] = mx.sum(counts * counts, axis=1).astype(mx.float32) / total_f**2
+        output["Uniformity"] = (
+            mx.sum(counts * counts, axis=1).astype(mx.float32) / mx.square(total_f)
+        )
 
     if requested & {"MaximumGradient", "MaximumGradientGrayLevel",
                     "MinimumGradient", "MinimumGradientGrayLevel"}:

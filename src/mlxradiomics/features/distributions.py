@@ -146,25 +146,25 @@ def size_statistics(
     if need_p:
         p = counts_f / safe_total_f[:, None, None]
         i = mx.arange(1, counts.shape[1] + 1, dtype=mx.float32)[None, :, None]
-        i_squared, j_squared = i**2, j**2
+        i_squared, j_squared = mx.square(i), mx.square(j)
         if wanted(small + "Emphasis"):
             features[small + "Emphasis"] = sum_rows(p / j_squared)
         if wanted(large + "Emphasis"):
             features[large + "Emphasis"] = sum_rows(p * j_squared)
         if wanted("GrayLevelNonUniformity") or wanted("GrayLevelNonUniformityNormalized"):
             pg = marginal(2).astype(mx.float32)
-            squared = sum_rows(pg**2)
+            squared = sum_rows(mx.square(pg))
             if wanted("GrayLevelNonUniformity"):
                 features["GrayLevelNonUniformity"] = squared / total_f
             if wanted("GrayLevelNonUniformityNormalized"):
-                features["GrayLevelNonUniformityNormalized"] = squared / total_f**2
+                features["GrayLevelNonUniformityNormalized"] = squared / mx.square(total_f)
         if wanted(size + "NonUniformity") or wanted(size + "NonUniformityNormalized"):
             ps = marginal(1).astype(mx.float32)
-            squared = sum_rows(ps**2)
+            squared = sum_rows(mx.square(ps))
             if wanted(size + "NonUniformity"):
                 features[size + "NonUniformity"] = squared / total_f
             if wanted(size + "NonUniformityNormalized"):
-                features[size + "NonUniformityNormalized"] = squared / total_f**2
+                features[size + "NonUniformityNormalized"] = squared / mx.square(total_f)
         if wanted("GrayLevelVariance"):
             features["GrayLevelVariance"] = integer_variance(marginal(2))
         if wanted(variance):
@@ -186,7 +186,7 @@ def size_statistics(
         if wanted(large + "HighGrayLevelEmphasis"):
             features[large + "HighGrayLevelEmphasis"] = sum_rows(p * i_squared * j_squared)
         if family == "gldm" and wanted("DependenceCountEnergy"):
-            features["DependenceCountEnergy"] = sum_rows(p**2)
+            features["DependenceCountEnergy"] = sum_rows(mx.square(p))
     if family == "gldm" and wanted("DependencePercentage"):
         denominator = total if voxels is None else voxels
         features["DependencePercentage"] = total_f / denominator.astype(mx.float32)
@@ -240,7 +240,7 @@ def _large_ngtdm_pair_sums(
             j = levels[:, None, second:second + tile]
             pairs = (ni > 0) & (nj > 0)
             difference = (i - j).astype(mx.float32)
-            squared_difference = difference**2
+            squared_difference = mx.square(difference)
             if "Contrast" in totals:
                 totals["Contrast"].add(sum_rows(pi * pj * squared_difference))
             if "Busyness" in totals:
@@ -309,7 +309,7 @@ def ngtdm_statistics(
         i, j = levels[:, :, None], levels[:, None, :]
         pairs = present[:, :, None] & present[:, None, :]
         level_difference = i - j
-        squared_difference = level_difference**2
+        squared_difference = mx.square(level_difference)
         if "Contrast" in requested:
             # int64: Ng*(Ng-1) overflows int32 from 46,342 occupied gray levels.
             ng = sum_rows(present.astype(mx.int32)).astype(mx.int64)

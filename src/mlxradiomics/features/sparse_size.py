@@ -108,7 +108,8 @@ def sparse_size_statistics(
         safe_total = mx.maximum(total, 1).astype(mx.float32)
         i, j = row_keys // column_count + 1, row_keys % column_count + 1
         p = exact.astype(mx.float32) / safe_total
-        i_squared, j_squared = i.astype(mx.float32)**2, j.astype(mx.float32)**2
+        i_squared = mx.square(i.astype(mx.float32))
+        j_squared = mx.square(j.astype(mx.float32))
         output: dict[str, mx.array] = {}
         marginal_axes = [
             (indices, group, variance_name)
@@ -132,11 +133,11 @@ def sparse_size_statistics(
             marginal_axes, marginals, strict=True,
         ):
             if wanted(group + "NonUniformity") or wanted(group + "NonUniformityNormalized"):
-                squared = reduce(weights.astype(mx.float32)**2)
+                squared = reduce(mx.square(weights.astype(mx.float32)))
                 if wanted(group + "NonUniformity"):
                     output[group + "NonUniformity"] = squared / total_f
                 if wanted(group + "NonUniformityNormalized"):
-                    output[group + "NonUniformityNormalized"] = squared / total_f**2
+                    output[group + "NonUniformityNormalized"] = squared / mx.square(total_f)
             if wanted(variance_name):
                 output[variance_name] = integer_variance(levels, weights, safe_total)
         if wanted(entropy):
@@ -154,7 +155,7 @@ def sparse_size_statistics(
         if wanted(large + "HighGrayLevelEmphasis"):
             output[large + "HighGrayLevelEmphasis"] = reduce(p * i_squared * j_squared)
         if family == "gldm" and wanted("DependenceCountEnergy"):
-            output["DependenceCountEnergy"] = reduce(p**2)
+            output["DependenceCountEnergy"] = reduce(mx.square(p))
         if family == "gldm" and wanted("DependencePercentage"):
             denominator = total if voxels is None else voxels[row]
             output["DependencePercentage"] = total_f / denominator.astype(mx.float32)

@@ -63,7 +63,7 @@ def _row_statistics(
     def entropy(values: mx.array) -> mx.array:
         return count_entropy(values[None, :], total[None], mx.float32)[0]
 
-    vx, vy = reduce(p * dx**2), reduce(p * dy**2)
+    vx, vy = reduce(p * mx.square(dx)), reduce(p * mx.square(dy))
     hx, hy = entropy(rows), entropy(columns)
     row_cells, column_cells = rows[(i - 1).astype(mx.int32)], columns[(j - 1).astype(mx.int32)]
     denominator_int = row_cells.astype(mx.int64) * column_cells.astype(mx.int64)
@@ -83,9 +83,9 @@ def _row_statistics(
     polynomial = mx.zeros_like(small_ratio)
     for order in range(24, 1, -1):
         polynomial = small_ratio * polynomial + (1.0 / order if order % 2 else -1.0 / order)
-    linear = reduce(mx.where(counts > 0, residual.astype(mx.float32) ** 2 / denominator, 0))
+    linear = reduce(mx.where(counts > 0, mx.square(residual.astype(mx.float32)) / denominator, 0))
     linear = linear / (n * n)
-    correction = reduce(counts * small_ratio**2 * polynomial) / n
+    correction = reduce(counts * mx.square(small_ratio) * polynomial) / n
     information = mx.where(use_series, linear + correction, direct) / 0.6931471805599453
     mean_difference = reduce(p * delta)
     centered_difference = (
@@ -95,8 +95,8 @@ def _row_statistics(
         "Autocorrelation": reduce(p * i.astype(mx.float32) * j.astype(mx.float32)),
         "ClusterProminence": reduce(p * cluster**4),
         "ClusterShade": cluster_shade(sums.astype(mx.int64)[None, :], total[None], mx.float32)[0],
-        "ClusterTendency": reduce(p * cluster**2),
-        "Contrast": reduce(p * delta**2),
+        "ClusterTendency": reduce(p * mx.square(cluster)),
+        "Contrast": reduce(p * mx.square(delta)),
         "Correlation": mx.where(
             (mx.sum((rows > 0).astype(mx.int32)) == 1)
             | (mx.sum((columns > 0).astype(mx.int32)) == 1),
@@ -111,16 +111,16 @@ def _row_statistics(
         "DifferenceVariance": reduce(p * mx.square(centered_difference)),
         "Dissimilarity": mean_difference,
         "Id": reduce(p / (1 + delta)),
-        "Idm": reduce(p / (1 + delta**2)),
-        "Idmn": reduce(p / (1 + delta**2 / float(ng) ** 2)),
+        "Idm": reduce(p / (1 + mx.square(delta))),
+        "Idmn": reduce(p / (1 + mx.square(delta) / float(ng) ** 2)),
         "Idn": reduce(p / (1 + delta / float(ng))),
         "Imc1": mx.where(
             mx.maximum(hx, hy) > 0, -information / mx.maximum(mx.maximum(hx, hy), 1e-38), 0
         ),
         "Imc2": mx.sqrt(mx.maximum(one_minus_exp(2 * information), 0)),
-        "InverseVariance": reduce(mx.where(delta > 0, p / mx.maximum(delta**2, 1), 0)),
+        "InverseVariance": reduce(mx.where(delta > 0, p / mx.maximum(mx.square(delta), 1), 0)),
         "JointAverage": sx.astype(mx.float32) / n,
-        "JointEnergy": reduce(p**2),
+        "JointEnergy": reduce(mx.square(p)),
         "JointEntropy": entropy(counts),
         "MaximumProbability": mx.max(p),
         "SumAverage": reduce(p * (i + j).astype(mx.float32)),

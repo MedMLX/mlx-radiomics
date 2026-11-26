@@ -106,8 +106,8 @@ def _glcm_statistics(counts: mx.array, dtype: mx.Dtype) -> tuple[dict[str, mx.ar
     )
     cluster = cluster_numerator.astype(dtype) / total_f[:, None, None]
     ux = (sx.astype(dtype) / total_f)[:, None, None]
-    vx = _sum_rows(p * dx**2)
-    vy = _sum_rows(p * dy**2)
+    vx = _sum_rows(p * mx.square(dx))
+    vy = _sum_rows(p * mx.square(dy))
     scale = mx.sqrt(vx * vy)
     corr = _sum_rows(p * dx * dy) / (scale + EPS)
     delta = mx.abs(i - j)
@@ -116,7 +116,7 @@ def _glcm_statistics(counts: mx.array, dtype: mx.Dtype) -> tuple[dict[str, mx.ar
     values = {
         **extra,
         "Autocorrelation": _sum_rows(p * i * j),
-        "Contrast": _sum_rows(p * delta**2),
+        "Contrast": _sum_rows(p * mx.square(delta)),
         # A singleton marginal is exactly constant, even if its rounded mean is not.
         "Correlation": mx.where(
             (mx.sum(mx.any(counts > 0, axis=2), axis=1) == 1)
@@ -124,9 +124,9 @@ def _glcm_statistics(counts: mx.array, dtype: mx.Dtype) -> tuple[dict[str, mx.ar
         ),
         "DifferenceAverage": difference_average,
         "Dissimilarity": difference_average,
-        "JointEnergy": _sum_rows(p**2),
+        "JointEnergy": _sum_rows(mx.square(p)),
         "Id": _sum_rows(p / (1 + delta)),
-        "Idm": _sum_rows(p / (1 + delta**2)),
+        "Idm": _sum_rows(p / (1 + mx.square(delta))),
     }
     # IBSI defines these names as the same quantities, not as alternate formulas.
     values["SumVariance"] = values["ClusterTendency"]
@@ -338,9 +338,9 @@ def _glcm_distributions(
         **shade,
         "JointAverage": ux[:, 0, 0],
         "ClusterProminence": _sum_rows(p * cluster**4),
-        "ClusterTendency": _sum_rows(p * cluster**2),
+        "ClusterTendency": _sum_rows(p * mx.square(cluster)),
         "DifferenceEntropy": count_entropy(difference_counts, total, dtype),
-        "DifferenceVariance": _sum_rows(differences * (k - mean_difference[:, None])**2),
+        "DifferenceVariance": _sum_rows(differences * mx.square(k - mean_difference[:, None])),
         # Imc1 = -MI/max(H(px), H(py)); MI is zero for independence and equals HXY
         # for a diagonal GLCM, so a two-state diagonal is exactly -1.
         "Imc1": mx.where(
@@ -349,14 +349,14 @@ def _glcm_distributions(
             0,
         ),
         "Imc2": mx.sqrt(mx.maximum(one_minus_exp(2 * information), 0)),
-        "Idmn": _sum_rows(p / (1 + delta**2 / ng**2)),
+        "Idmn": _sum_rows(p / (1 + mx.square(delta) / ng**2)),
         "Idn": _sum_rows(p / (1 + delta / ng)),
-        "InverseVariance": _sum_rows(mx.where(delta > 0, p / mx.maximum(delta**2, 1), 0)),
+        "InverseVariance": _sum_rows(mx.where(delta > 0, p / mx.maximum(mx.square(delta), 1), 0)),
         "JointEntropy": joint_entropy,
         "MaximumProbability": mx.max(p, axis=(1, 2)),
         "SumAverage": _sum_rows(p * (i + j)),
         "SumEntropy": count_entropy(sum_counts, total, dtype),
-        "SumSquares": _sum_rows(p * dx**2),
+        "SumSquares": _sum_rows(p * mx.square(dx)),
     }
 
 

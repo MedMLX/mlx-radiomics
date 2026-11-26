@@ -308,8 +308,10 @@ def lbp3d_images(
         sample_offsets = sample_offsets / mx.where(amplitude > 0, amplitude, 1)
         mean = sum_rows(sample_offsets) / samples.shape[1]
         centered = sample_offsets - mean[:, None]
-        variance = sum_rows(centered**2) / samples.shape[1]
-        k = sum_rows(centered**4) / samples.shape[1] / variance**2 - 3
+        # mx.square, not ``**``: eager float32 ``**`` is Metal ``pow``, not correctly
+        # rounded on every Apple GPU.
+        variance = sum_rows(mx.square(centered)) / samples.shape[1]
+        k = sum_rows(centered**4) / samples.shape[1] / mx.square(variance) - 3
         margin = mx.abs(samples - original[:, None])
         bound = (
             64

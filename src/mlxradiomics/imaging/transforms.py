@@ -526,7 +526,9 @@ def _gradient(
     divisor = mx.where((largest > 0) & mx.isfinite(largest), largest, 1)
     squared = mx.zeros_like(largest)
     for component in components:
-        squared = squared + (component / divisor) ** 2
+        # mx.square, not ``**``: eager float32 ``**`` is Metal ``pow``, not correctly
+        # rounded on every Apple GPU.
+        squared = squared + mx.square(component / divisor)
     return mx.where(mx.isinf(largest), largest, largest * mx.sqrt(squared))
 
 
