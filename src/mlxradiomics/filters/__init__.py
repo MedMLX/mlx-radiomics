@@ -6,11 +6,7 @@ sections 4.2, 4.3, 4.4, 4.5, 4.6.4 and 4.7). Filter kernels are prepared on the
 host; every response-map convolution and frequency-domain operation runs in
 float32 on MLX.
 
-The FFT-based Simoncelli and Riesz response functions need MLX 0.32.5 or later:
-earlier releases can overrun a batched FFT's destination buffer and corrupt
-neighboring arrays. On an older MLX the response functions raise ``ValueError``
-(:data:`FFT_DISABLED_REASON`) before allocating a spectrum. ``FFT_AVAILABLE``
-reports the gate. LoG, separable wavelets and LBP live in their own modules.
+LoG, separable wavelets and LBP live in their own modules.
 
 Two discrete Fourier grids are available. The DFT grid samples each axis with
 the manual's exact ``2*pi/N`` step and places an exact zero-frequency bin at
@@ -31,8 +27,6 @@ from mlxradiomics.filters.convolution import pad_image as pad_image
 from mlxradiomics.filters.convolution import (
     separable_wavelet_responses as separable_wavelet_responses,
 )
-from mlxradiomics.filters.spectral import FFT_AVAILABLE as FFT_AVAILABLE
-from mlxradiomics.filters.spectral import FFT_DISABLED_REASON as FFT_DISABLED_REASON
 from mlxradiomics.filters.spectral import log_response as log_response
 from mlxradiomics.filters.spectral import require_isotropic_spacing as require_isotropic_spacing
 from mlxradiomics.filters.spectral import riesz_log_responses as riesz_log_responses

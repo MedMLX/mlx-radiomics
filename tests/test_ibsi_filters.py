@@ -1,13 +1,10 @@
-"""Independent response-map checks for the IBSI 2 convolutional filters.
-
-Simoncelli and Riesz tests run only when MLX 0.32.5 or later is installed."""
+"""Independent response-map checks for the IBSI 2 convolutional filters."""
 
 import dataclasses
 from math import cos, factorial, pi, sin, sqrt
 
 import numpy as np
 import pytest
-from conftest import requires_fft
 from numpy.typing import NDArray
 from radiomics_reference.real_images import hcc_background, hcc_patch, hcc_resampled
 
@@ -876,7 +873,6 @@ def test_gabor_ct_fourier_mode_follows_frequency_and_orientation() -> None:
     assert np.sqrt(np.mean(matched**2)) > 5 * np.sqrt(np.mean(mismatched**2))
 
 
-@requires_fft
 @pytest.mark.parametrize("shape", [(16, 17), (7, 8, 9)])
 def test_simoncelli_matches_independent_fourier_bandpass(shape: tuple[int, ...]) -> None:
     image = _ct_input(shape)
@@ -893,7 +889,6 @@ def test_simoncelli_matches_independent_fourier_bandpass(shape: tuple[int, ...])
         )
 
 
-@requires_fft
 @pytest.mark.parametrize("shape", [(7, 8), (7, 8, 9)])
 def test_simoncelli_centered_grid_matches_independent_construction(
     shape: tuple[int, ...],
@@ -914,7 +909,6 @@ def test_simoncelli_centered_grid_matches_independent_construction(
         )
 
 
-@requires_fft
 @pytest.mark.parametrize("grid", [FourierGrid.DFT, FourierGrid.CENTERED])
 def test_simoncelli_level_below_the_grid_resolution_is_empty(grid: FourierGrid) -> None:
     # Once pi / 2**(level - 1) falls below every nonzero sampled frequency the
@@ -933,19 +927,13 @@ def test_simoncelli_level_below_the_grid_resolution_is_empty(grid: FourierGrid) 
     "options",
     [
         TransformSettings(image_types=(ImageType.MEAN,), mean=MeanSettings(support=5, planar=True)),
-        pytest.param(
-            TransformSettings(
-                image_types=(ImageType.SIMONCELLI,),
-                simoncelli=SimoncelliSettings(levels=(1, 2), planar=True),
-            ),
-            marks=requires_fft,
+        TransformSettings(
+            image_types=(ImageType.SIMONCELLI,),
+            simoncelli=SimoncelliSettings(levels=(1, 2), planar=True),
         ),
-        pytest.param(
-            TransformSettings(
-                image_types=(ImageType.SIMONCELLI,),
-                simoncelli=SimoncelliSettings(levels=(1,), grid=FourierGrid.CENTERED, planar=True),
-            ),
-            marks=requires_fft,
+        TransformSettings(
+            image_types=(ImageType.SIMONCELLI,),
+            simoncelli=SimoncelliSettings(levels=(1,), grid=FourierGrid.CENTERED, planar=True),
         ),
         TransformSettings(
             image_types=(ImageType.SEPARABLE_WAVELET,),
@@ -1028,7 +1016,6 @@ def test_riesz_multiplier_normalises_high_orders_before_dividing() -> None:
     np.testing.assert_allclose(high[0, 1], 1.0 + 0.0j, rtol=0, atol=2e-5)
 
 
-@requires_fft
 def test_riesz_log_high_order_ct_response_is_finite() -> None:
     image = hcc_resampled((16, 2048)) / 512
     options = TransformSettings(
@@ -1053,7 +1040,6 @@ def test_mixed_riesz_order_combines_coefficient_before_float32_overflow() -> Non
     np.testing.assert_allclose(actual[1, 1], expected, rtol=1e-4, atol=0)
 
 
-@requires_fft
 @pytest.mark.parametrize("grid", list(FourierGrid))
 @pytest.mark.parametrize("padding", [FilterPadding.CONSTANT, FilterPadding.PERIODIC])
 def test_riesz_log_response_matches_independent_construction(
@@ -1087,7 +1073,6 @@ def test_riesz_log_response_matches_independent_construction(
         np.testing.assert_allclose(values, reference, rtol=2e-4, atol=2e-5)
 
 
-@requires_fft
 @pytest.mark.parametrize("grid", list(FourierGrid))
 def test_riesz_orders_follow_the_manual_axis_order(grid: FourierGrid) -> None:
     # Reflect and average CT about both axes. A k1 derivative is odd along the
@@ -1107,7 +1092,6 @@ def test_riesz_orders_follow_the_manual_axis_order(grid: FourierGrid) -> None:
     np.testing.assert_allclose(along_k2, np.flip(along_k2, axis=1), rtol=0, atol=2e-5)
 
 
-@requires_fft
 def test_riesz_log_rejects_anisotropic_spacing() -> None:
     options = TransformSettings(
         image_types=(ImageType.RIESZ,), riesz=RieszSettings(orders=((1, 0, 0),), log_sigma=(2.0,))
@@ -1117,7 +1101,6 @@ def test_riesz_log_rejects_anisotropic_spacing() -> None:
                             (1.0, 1.2, 1.0), options))
 
 
-@requires_fft
 @pytest.mark.parametrize("grid", list(FourierGrid))
 def test_riesz_simoncelli_response_matches_independent_construction(
     grid: FourierGrid,
@@ -1146,7 +1129,6 @@ def test_riesz_simoncelli_response_matches_independent_construction(
         )
 
 
-@requires_fft
 def test_riesz_first_order_response_of_a_constant_is_zero_on_the_dft_grid() -> None:
     image = hcc_background((8, 9, 10)) * (-3.5 / 2048)
     log_options = TransformSettings(
@@ -1165,7 +1147,6 @@ def test_riesz_first_order_response_of_a_constant_is_zero_on_the_dft_grid() -> N
     np.testing.assert_allclose(simoncelli_values, 0.0, rtol=0, atol=1e-6)
 
 
-@requires_fft
 def test_simoncelli_constant_is_zero_and_band_selectivity_holds() -> None:
     constant = hcc_background((16, 17)) * (-3 / 2048)
     options = TransformSettings(
@@ -1237,7 +1218,6 @@ def test_unsupported_filter_options_raise_clear_errors() -> None:
                                 (1.0, 1.0), planar))
 
 
-@requires_fft
 @pytest.mark.parametrize("ndim", [2, 3])
 def test_simoncelli_oblique_fourier_mode_has_analytic_gain(ndim: int) -> None:
     # For N=16 and frequency (1,1[,0]), |nu|=pi*sqrt(2)/8.
@@ -1316,7 +1296,6 @@ def test_mean_filter_gives_identical_neighborhoods_the_same_mean(
     np.testing.assert_array_equal(result, np.float32(expected))
 
 
-@requires_fft
 def test_fft_filters_are_amplitude_invariant_beyond_the_spectrum_range() -> None:
     # 64 samples near 3e37 sum past the float32 range in the unnormalized forward FFT
     # although every response is representable; responses are linear in amplitude.
@@ -1337,7 +1316,6 @@ def test_fft_filters_are_amplitude_invariant_beyond_the_spectrum_range() -> None
             np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-5 * 1e37)
 
 
-@requires_fft
 @pytest.mark.parametrize("shape", [(23, 23), (53, 2)])
 def test_simoncelli_survives_bluestein_growth_on_prime_length_grids(
     shape: tuple[int, int],
@@ -1363,7 +1341,6 @@ def test_simoncelli_survives_bluestein_growth_on_prime_length_grids(
     np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-5 * peak)
 
 
-@requires_fft
 def test_attenuating_riesz_log_kernel_does_not_let_the_forward_fft_overflow() -> None:
     # The sigma-3 kernel's absolute sum is 0.163, but it multiplies the spectrum only
     # after the forward FFT: budgeting that gain let 361 * 1e38 overflow to NaN.

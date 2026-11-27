@@ -219,7 +219,6 @@ for all arguments, report fields, geometry and error handling.
 
 - Shape, local intensity and moment invariants are ROI-only; local intensity and moment
   invariants need 3D input.
-- Simoncelli and Riesz filters are unavailable on this release; see the limits guide.
 - Feature arithmetic is float32. Undefined values are NaN; overflow is infinity.
 - Read voxel maps with NiBabel; SimpleITK reads stored NaN voxels as zero.
 - Detached inputs such as `.nhdr` require a new output directory, even with

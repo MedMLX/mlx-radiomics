@@ -4,6 +4,8 @@
 
 ### New
 
+**Simoncelli and Riesz filters.** mlxradiomics now pins MLX 0.32.5, which fixes the batched Metal FFT that could write past its output buffer, so both filters, both Riesz bases and steered Riesz run. `FFT_AVAILABLE` and `FFT_DISABLED_REASON` are removed from `mlxradiomics.filters`.
+
 **Moment invariants.** The new `momentinvariant` family adds ten 3D ROI features: five moments of the ROI shape and five of its intensity that do not change under translation, rotation or uniform scaling, as defined in PySERA. `mlxradiomics.FEATURES` now lists 200 names.
 
 ## 1.2.0

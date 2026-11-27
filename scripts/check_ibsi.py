@@ -35,7 +35,6 @@ from mlxradiomics.config.transforms import (
     SimoncelliSettings,
     TransformSettings,
 )
-from mlxradiomics.filters.spectral import FFT_AVAILABLE
 from mlxradiomics.imaging.io import read_image
 from mlxradiomics.imaging.preprocessing import prepare_sampled_input
 from mlxradiomics.imaging.spatial import ImagePair, load_image_pair
@@ -310,8 +309,6 @@ def map_input(phantom: str) -> Path:
 def check_maps(root: Path, cases: list[tuple[str, str, TransformSettings]]) -> int:
     checked = failures = 0
     for case, phantom, settings in cases:
-        if ImageType.SIMONCELLI in settings.image_types and not FFT_AVAILABLE:
-            continue
         image = read_image(root / map_input(phantom))
         reference = np.asarray(read_image(root / map_reference(case)).array, dtype=np.float64)
         with mx.stream(mx.gpu):
@@ -326,8 +323,7 @@ def check_maps(root: Path, cases: list[tuple[str, str, TransformSettings]]) -> i
             print(f"FAIL IBSI 2 map {case}: max error {error} exceeds {tol}")
             failures += 1
         checked += 1
-    print(f"IBSI 2 phantom: {checked} maps, {len(cases) - checked} FFT-gated, "
-          f"{failures} failures", flush=True)
+    print(f"IBSI 2 phantom: {checked} maps, {failures} failures", flush=True)
     return failures
 
 
@@ -369,7 +365,7 @@ def check_filtered_ct(root: Path) -> int:
                 cases.setdefault(row["filter_id"], []).append(Reference(
                     row["feature_tag"], Decimal(row["consensus_value"]), Decimal(row["tolerance"]),
                 ))
-    checked = skipped = failures = 0
+    checked = failures = 0
     for letter in ("A", "B"):
         planar = letter == "A"
         options = spatial((0.0, 0.0, 0.0)) if planar else spatial(
@@ -380,9 +376,6 @@ def check_filtered_ct(root: Path) -> int:
             rows = cases[case]
             if len(rows) != (17 if case == "8.B" else 18):
                 raise ValueError(f"Unexpected IBSI 2 CT row count for {case}")
-            if ImageType.SIMONCELLI in transforms.image_types and not FFT_AVAILABLE:
-                skipped += len(rows)
-                continue
             features = tuple(IBSI1_FEATURES[row.tag] for row in rows)
             result = extract_files(
                 root / _CT / _IMAGE, root / _CT / _MASK,
@@ -393,7 +386,7 @@ def check_filtered_ct(root: Path) -> int:
                 value, = (v for key, v in result.features.items() if key.endswith(f"_{feature}"))
                 failures += row.check(value, f"IBSI 2 CT {case}")
             checked += len(rows)
-    print(f"IBSI 2 chest CT: {checked} features, {skipped} FFT-gated, {failures} failures",
+    print(f"IBSI 2 chest CT: {checked} features, {failures} failures",
           flush=True)
     return failures
 

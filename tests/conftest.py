@@ -1,18 +1,14 @@
-"""Shared test helpers: convention-set settings and the FFT availability marker."""
+"""Shared test helpers: convention-set settings."""
 
 from dataclasses import replace
 from typing import Literal
 
 import numpy as np
-import pytest
 from numpy.typing import NDArray
 
 from mlxradiomics.config.settings import Settings
 from mlxradiomics.features.shape import shape_statistics
-from mlxradiomics.filters import FFT_AVAILABLE, FFT_DISABLED_REASON
 from mlxradiomics.numerics.runtime import mx
-
-requires_fft = pytest.mark.skipif(not FFT_AVAILABLE, reason=FFT_DISABLED_REASON)
 
 # Named convention sets exercised by parametrized tests; "ibsi" is the Settings default.
 # "pyradiomics" selects the non-default value of each convention-dependent Settings field.

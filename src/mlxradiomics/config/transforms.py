@@ -24,11 +24,6 @@ from mlxradiomics.config.wavelets import wavelet_filters
 class ImageType(StrEnum):
     """Image types accepted in configuration and extraction requests.
 
-    ``SIMONCELLI`` and ``RIESZ`` are FFT-based and need MLX 0.32.5 or later;
-    every extraction or planning request for them is refused on an older MLX
-    release; see
-    :data:`mlxradiomics.filters.FFT_DISABLED_REASON`.
-
     ``WAVELET`` yields several images per level, ``LOG`` one per sigma, ``GABOR``
     one or more per scale/orientation, ``SIMONCELLI`` one per level and ``RIESZ``
     one per base-filter scale/level and order. ``MEAN`` and ``LAWS`` follow the
@@ -319,7 +314,7 @@ class GaborSettings:
 
 @dataclass(frozen=True)
 class SimoncelliSettings:
-    """Simoncelli levels and Fourier sampling (needs MLX 0.32.5 or later).
+    """Simoncelli levels and Fourier sampling.
 
     Attributes:
         levels: Positive one-based Simoncelli band levels.
@@ -357,7 +352,7 @@ class SimoncelliSettings:
 
 @dataclass(frozen=True)
 class RieszSettings:
-    """Riesz components, base filters and optional tensor steering (needs MLX 0.32.5 or later).
+    """Riesz components, base filters and optional tensor steering.
 
     Attributes:
         base: Base filter for ``RIESZ``: the IBSI 2 LoG kernel or a Simoncelli B-map.

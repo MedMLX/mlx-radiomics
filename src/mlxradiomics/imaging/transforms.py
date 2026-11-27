@@ -28,8 +28,6 @@ from mlxradiomics.config.transforms import (
 )
 from mlxradiomics.config.wavelets import wavelet_filters
 from mlxradiomics.filters import (
-    FFT_AVAILABLE,
-    FFT_DISABLED_REASON,
     gabor_responses,
     laws_response,
     log_response,
@@ -308,20 +306,6 @@ def _require_unique_names(names: tuple[str, ...]) -> tuple[str, ...]:
     return names
 
 
-_DISABLED_FFT_IMAGE_TYPES = frozenset((ImageType.SIMONCELLI, ImageType.RIESZ))
-
-
-def _require_available_image_types(kinds: tuple[ImageType, ...]) -> None:
-    """Refuse image types whose FFT execution is disabled on the installed MLX.
-
-    Runs before name planning, image conversion or any transform, so a request
-    that mixes ``ORIGINAL`` with a disabled type cannot yield its supported
-    images first and then fail.
-    """
-    if not FFT_AVAILABLE and any(kind in _DISABLED_FFT_IMAGE_TYPES for kind in kinds):
-        raise ValueError(FFT_DISABLED_REASON)
-
-
 def feature_image_names(
     shape: tuple[int, ...],
     spacing: tuple[float, ...],
@@ -335,13 +319,11 @@ def feature_image_names(
     streaming storage before extraction starts.
 
     Raises:
-        ValueError: If a requested FFT-based image type is unavailable on the installed
-            MLX release (FFT filters need 0.32.5 or later), the shape or spacing is
-            inconsistent, the 2-D axis is outside the image, LBP3D is requested for
-            non-3-D data, a filter's axis count does not match the image dimensionality,
-            or two selected configurations generate the same derived-image name.
+        ValueError: If the shape or spacing is inconsistent, the 2-D axis is outside
+            the image, LBP3D is requested for non-3-D data, a filter's axis count does
+            not match the image dimensionality, or two selected configurations generate
+            the same derived-image name.
     """
-    _require_available_image_types(options.image_types)
     ndim = len(shape)
     if ndim not in (2, 3) or len(spacing) != ndim:
         raise ValueError("feature image names require aligned 2D/3D spacing")
@@ -585,11 +567,10 @@ def feature_images(
         the maximum absolute intensity as a scale, as PyRadiomics does. LoG needs 3-D data.
 
     Raises:
-        ValueError: If a requested FFT-based image type is unavailable on the installed
-            MLX release (FFT filters need 0.32.5 or later), shapes or spacing are
-            inconsistent, intensities are not finite, a transform is undefined for the
-            input (all-zero image for square, logarithm and exponential; missing mask
-            for LBP3D), or a transform's own constraints fail.
+        ValueError: If shapes or spacing are inconsistent, intensities are not finite,
+            a transform is undefined for the input (all-zero image for square, logarithm
+            and exponential; missing mask for LBP3D), or a transform's own constraints
+            fail.
     """
     for feature in _feature_images(
         image, spacing, options, force2d_axis=force2d_axis, mask=mask,

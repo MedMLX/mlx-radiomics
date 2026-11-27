@@ -1,6 +1,5 @@
-"""Sampled LoG and guarded Simoncelli/Riesz frequency-domain filters."""
+"""Sampled LoG and Simoncelli/Riesz frequency-domain filters."""
 
-from importlib import metadata
 from math import (
     ceil,
     factorial,
@@ -28,41 +27,6 @@ from mlxradiomics.filters.convolution import (
     pad_image,
 )
 from mlxradiomics.numerics.runtime import evaluate, mx
-
-# A batched FFT in MLX releases before 0.32.5 can overrun its destination buffer and
-# corrupt adjacent arrays. Simoncelli and Riesz therefore run only on a plain MLX
-# release at or above 0.32.5; development builds stay disabled because some predate
-# the fix. There is deliberately no runtime override.
-_FFT_FIXED_MLX = (0, 32, 5)
-
-
-def _mlx_release(version: str) -> tuple[int, int, int] | None:
-    """Parse a plain ``X.Y.Z`` release; any other version string returns None."""
-    parts = version.split(".")
-    if len(parts) != 3 or not all(part.isdigit() for part in parts):
-        return None
-    return int(parts[0]), int(parts[1]), int(parts[2])
-
-
-def fft_available_on(version: str) -> bool:
-    """Whether Simoncelli and Riesz may run on MLX ``version`` (0.32.5 or later releases)."""
-    release = _mlx_release(version)
-    return release is not None and release >= _FFT_FIXED_MLX
-
-
-_MLX_VERSION = metadata.version("mlx")
-FFT_AVAILABLE = fft_available_on(_MLX_VERSION)
-FFT_DISABLED_REASON = (
-    f"Simoncelli and Riesz filtering needs MLX 0.32.5 or later; this release of "
-    f"mlxradiomics pins MLX 0.32.4 (installed: {_MLX_VERSION}), whose batched FFT can "
-    "overrun its buffer and corrupt neighboring arrays."
-)
-
-
-def _require_fft_enabled() -> None:
-    """Refuse an FFT-based filter before allocating an image, spectrum or band."""
-    if not FFT_AVAILABLE:
-        raise ValueError(FFT_DISABLED_REASON)
 
 
 def _centered_coordinates(shape: tuple[int, ...]) -> tuple[mx.array, ...]:
@@ -148,10 +112,9 @@ def simoncelli_response(
         Float32 real response map with the image's shape.
 
     Raises:
-        ValueError: If the installed MLX is older than 0.32.5 (see
-            :data:`FFT_DISABLED_REASON`).
+        ValueError: If the image is not 2-D or 3-D, ``planar`` is set for a 2-D
+            image, or ``level`` or ``grid`` is invalid.
     """
-    _require_fft_enabled()
     if image.ndim not in (2, 3):
         raise ValueError("Simoncelli filtering requires a 2-D or 3-D image")
     if planar and image.ndim != 3:
@@ -431,10 +394,8 @@ def riesz_log_responses(
         One float32 response map per order, each with the image's shape.
 
     Raises:
-        ValueError: If the installed MLX is older than 0.32.5 (see
-            :data:`FFT_DISABLED_REASON`).
+        ValueError: If the image is not 2-D or 3-D or ``orders`` is empty.
     """
-    _require_fft_enabled()
     if image.ndim not in (2, 3):
         raise ValueError("Riesz LoG filtering requires a 2-D or 3-D image")
     if not orders:
@@ -501,10 +462,8 @@ def riesz_simoncelli_responses(
         One float32 response map per order, each with the image's shape.
 
     Raises:
-        ValueError: If the installed MLX is older than 0.32.5 (see
-            :data:`FFT_DISABLED_REASON`).
+        ValueError: If the image is not 2-D or 3-D or ``orders`` is empty.
     """
-    _require_fft_enabled()
     if image.ndim not in (2, 3):
         raise ValueError("Riesz Simoncelli filtering requires a 2-D or 3-D image")
     if not orders:

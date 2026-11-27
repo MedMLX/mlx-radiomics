@@ -65,7 +65,3 @@ modules
 Per-filter settings types such as `WaveletSettings` and `LoGSettings` are in
 {mod}`mlxradiomics.config.transforms`. Padding, pooling, Gabor response, LoG kernel,
 Fourier grid and Riesz base enumerations are in {mod}`mlxradiomics.config.filtering`.
-
-```{eval-rst}
-.. autodata:: mlxradiomics.filters.FFT_DISABLED_REASON
-```

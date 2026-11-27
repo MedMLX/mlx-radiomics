@@ -11,7 +11,6 @@ from math import ceil, factorial, prod, sqrt
 
 import numpy as np
 import pytest
-from conftest import requires_fft
 from numpy.typing import NDArray
 from radiomics_reference.real_images import hcc_patch
 
@@ -423,7 +422,6 @@ def test_planar_wave_alignment_concentrates_energy_in_the_first_component() -> N
             assert float(np.sum(response**2)) / energy < 1e-6
 
 
-@requires_fft
 def test_public_first_order_riesz_bank_scales_with_the_image() -> None:
     # Eigenvectors must not overflow or underflow at extreme image amplitudes.
     image = (hcc_patch((7, 7, 7))[0] / 512).astype(np.float32)
@@ -476,7 +474,6 @@ def test_tensor_rejects_remote_amplitude_that_erases_local_products() -> None:
         )
 
 
-@requires_fft
 def test_steered_pipeline_response_rotates_with_a_planar_wave() -> None:
     # An odd periodic cube has no Nyquist bin, so a 90-degree grid rotation maps the
     # DFT grid and the periodic tensor window onto themselves exactly.

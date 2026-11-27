@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import SimpleITK as sitk
-from conftest import requires_fft
 from numpy.typing import NDArray
 from radiomics_reference.mathematics import masked_neighborhood_mean
 from radiomics_reference.real_images import hcc_crop
@@ -136,7 +135,6 @@ def test_public_extraction_distinguishes_adjacent_float64_source_values(
     assert result.features["lbp-2D_firstorder_Mean"] == expected
 
 
-@requires_fft
 def test_parameter_driven_riesz_images_are_named_and_finite(tmp_path: Path) -> None:
     values, mask, _ = hcc_crop(np.s_[103:110, 214:222, 60:69])
     image, labels = sitk.GetImageFromArray(values), sitk.GetImageFromArray(mask)

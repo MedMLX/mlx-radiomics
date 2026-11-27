@@ -12,11 +12,6 @@ are evaluated in float64 with SciPy. An integer input whose sample remains
 tied at the threshold raises `ValueError`. Floating-point inputs must pass the
 source-precision checks for unambiguous binary comparisons.
 
-**Simoncelli and Riesz are unavailable.** Both filters need MLX 0.32.5 or later,
-and this release pins MLX 0.32.4, whose batched Metal FFT can write past its
-output buffer and silently modify another array. Requests raise `ValueError`.
-This covers both Riesz bases and steered variants. Other filters are available.
-
 **Numerics.** Feature arithmetic is float32 on Metal; binning is float64 on the
 host. Undefined features are NaN, for example `shape_CentreOfMassShift` for
 intensities that sum to exactly zero and the approximate-enclosing-ellipsoid
