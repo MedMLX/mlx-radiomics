@@ -8,6 +8,10 @@
 
 **Moment invariants.** The new `momentinvariant` family adds ten 3D ROI features: five moments of the ROI shape and five of its intensity that do not change under translation, rotation or uniform scaling, as defined in PySERA. `mlxradiomics.FEATURES` now lists 200 names.
 
+### Fixes
+
+**GLCM `Imc2` uses MLX's `expm1` directly.** MLX 0.32.5 corrects the GPU `expm1` argument reduction, so the four-step doubling workaround is gone. The worst relative error of `1 - exp(-y)` over `[0, 30]` drops from 2.8e-7 to 9.1e-8, which can change the last digit of `Imc2`.
+
 ## 1.2.0
 
 ### Fixes

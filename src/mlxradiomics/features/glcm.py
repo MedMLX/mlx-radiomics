@@ -285,16 +285,10 @@ def cluster_shade(sum_counts: mx.array, total: mx.array, dtype: mx.Dtype) -> mx.
 def one_minus_exp(y: mx.array) -> mx.array:
     """Return ``1 - exp(-y)`` for ``y >= 0`` to a few float32 ulps.
 
-    MLX's GPU ``expm1`` is about ``3.5e-6`` relative off for arguments in ``[0.1, 1]``
-    (MLX 0.32.4) but accurate below that. ``u = expm1(-y/16)`` stays in the accurate
-    range for the GLCM ``y = 2 MI <= 28``, and ``exp(-2t) - 1 = u (u + 2)`` with
-    ``u = exp(-t) - 1`` doubles back without cancellation, since ``u + 2`` lies in
-    ``(1, 2]``. Over ``y`` in ``[0, 30]`` the worst error is ``2.9e-7`` relative.
+    MLX 0.32.5's GPU ``expm1`` reduces its argument in two Cody-Waite steps; over
+    ``y`` in ``[0, 30]`` the worst error is ``9.1e-8`` relative.
     """
-    u = mx.expm1(y * -0.0625)
-    for _ in range(4):
-        u = u * (u + 2)
-    return -u
+    return -mx.expm1(-y)
 
 
 def _glcm_distributions(
