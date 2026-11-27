@@ -28,7 +28,7 @@ model weights to download. Requires Apple Silicon with Metal.
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "mlxradiomics>=1.2.0"
+uv pip install "mlxradiomics>=1.2.1"
 ```
 
 | Extra | Adds |
@@ -217,7 +217,6 @@ for all arguments, report fields, geometry and error handling.
 ## Limits
 
 - Shape and local intensity are ROI-only; local intensity needs 3D input.
-- Simoncelli and Riesz filters are unavailable on this release; see the limits guide.
 - Feature arithmetic is float32. Undefined values are NaN; overflow is infinity.
 - Read voxel maps with NiBabel; SimpleITK reads stored NaN voxels as zero.
 - Detached inputs such as `.nhdr` require a new output directory, even with

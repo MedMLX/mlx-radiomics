@@ -54,8 +54,8 @@ _MLX_VERSION = metadata.version("mlx")
 FFT_AVAILABLE = fft_available_on(_MLX_VERSION)
 FFT_DISABLED_REASON = (
     f"Simoncelli and Riesz filtering needs MLX 0.32.5 or later; this release of "
-    f"mlxradiomics pins MLX 0.32.4 (installed: {_MLX_VERSION}), whose batched FFT can "
-    "overrun its buffer and corrupt neighboring arrays."
+    f"mlxradiomics pins MLX 0.32.5 (installed: {_MLX_VERSION}); earlier batched FFTs can "
+    "overrun their buffer and corrupt neighboring arrays."
 )
 
 

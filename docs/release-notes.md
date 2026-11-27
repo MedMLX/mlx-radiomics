@@ -1,7 +1,11 @@
 # Release notes
 
 ## Unreleased
-"
+
+## 1.2.1
+
+**Simoncelli and Riesz filtering now runs.** 1.2.0 pinned MLX 0.32.4, whose batched Metal FFT can write past its output buffer, so it refused both filters with `ValueError`. 1.2.1 requires [MLX 0.32.5](https://github.com/ml-explore/mlx/releases/tag/v0.32.5), which fixes the FFT, and runs both Riesz bases and steered variants.
+
 ## 1.2.0
 
 ### Fixes
