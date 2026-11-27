@@ -26,7 +26,7 @@ from mlxradiomics.filters.convolution import (
     convolve_planes,
     pad_image,
 )
-from mlxradiomics.numerics.runtime import evaluate, mx
+from mlxradiomics.numerics.runtime import mx
 
 
 def _centered_coordinates(shape: tuple[int, ...]) -> tuple[mx.array, ...]:
@@ -125,9 +125,6 @@ def simoncelli_response(
     # The band gain is at most one.
     scale = _spectral_scale(image, tuple(image.shape[axis] for axis in axes), 1.0)
     spectrum = mx.fft.fftn(image / scale if scale != 1.0 else image, axes=axes)
-    # Evaluate the forward spectrum before the product and inverse FFT: a lazy
-    # forward FFT feeding them in one graph can return wrong values on some MLX builds.
-    evaluate(spectrum)
     response = mx.real(mx.fft.ifftn(spectrum * band, axes=axes))
     return response * scale if scale != 1.0 else response
 
@@ -414,8 +411,6 @@ def riesz_log_responses(
         [(0, padded.shape[axis] - kernel.shape[axis]) for axis in range(padded.ndim)],
     )
     base = mx.fft.fftn(weights, axes=axes)
-    # Evaluate both spectra before use; see the MLX FFT note in simoncelli_response.
-    evaluate(spectrum, base)
     crop = tuple(
         slice(2 * before, 2 * before + size)
         for (before, _), size in zip(widths, image.shape, strict=True)
@@ -473,8 +468,6 @@ def riesz_simoncelli_responses(
     # Band and Riesz multiplier gains are each at most one.
     scale = _spectral_scale(image, tuple(image.shape), 1.0)
     spectrum = mx.fft.fftn(image / scale if scale != 1.0 else image, axes=axes)
-    # Evaluate the spectrum before use; see the MLX FFT note in simoncelli_response.
-    evaluate(spectrum)
     return [
         mx.real(mx.fft.ifftn(
             spectrum * band * riesz_multiplier(
